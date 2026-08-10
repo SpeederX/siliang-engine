@@ -1,0 +1,269 @@
+name: Siliang CI
+
+on:
+  push:
+    branches:
+      - main
+      - 'siliang/**'
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+      - 'siliang/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: siliang-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+jobs:
+  validate-windows:
+    name: Validate Windows CPU
+    runs-on: windows-2022
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out full fork history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: gguf-py/pyproject.toml
+
+      - name: Install gguf-py
+        shell: pwsh
+        run: python -m pip install --disable-pip-version-check .\gguf-py
+
+      - name: Verify fork-root provenance
+        shell: pwsh
+        run: .\scripts\verify-snapshot.ps1
+
+      - name: Run hygiene and model-free tests
+        shell: pwsh
+        run: .\scripts\test.ps1 -PythonExecutable python
+
+      - name: Configure and build CPU Release
+        shell: pwsh
+        run: |
+          $buildDirectory = Join-Path $env:RUNNER_TEMP ("siliang-validation-{0}-{1}" -f $env:GITHUB_RUN_ID, $env:GITHUB_RUN_ATTEMPT)
+          .\scripts\build.ps1 -Backend Cpu -BuildDirectory $buildDirectory -Parallel 2
+          "SILIANG_CI_BUILD=$buildDirectory" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Run selected model-free CTests
+        shell: pwsh
+        run: .\scripts\test.ps1 -PythonExecutable python -BuildDirectory $env:SILIANG_CI_BUILD
+
+  package-windows:
+    name: Package Windows ${{ matrix.label }}
+    needs: validate-windows
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-2022
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - backend: Cpu
+            label: CPU
+            slug: cpu
+            cuda_architecture: ''
+          - backend: Cuda
+            label: CUDA 13.2 sm75
+            slug: cuda-13.2-sm75
+            cuda_architecture: '75'
+
+    steps:
+      - name: Check out full fork history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify fork-root provenance
+        shell: pwsh
+        run: .\scripts\verify-snapshot.ps1
+
+      - name: Install CUDA Toolkit 13.2
+        if: matrix.backend == 'Cuda'
+        # Jimver/cuda-toolkit v0.2.35
+        uses: Jimver/cuda-toolkit@3d45d157f327c09c04b50ee6ccdea2d9d017ec76
+        with:
+          cuda: '13.2.0'
+          use-github-cache: false
+          use-local-cache: false
+
+      - name: Build fresh Release directory
+        shell: pwsh
+        run: |
+          $buildDirectory = Join-Path $env:RUNNER_TEMP ("siliang-release-${{ matrix.slug }}-{0}-{1}" -f $env:GITHUB_RUN_ID, $env:GITHUB_RUN_ATTEMPT)
+          $env:SOURCE_DATE_EPOCH = (& git show -s --format=%ct $env:GITHUB_SHA).Trim()
+          if ('${{ matrix.backend }}' -eq 'Cuda') {
+              .\scripts\build.ps1 -Backend Cuda -CudaArchitecture '${{ matrix.cuda_architecture }}' -BuildDirectory $buildDirectory -Parallel 2
+          } else {
+              .\scripts\build.ps1 -Backend Cpu -BuildDirectory $buildDirectory -Parallel 2
+          }
+          "SILIANG_RELEASE_BUILD=$buildDirectory" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Package runtime and provenance
+        id: package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = $env:GITHUB_REF_NAME
+          if ($tag -notmatch '^v[0-9A-Za-z][0-9A-Za-z._-]*$') {
+              throw "Release tag is not safe for an artifact name: $tag"
+          }
+
+          $artifactName = "siliang-engine-$tag-windows-x64-${{ matrix.slug }}"
+          $packageRoot = Join-Path $env:RUNNER_TEMP $artifactName
+          $binTarget = Join-Path $packageRoot 'bin'
+          $licenseTarget = Join-Path $packageRoot 'licenses'
+          $provenanceTarget = Join-Path $packageRoot 'provenance'
+          $scriptTarget = Join-Path $packageRoot 'scripts'
+          New-Item -ItemType Directory -Path $binTarget, $licenseTarget, $provenanceTarget, $scriptTarget | Out-Null
+
+          $binSource = Join-Path $env:SILIANG_RELEASE_BUILD 'bin\Release'
+          foreach ($fileName in @('llama-server.exe', 'llama-cli.exe')) {
+              $source = Join-Path $binSource $fileName
+              if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+                  throw "Expected release binary was not built: $source"
+              }
+              Copy-Item -LiteralPath $source -Destination $binTarget
+          }
+
+          $runtimeLibraries = @(Get-ChildItem -LiteralPath $binSource -Filter '*.dll' -File)
+          if ($runtimeLibraries.Count -eq 0) {
+              throw "No runtime libraries were found in $binSource"
+          }
+          foreach ($runtimeLibrary in $runtimeLibraries) {
+              Copy-Item -LiteralPath $runtimeLibrary.FullName -Destination $binTarget
+          }
+
+          if ('${{ matrix.backend }}' -eq 'Cuda') {
+              $cudaRuntimeFiles = @()
+              foreach ($searchRoot in @(
+                  (Join-Path $env:CUDA_PATH 'bin'),
+                  (Join-Path $env:CUDA_PATH 'bin\x64'),
+                  (Join-Path $env:CUDA_PATH 'lib')
+              )) {
+                  if (Test-Path -LiteralPath $searchRoot -PathType Container) {
+                      foreach ($pattern in @('cudart64_*.dll', 'cublas64_*.dll', 'cublasLt64_*.dll')) {
+                          $cudaRuntimeFiles += Get-ChildItem -LiteralPath $searchRoot -Filter $pattern -File
+                      }
+                  }
+              }
+              $cudaRuntimeFiles = @($cudaRuntimeFiles | Sort-Object -Property Name -Unique)
+              if ($cudaRuntimeFiles.Count -lt 3) {
+                  throw 'The CUDA runtime package is incomplete.'
+              }
+              foreach ($cudaRuntimeFile in $cudaRuntimeFiles) {
+                  Copy-Item -LiteralPath $cudaRuntimeFile.FullName -Destination $binTarget
+              }
+
+              foreach ($licenseName in @('EULA.txt', 'LICENSE')) {
+                  $cudaLicense = Join-Path $env:CUDA_PATH $licenseName
+                  if (Test-Path -LiteralPath $cudaLicense -PathType Leaf) {
+                      Copy-Item -LiteralPath $cudaLicense -Destination (Join-Path $licenseTarget "NVIDIA-CUDA-$licenseName")
+                  }
+              }
+          }
+
+          Copy-Item -LiteralPath '.\README.md', '.\THIRD_PARTY_NOTICES.md', '.\LICENSE' -Destination $packageRoot
+          foreach ($licenseFile in (Get-ChildItem -LiteralPath '.\licenses' -File)) {
+              Copy-Item -LiteralPath $licenseFile.FullName -Destination $licenseTarget
+          }
+          Copy-Item -LiteralPath '.\vendor\cpp-httplib\LICENSE' -Destination (Join-Path $licenseTarget 'CPP-HTTPLIB-MIT.txt')
+          Copy-Item -LiteralPath '.\docs\PROVENANCE.md', '.\docs\source-manifest.json', '.\patches\siliang-engine.patch' -Destination $provenanceTarget
+          Copy-Item -LiteralPath '.\scripts\siliang-env.ps1' -Destination $scriptTarget
+
+          $cmakeVersion = (& cmake --version | Select-Object -First 1)
+          $buildInfo = @(
+              "tag=$tag"
+              "commit=$env:GITHUB_SHA"
+              "upstream_base=07132750825a4f2d27a547cd9cdde1c6f6001885"
+              "backend=${{ matrix.backend }}"
+              "cuda_toolkit=$(if ('${{ matrix.backend }}' -eq 'Cuda') { '13.2.0' } else { 'none' })"
+              "cuda_architecture=$(if ('${{ matrix.backend }}' -eq 'Cuda') { '${{ matrix.cuda_architecture }}' } else { 'none' })"
+              "runner_image=$env:ImageOS"
+              "runner_image_version=$env:ImageVersion"
+              "cmake=$cmakeVersion"
+              'ggml_native=OFF (SOURCE_DATE_EPOCH set from the tagged commit)'
+          )
+          [IO.File]::WriteAllLines(
+              (Join-Path $provenanceTarget 'BUILD-INFO.txt'),
+              $buildInfo,
+              [Text.UTF8Encoding]::new($false)
+          )
+
+          $zipPath = Join-Path $env:RUNNER_TEMP "$artifactName.zip"
+          Compress-Archive -LiteralPath $packageRoot -DestinationPath $zipPath -CompressionLevel Optimal
+          $digest = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          $checksumPath = "$zipPath.sha256"
+          [IO.File]::WriteAllText(
+              $checksumPath,
+              "$digest  $([IO.Path]::GetFileName($zipPath))`n",
+              [Text.UTF8Encoding]::new($false)
+          )
+
+          "artifact_name=$artifactName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "zip_path=$zipPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "checksum_path=$checksumPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Upload verified package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.artifact_name }}
+          path: |
+            ${{ steps.package.outputs.zip_path }}
+            ${{ steps.package.outputs.checksum_path }}
+          if-no-files-found: error
+          retention-days: 30
+
+  publish-checksums:
+    name: Publish release checksums
+    needs: package-windows
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-2022
+    timeout-minutes: 15
+
+    steps:
+      - name: Download release packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: siliang-engine-${{ github.ref_name }}-windows-x64-*
+          path: ${{ runner.temp }}/siliang-packages
+          merge-multiple: true
+
+      - name: Create SHA256SUMS
+        id: checksums
+        shell: pwsh
+        run: |
+          $packages = @(Get-ChildItem -LiteralPath (Join-Path $env:RUNNER_TEMP 'siliang-packages') -Filter '*.zip' -File)
+          if ($packages.Count -ne 2) {
+              throw "Expected two release packages, found $($packages.Count)."
+          }
+          $lines = foreach ($package in ($packages | Sort-Object -Property Name)) {
+              $digest = (Get-FileHash -LiteralPath $package.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+              "$digest  $($package.Name)"
+          }
+          $checksumPath = Join-Path $env:RUNNER_TEMP 'SHA256SUMS'
+          [IO.File]::WriteAllLines($checksumPath, $lines, [Text.UTF8Encoding]::new($false))
+          "checksum_path=$checksumPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Upload SHA256SUMS
+        uses: actions/upload-artifact@v4
+        with:
+          name: siliang-engine-${{ github.ref_name }}-SHA256SUMS
+          path: ${{ steps.checksums.outputs.checksum_path }}
+          if-no-files-found: error
+          retention-days: 30

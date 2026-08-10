@@ -1,0 +1,62 @@
+{
+  "schema": 3,
+  "project": "siliang-engine",
+  "layout": "fork-root",
+  "repository": {
+    "origin": "https://github.com/SpeederX/siliang-engine",
+    "upstream": "https://github.com/ggml-org/llama.cpp"
+  },
+  "upstream": {
+    "base": "07132750825a4f2d27a547cd9cdde1c6f6001885",
+    "tag": "b10270",
+    "rootTree": "46f77bf060878e2b3b9d7c43b4d8a3a566ba3384"
+  },
+  "source": {
+    "canonicalPatch": {
+      "path": "patches/siliang-engine.patch",
+      "sha256": "A4FE4D79DCBF0E17F04979ECECEA08C3C9DC7B7FF90AA959DE44774ADD127FF6",
+      "gitBlob": "81744cd073906cee6819312e8acd03270f745b65"
+    },
+    "engineDelta": {
+      "insertions": 2303,
+      "deletions": 4,
+      "files": [
+        {
+          "path": "ggml/include/ggml-cpu.h",
+          "status": "modified",
+          "mode": "100644",
+          "baseBlob": "dc6453c6eaa16667f720f987659ad42d03a403a2",
+          "finalBlob": "326ac4abc9333328f03e2bb0e67668c4c797df08"
+        },
+        {
+          "path": "ggml/src/ggml-cpu/ggml-cpu.c",
+          "status": "modified",
+          "mode": "100644",
+          "baseBlob": "491316f7491252248d6f74a60440d3efa7aa6177",
+          "finalBlob": "9c18ea720354a1e82be5aa67c286ada4dea96f8d"
+        },
+        {
+          "path": "ggml/src/ggml-cpu/siliangem_moe_cache.h",
+          "status": "added",
+          "mode": "100644",
+          "baseBlob": null,
+          "finalBlob": "7b151a326decaec47585bdadf8ca567b616ab868"
+        },
+        {
+          "path": "src/llama-model-loader.cpp",
+          "status": "modified",
+          "mode": "100644",
+          "baseBlob": "b31e92e2da7ef42eabbb47173bb1f2088c952f39",
+          "finalBlob": "7241fd79312f7ff6812cd8492df361b3e637e7ae"
+        },
+        {
+          "path": "src/llama-model-loader.h",
+          "status": "modified",
+          "mode": "100644",
+          "baseBlob": "d6b31c2311186608f48e88d1a37c23adc7e1b0c7",
+          "finalBlob": "47da6c71417e9934f7c3ed40824119bfd9970c0e"
+        }
+      ]
+    }
+  }
+}

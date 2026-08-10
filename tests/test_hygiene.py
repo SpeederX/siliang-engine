@@ -1,0 +1,99 @@
+from __future__ import annotations
+
+from pathlib import Path
+import re
+import unittest
+
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+SILIANG_AUTHORED_FILES = (
+    ".gitattributes",
+    ".github/ISSUE_TEMPLATE/bug_report.md",
+    ".github/workflows/ci.yaml",
+    ".gitignore",
+    "README.md",
+    "SILIANG_AGENTS.md",
+    "THIRD_PARTY_NOTICES.md",
+    "assets/siliang-engine.png",
+    "docs/CONFIGURATION.md",
+    "docs/PERFORMANCE.md",
+    "docs/PROVENANCE.md",
+    "docs/REPOSITORY_LAYOUT.md",
+    "docs/source-manifest.json",
+    "licenses/Apache-2.0.txt",
+    "licenses/LLVM-exception.txt",
+    "licenses/SILIANG-ENGINE-MIT.txt",
+    "patches/siliang-engine.patch",
+    "scripts/README.md",
+    "scripts/build.ps1",
+    "scripts/check_expert_major.py",
+    "scripts/preflight_repack.py",
+    "scripts/repack-model.ps1",
+    "scripts/runtime-gate.ps1",
+    "scripts/siliang-env.ps1",
+    "scripts/test.ps1",
+    "scripts/verify-snapshot.ps1",
+    "tests/test_arena_opt_in_contract.py",
+    "tests/test_converter.py",
+    "tests/test_hygiene.py",
+    "tests/test_repack_wrapper.py",
+    "tests/test_runtime_gate.py",
+    "tests/test_siliang_env.py",
+    "tests/test_stock_arena_contract.py",
+    "tools/README.md",
+    "tools/gguf_reader.py",
+    "tools/make_expert_major_gguf.py",
+)
+ENGINE_DELTA_FILES = (
+    "ggml/include/ggml-cpu.h",
+    "ggml/src/ggml-cpu/siliangem_moe_cache.h",
+    "ggml/src/ggml-cpu/ggml-cpu.c",
+    "src/llama-model-loader.cpp",
+    "src/llama-model-loader.h",
+)
+
+
+class PublicTreeHygieneTests(unittest.TestCase):
+    def test_no_machine_bound_paths_or_obvious_secrets(self) -> None:
+        patterns = {
+            "Windows user-profile path": re.compile(r"[A-Za-z]:[\\/]+Users[\\/]+[^\\/\r\n]+", re.IGNORECASE),
+            "Unix home path": re.compile(r"/(?:home|Users)/[^/\s]+/"),
+            "private-key header": re.compile("-----BEGIN " + r"(?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
+            "AWS access-key shape": re.compile(r"AKIA[0-9A-Z]{16}"),
+            "GitHub token shape": re.compile(r"gh[pousr]_[A-Za-z0-9]{36,255}"),
+        }
+        delta_only_patterns = {
+            "missing private-history document": re.compile(r"\b(?:PLAN|STATUS)\.md\b", re.IGNORECASE),
+            "private launch script": re.compile(r"\brun_server\.bat\b", re.IGNORECASE),
+            "private ticket identifier": re.compile(
+                r"\b(?:T-\d{3,}|(?:RS|GX|GZ2?|TS|TA|ST|SP|A|E)-20\d{2}-\d{2}-\d{2}(?:-[A-Za-z0-9-]+)?)\b"
+            ),
+            "private job path": re.compile(r"(?:\.claude|\.codex)[\\/]jobs[\\/]", re.IGNORECASE),
+        }
+        failures: list[str] = []
+
+        for relative_text in SILIANG_AUTHORED_FILES:
+            path = REPOSITORY_ROOT / relative_text
+            if not path.is_file():
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError):
+                continue
+            for label, pattern in patterns.items():
+                if pattern.search(text):
+                    failures.append(f"{relative_text}: {label}")
+
+        for relative_text in ENGINE_DELTA_FILES:
+            path = REPOSITORY_ROOT / relative_text
+            self.assertTrue(path.is_file(), f"required hygiene target is missing: {relative_text}")
+            text = path.read_text(encoding="utf-8")
+            for label, pattern in {**patterns, **delta_only_patterns}.items():
+                if pattern.search(text):
+                    failures.append(f"{relative_text}: {label}")
+
+        self.assertEqual(failures, [], "public-tree hygiene failures:\n" + "\n".join(failures))
+
+
+if __name__ == "__main__":
+    unittest.main()

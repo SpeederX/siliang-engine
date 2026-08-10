@@ -1,0 +1,3 @@
+# Siliang provenance hashes are over LF bytes and must be stable on Windows.
+/patches/*.patch text eol=lf
+/docs/source-manifest.json text eol=lf

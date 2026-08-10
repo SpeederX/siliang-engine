@@ -1,124 +1,199 @@
-# llama.cpp
+# Siliang Engine
 
-![llama](https://raw.githubusercontent.com/ggml-org/llama.brand/refs/heads/master/cover/llama-cpp/cover-llama-cpp-dark.svg)
+> Four ounces can move a thousand pounds.
 
-<div align="center">
+![Siliang Engine](assets/siliang-engine.png)
 
-<b>LLM inference in C/C++</b>
+Siliang Engine is an experimental inference engine maintained as a fork of
+[`llama.cpp`](https://github.com/ggml-org/llama.cpp). It applies small,
+high-leverage changes to the Windows Mixture-of-Experts (MoE) data path so very
+large models can make better use of limited workstation memory.
 
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![Release](https://img.shields.io/github/v/release/ggml-org/llama.cpp)](https://github.com/ggml-org/llama.cpp/releases)
-[![Server](https://github.com/ggml-org/llama.cpp/actions/workflows/server.yml/badge.svg)](https://github.com/ggml-org/llama.cpp/actions/workflows/server.yml)
-[![Docker](https://github.com/ggml-org/llama.cpp/actions/workflows/docker.yml/badge.svg)](https://github.com/ggml-org/llama.cpp/actions/workflows/docker.yml)
-[![Winget](https://github.com/ggml-org/llama.cpp/actions/workflows/winget.yml/badge.svg)](https://github.com/ggml-org/llama.cpp/actions/workflows/winget.yml)
+Its core and recommended workflow combines an expert-major GGUF with a dedicated
+RAM arena and direct, overlapped storage reads. Repacking places each routed
+expert where the engine can fetch it efficiently; the runtime then serves those
+experts without depending only on ordinary Windows mmap paging. The arena can
+also accelerate compatible monolithic stock GGUFs. In validated workloads, the
+recommended expert-major path has approached twice the decode throughput of the
+standard mmap baseline.
 
-[manifesto](https://github.com/ggml-org/llama.cpp/discussions/205) / [ggml](https://github.com/ggml-org/ggml) / [ops](https://github.com/ggml-org/llama.cpp/blob/master/docs/ops.md) / [maintainer PRs](https://github.com/ggml-org/llama.cpp/issues?q=is%3Apr%20is%3Aopen%20draft%3AFalse%20(author%3Argerganov%20OR%20author%3AKitaitiMakoto%20OR%20author%3Adanbev%20OR%20author%3Aaldehir%20OR%20author%3Amax-krasnyansky%20OR%20author%3ACISC%20OR%20author%3Aggerganov%20OR%20author%3Aam17an%20OR%20author%3Abartowski1182%20OR%20author%3Ahipudding%20OR%20author%3AServeurpersoCom%20OR%20author%3Apwilkin%20OR%20author%3Areeselevine%20OR%20author%3Angxson%20OR%20author%3Ajeffbolznv%20OR%20author%3A0cc4m%20OR%20author%3Aangt%20OR%20author%3AIMbackK%20OR%20author%3Aarthw%20OR%20author%3AJohannesGaessler%20OR%20author%3AORippler%20OR%20author%3Aruixiang63%20OR%20author%3Axctan%20OR%20author%3Aallozaur%20OR%20author%3Ayomaytk%20OR%20author%3Aaendk%20OR%20author%3Agaugarg-nv%20OR%20author%3Ataronaeo%20OR%20author%3Aforforever73%20OR%20author%3Alhez%20OR%20author%3Anetrunnereve%20OR%20author%3Afairydreaming)%20sort%3Aupdated-desc) / [dev branches](https://github.com/ggml-org/llama.cpp-dev/blob/master/README-features.md) / [compile times](https://github.com/ggml-org/llama.cpp-dev/blob/master/README-compile-times.md) / [lib llama API](https://github.com/ggml-org/llama.cpp/issues/9289) / [llama-server REST API](https://github.com/ggml-org/llama.cpp/issues/9291)
+Windows is supported today. Linux support is planned.
 
-</div>
+The arena is opt-in: without an explicit positive `SILIANGEM_CACHE_MIB`, the
+engine keeps the ordinary mmap path and allocates no arena memory.
 
-## Quick start
+## Quickstart
 
-A few options to get `llama.cpp` installed on your machine:
+1. Build Siliang Engine using the [build instructions](#build) below.
+2. For the recommended path, prepare the source model as an expert-major GGUF
+   by following [`tools/README.md`](tools/README.md). A compatible monolithic
+   stock GGUF can also use the arena without repacking.
+3. In the same PowerShell session, explicitly enable the Siliang path with an
+   arena size measured for your machine and workload:
 
-- Visit https://llama.app and follow the instructions
-- Run with Docker - see our [Docker documentation](docs/docker.md)
-- Download pre-built binaries from the [releases page](https://github.com/ggml-org/llama.cpp/releases)
-- Build from source by cloning this repository - check out [our build guide](docs/build.md)
+   ```powershell
+   .\scripts\siliang-env.ps1 -CacheMiB <measured-MiB>
+   ```
 
-Once installed:
+   Add `-Verbose` for cache statistics or `-NoMemoryReport` to suppress the
+   periodic system-memory report. Use `-Show` to inspect the active settings.
+4. Start the built `llama-cli` or `llama-server` with the expert-major model, or
+   with a compatible monolithic stock GGUF.
 
-```sh
-# Download and run a model directly from Hugging Face
-llama cli -hf ggml-org/Qwen3.5-0.8B-GGUF
+```powershell
+& "<build-directory>\bin\Release\llama-cli.exe" `
+    -m "<expert-major-model.gguf>" `
+    -p "<prompt>" `
+    -n 32
 
-# Launch OpenAI-compatible API server
-llama serve -hf ggml-org/Qwen3.5-0.8B-GGUF
+.\scripts\siliang-env.ps1 -Reset
 ```
 
-<table align="center">
-    <tr>
-        <td align="center" width=50%>
-            <img width="1310" height="888" alt="VLM session with `llama cli`" src="https://github.com/user-attachments/assets/88726b48-1713-48aa-a525-95a02e78afc4" />
-            <i>VLM session with <b>llama cli</b></i>
-        </td>
-        <td align="center">
-            <img width="1392" height="958" alt="Built-in web UI against `llama serve` running Qwen 3.6" src="https://github.com/user-attachments/assets/b402f972-2e32-4def-8771-8d849f08cf2e" />
-            <i>Built-in web UI against <b>llama serve</b></i>
-        </td>
-    </tr>
-<table>
+Use a cache budget that leaves room for Windows, the model's non-expert
+weights, KV cache, and GPU shared-memory pressure. Larger is not automatically
+better. To run a deliberate mmap control instead, use
+`.\scripts\siliang-env.ps1 -Disable`. See
+[`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) for all helper modes.
 
-## Description
+## Performance
 
-The main goal of `llama.cpp` is to enable LLM (and VLM) inference with minimal setup and state-of-the-art performance on
-a wide range of hardware - locally and in the cloud.
+Values below are experimental decode throughput. Each row names its paired
+control; the current layout comparison keeps the arena enabled in both arms,
+while the arena comparisons use an explicit mmap control. Raw measurements,
+settings, calculations, and evidence limitations are in
+[`docs/PERFORMANCE.md`](docs/PERFORMANCE.md).
 
-- Plain C/C++ implementation without any dependencies
-- Apple silicon is a first-class citizen - optimized via ARM NEON, Accelerate and Metal frameworks
-- AVX, AVX2, AVX512 and AMX support for x86 architectures
-- RVV, ZVFH, ZFH, ZICBOP and ZIHINTPAUSE support for RISC-V architectures
-- 1.5-bit, 2-bit, 3-bit, 4-bit, 5-bit, 6-bit, and 8-bit integer quantization for faster inference and reduced memory use
-- Custom CUDA kernels for running LLMs on NVIDIA GPUs (support for AMD GPUs via HIP and Moore Threads GPUs via MUSA)
-- Vulkan and SYCL backend support
-- CPU+GPU hybrid inference to partially accelerate models larger than the total VRAM capacity
+| Model | Baseline path | Siliang path | Speedup | Evidence |
+| --- | --- | --- | ---: | --- |
+| DeepSeek V4 Flash 0731, expert-major layout | Stock GGUF, 18 GiB arena: 2.274 tok/s median (2.269-2.407) | Expert-major GGUF, same 18 GiB arena: 2.774 tok/s median (2.689-2.850) | 1.22x (+22.0%) | [Current fully cold layout benchmark](docs/PERFORMANCE.md#current-fully-cold-expert-major-layout-benchmark-2026-08-10), n=3 per arm |
+| DeepSeek V4 Flash 0731, stock GGUF | Stock GGUF mmap: 1.375 tok/s median (1.375-1.414) | Same stock GGUF, 18 GiB arena: 2.291 tok/s median (2.217-2.385) | 1.67x (+66.6%) | [Current same-file benchmark](docs/PERFORMANCE.md#current-stock-gguf-arena-benchmark-2026-08-10), n=3 per arm |
+| DeepSeek V4 (pre-0731) | Stock GGUF mmap: 1.098 tok/s median (1.083-1.104) | 2.246 tok/s median (2.171-2.257) | 2.05x (+104.6%) | [Historical matched run](docs/PERFORMANCE.md#deepseek-v4-pre-0731), n=3 per arm |
+| gpt-oss-120B | Same repacked GGUF on mmap: 1.972 tok/s median (1.964-2.030) | 4.052 tok/s median (3.953-4.094) | 2.06x (+105.5%) | [Historical matched run](docs/PERFORMANCE.md#gpt-oss-120b), n=3 per arm |
 
-The `llama.cpp` project is build on top of the [ggml](https://github.com/ggml-org/ggml) library.
+The current 0731 layout row directly isolates the present repack: both arms use
+the same binary, disk, 18 GiB arena, and request, with the standby list purged
+before every process start.
+All six 256-token outputs were byte-identical, and every expert-major repetition
+was faster than every stock repetition. The repack moved nearly the same bytes
+but reduced engine expert-read requests from 34,866 to 11,653 and total process
+read operations from 37,945 to 14,418. This +22.0% result describes the current
+experimental layout, not a guaranteed gain or a ceiling for future layout and
+routing work.
 
-## Supported backends
+The separate current stock-GGUF row isolates the arena against mmap. The older
+DeepSeek row is a matched historical experiment. A comparable gpt-oss stock
+GGUF control was not retained, so that row isolates the arena using the same
+repacked file on both paths; it must not be presented as a stock-model
+comparison. The earlier 0731 expert-major precursor remains documented in the
+detailed evidence, but it is no longer the basis for the direct layout claim.
+See the evidence labels when comparing results from different tiers.
 
-| Backend | Target devices |
-| --- | --- |
-| [BLAS](docs/build.md#blas-build) | All |
-| [BLIS](docs/backend/BLIS.md) | All |
-| [CANN](docs/build.md#cann) | Ascend NPU |
-| [CUDA](docs/build.md#cuda) | Nvidia GPU |
-| [HIP](docs/build.md#hip) | AMD GPU |
-| [Hexagon [In Progress]](docs/backend/snapdragon/README.md) | Snapdragon |
-| [IBM zDNN](docs/backend/zDNN.md) | IBM Z & LinuxONE |
-| [MUSA](docs/build.md#musa) | Moore Threads GPU |
-| [Metal](docs/build.md#metal-build) | Apple Silicon |
-| [OpenCL](docs/backend/OPENCL.md) | Adreno GPU |
-| [OpenVINO [In Progress]](docs/backend/OPENVINO.md) | Intel CPUs, GPUs, and NPUs |
-| [RPC](https://github.com/ggml-org/llama.cpp/tree/master/tools/rpc) | All |
-| [SYCL](docs/backend/SYCL.md) | Intel GPU |
-| [VirtGPU](docs/backend/VirtGPU.md) | VirtGPU APIR |
-| [Vulkan](docs/build.md#vulkan) | GPU |
-| [WebGPU](docs/build.md#webgpu) | All |
-| [ZenDNN](docs/build.md#zendnn) | AMD CPU |
+The benchmark workstation runs Windows 11 on an
+[ASUS ROG Strix B450-F Gaming](https://rog.asus.com/motherboards/rog-strix/rog-strix-b450-f-gaming-model/spec/)
+motherboard with an AMD Ryzen 5 2600, 24 GB of system RAM, an NVIDIA GeForce
+RTX 2070 with 8 GB of VRAM, and a 1 TB
+[WD_BLACK SN850X](https://www.sandisk.com/en-us/products/ssd/internal-ssd/wd-black-sn850x-nvme-ssd)
+NVMe SSD. The drive supports PCIe Gen4 x4, but this Ryzen 2000-series B450
+platform exposes its M.2 link as PCIe 3.0 x4. Using PCIe 3.0's 8 GT/s rate and
+128b/130b encoding, that is about 3.94 GB/s of theoretical payload bandwidth
+per direction before protocol, storage, and workload overhead; the calculation
+is consistent with the [PCI-SIG bandwidth table](https://pcisig.com/how-does-pcie-30-8gts-double-pcie-20-5gts-bit-rate).
+
+## What is included
+
+- A Windows MoE runtime that streams routed experts through a configurable RAM
+  arena using direct, overlapped I/O.
+- The expert-major GGUF preparation workflow for the core and recommended
+  Siliang path, plus validated arena support for compatible monolithic stock
+  GGUFs.
+- CPU and CUDA build entry points for this `llama.cpp` fork.
+- Reproducible model-free checks, runtime validation tooling, and source
+  provenance records.
+
+See [`docs/REPOSITORY_LAYOUT.md`](docs/REPOSITORY_LAYOUT.md) for the complete
+repository map.
+
+## Build
+
+Run the build script from PowerShell at the repository root on 64-bit Windows.
+Build directories are supplied by the caller.
+
+CPU:
+
+```powershell
+.\scripts\build.ps1 -Backend Cpu -BuildRoot "<build-root>"
+```
+
+CUDA requires the GPU compute capability. For example, use `75` only for a GPU
+whose CUDA compute capability is 7.5.
+
+```powershell
+.\scripts\build.ps1 `
+    -Backend Cuda `
+    -CudaArchitecture "<compute-capability>" `
+    -BuildRoot "<build-root>"
+```
+
+The scripts produce Release builds and do not choose a model or inference
+settings for you. More details are in [`scripts/README.md`](scripts/README.md).
+
+## Credits
+
+Siliang Engine is built on [`llama.cpp`](https://github.com/ggml-org/llama.cpp),
+created by [Georgi Gerganov](https://github.com/ggerganov) and developed by the
+ggml and llama.cpp contributors. Their work made this experimental spin-off
+possible.
+
+The exact upstream revision, the Siliang delta, and the reconstruction checks
+are recorded in [`docs/PROVENANCE.md`](docs/PROVENANCE.md).
+
+Siliang's SSD expert-streaming and resident-cache design was inspired by
+[DwarfStar](https://github.com/antirez/ds4) by
+[Salvatore Sanfilippo](https://github.com/antirez). Siliang is an independent
+Windows/llama.cpp implementation: it uses a committed system-RAM arena and an
+expert-major GGUF so one routed expert can be fetched with one contiguous
+read. No DwarfStar code is included.
+
+Its measure-first, reads-per-token memory-tiering method was also inspired by
+[ESP32-AI](https://github.com/slvDev/esp32-ai) by
+[Viacheslav Sierbov](https://github.com/slvDev). ESP32-AI demonstrated
+access-pattern-aware placement and load-time staging across flash, PSRAM, and
+SRAM. Siliang applies that engineering discipline to routed MoE experts; its
+fixed-slot arena and overlapped Windows I/O path are separate implementations.
 
 ## Documentation
 
-#### Tools
-
-- [cli](tools/cli/README.md)
-- [completion](tools/completion/README.md)
-- [server](tools/server/README.md)
-- [GBNF grammars](grammars/README.md)
-
-#### Development
-
-- [How to build](docs/build.md)
-- [Running on Docker](docs/docker.md)
-- [Build on Android](docs/android.md)
-- [Multi-GPU usage](docs/multi-gpu.md)
-- [Performance troubleshooting](docs/development/token_generation_performance_tips.md)
-- [GGML tips & tricks](https://github.com/ggml-org/llama.cpp/wiki/GGML-Tips-&-Tricks)
-- [XCFramework](docs/xcframework.md)
-- [Completions](docs/completions.md)
-- [Models](docs/models.md)
+- [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) - runtime configuration and
+  reset workflow.
+- [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) - raw benchmark evidence,
+  calculations, and evidence limits.
+- [`tools/README.md`](tools/README.md) - expert-major model preparation.
+- [`scripts/README.md`](scripts/README.md) - build, checks, and runtime-gate
+  commands.
+- [`docs/PROVENANCE.md`](docs/PROVENANCE.md) - upstream identity and patch
+  provenance.
 
 ## Contributing
 
-- Contributors can open PRs
-- Collaborators will be invited based on contributions
-- Maintainers can push to branches in the `llama.cpp` repo and merge PRs into the `master` branch
-- Any help with managing issues, PRs and projects is very appreciated!
-- Read the [CONTRIBUTING.md](CONTRIBUTING.md) for more information
+Open a bug report using the
+[`bug report template`](.github/ISSUE_TEMPLATE/bug_report.md). Include the
+operating system, RAM, VRAM, storage class, issue kind, reproduction steps, and
+any additional notes.
 
-## Acknowledgements
+Contributors and coding agents should follow both the upstream
+[`AGENTS.md`](AGENTS.md) guidance and the Siliang-specific
+[`SILIANG_AGENTS.md`](SILIANG_AGENTS.md) rules.
 
-- [yhirose/cpp-httplib](https://github.com/yhirose/cpp-httplib) - Single-header HTTP server, used by `llama-server` - MIT license
-- [stb-image](https://github.com/nothings/stb) - Single-header image format decoder, used by multimodal subsystem - Public domain
-- [nlohmann/json](https://github.com/nlohmann/json) - Single-header JSON library, used by various tools/examples - MIT License
-- [miniaudio.h](https://github.com/mackron/miniaudio) - Single-header audio format decoder, used by multimodal subsystem - Public domain
-- [subprocess.h](https://github.com/sheredom/subprocess.h) - Single-header process launching solution for C and C++ - Public domain
+### Tagged artifacts
+
+Pushing a `v*` tag runs validation, then builds checksummed Windows CPU and
+CUDA packages. Actions retains them for 30 days; the workflow does not publish
+a GitHub Release, so maintainers review and promote the artifacts separately.
+
+## License
+
+The upstream `llama.cpp` source at the repository root remains under its MIT
+License in [`LICENSE`](LICENSE). Siliang Engine additions are available under
+the separate [`licenses/SILIANG-ENGINE-MIT.txt`](licenses/SILIANG-ENGINE-MIT.txt).
+Bundled third-party components retain their own notices; see
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).

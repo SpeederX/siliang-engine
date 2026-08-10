@@ -1531,6 +1531,159 @@ static void * incr_ptr_aligned(void ** p, size_t size, size_t align) {
     return ptr;
 }
 
+// ---- batched MoE expert prefetch (Siliang Engine Lever 0) ------------------
+// For a mmap'd out-of-core MoE, the routed-expert weights for a token are not
+// resident, so each chunk of the matmul below can fault them in small pages,
+// synchronously and with little queue depth. Batched requests can expose more
+// storage parallelism, but the effect must be measured on the target system.
+//
+// matrix_row_counts[] is complete after the barrier below, so the exact set of
+// experts this call will touch is known. Issuing them as ONE batched
+// PrefetchVirtualMemory turns thousands of serial faults into a single async
+// request. It is a hint, not a load: threads may still fault, but against I/O
+// that is already in flight and coalesced.
+//
+// Toggle with GGML_MOE_PREFETCH=0 so baseline and patched are the same binary.
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include "siliangem_moe_cache.h"
+
+// Siliang Engine: receive the expert-major source from the model loader.
+// Copied rather than referenced: the loader's vectors do not outlive loading,
+// while the cache is consulted for the life of the process.
+void ggml_siliangem_set_expert_source(
+        const char * path, int n_layers, int n_experts, int n_parts,
+        const uint64_t * base, const uint32_t * stride,
+        const uint32_t * poff, const uint32_t * pbytes,
+        const char * part_names) {
+#if defined(_WIN32)
+    if (!path || n_layers <= 0 || n_layers > 512 || n_parts <= 0 || n_parts > 4) {
+        g_em.set = 0;
+        return;
+    }
+    // The file names its own parts. Without this the cache assumed
+    // gate/up/down and returned NULL for every access on a fused-gate_up model
+    // like Gemma 4, falling back to mmap silently.
+    siliangem_set_part_names(part_names);
+    snprintf(g_em.path, sizeof(g_em.path), "%s", path);
+    g_em.n_layers  = n_layers;
+    g_em.n_experts = n_experts;
+    g_em.n_parts   = n_parts;
+    for (int i = 0; i < n_layers; i++) {
+        g_em.base[i]   = base[i];
+        g_em.stride[i] = stride[i];
+        for (int p = 0; p < n_parts; p++) {
+            g_em.poff[i*n_parts + p]   = poff[i*n_parts + p];
+            g_em.pbytes[i*n_parts + p] = pbytes[i*n_parts + p];
+        }
+    }
+    g_em.set = 1;
+#else
+    (void) path; (void) n_layers; (void) n_experts; (void) n_parts;
+    (void) base; (void) stride; (void) poff; (void) pbytes;
+#endif
+}
+
+// Scattered geometry from a STOCK GGUF - an expert's gate/up/down live in three
+// separate tensors, so there are three bases and three strides per layer.
+//
+// This is what lets the cache run on a stock model. Without published stock
+// geometry, siliangem_init needs a slab or expert-major metadata and otherwise
+// declines, leaving plain mmap.
+void ggml_siliangem_set_scattered_source(
+        const char * path, int n_layers, int n_experts,
+        const uint64_t * base, const uint32_t * stride) {
+#if defined(_WIN32)
+    g_scat.set = 0;
+    if (!path || n_layers <= 0 || n_layers > 512 || n_experts <= 1 ||
+        !base || !stride) {
+        return;
+    }
+    for (int L = 0; L < n_layers; L++) {
+        uint64_t expert_bytes = 0;
+        for (int p = 0; p < 3; p++) {
+            const uint32_t part_bytes = stride[L * 3 + p];
+            if (part_bytes == 0) return;
+            expert_bytes += part_bytes;
+        }
+        if (expert_bytes > UINT32_MAX) return;
+    }
+    snprintf(g_scat.path, sizeof(g_scat.path), "%s", path);
+    g_scat.n_layers  = n_layers;
+    g_scat.n_experts = n_experts;
+    for (int i = 0; i < n_layers * 3; i++) {
+        g_scat.stride[i] = stride[i];
+        g_scat.base[i]   = base[i];
+    }
+    g_scat.set = 1;
+#else
+    (void) path; (void) n_layers; (void) n_experts; (void) base; (void) stride;
+#endif
+}
+#define GGML_MOE_PREFETCH_MAX 64
+
+/* Expert ordering for the deferred-wait path, filled by ith==0 before a barrier
+ * and read by every thread after it. File-scope statics are safe because ggml
+ * executes ops sequentially - only one mul_mat_id is ever in flight. */
+static int siliangem_order[SILIANGEM_MAX_BATCH];
+static int siliangem_n_hits    = 0;   /* leading entries of siliangem_order already resident */
+static int siliangem_n_active  = 0;   /* total entries in siliangem_order */
+static int siliangem_reordered = 0;   /* 1 when siliangem_order governs iteration */
+
+static void ggml_moe_prefetch_experts(
+        const struct ggml_tensor * src0,
+        const int64_t * counts, int n_as, size_t stride) {
+    typedef BOOL (WINAPI *pfn_pvm_t)(HANDLE, ULONG_PTR, PWIN32_MEMORY_RANGE_ENTRY, ULONG);
+    static pfn_pvm_t pvm = NULL;
+    static int state = -1;                      // -1 uninit, 0 off, 1 on
+    if (state < 0) {                            // only ever reached from ith==0
+        // OPT-IN, not opt-out. This syscall can serialize worker threads and
+        // regress decode when there are no useful pages to fault.
+        //
+        // PrefetchVirtualMemory is a kernel syscall, issued once per layer per
+        // token from ith==0 - which is inside the barrier, so the other worker
+        // threads wait on it. Repeated across layers and tokens, this creates
+        // many blocking syscalls per request. When the model is not memory-mapped
+        // (--no-mmap, or weights already resident) there are no pages to fault
+        // in and the hint buys nothing at all.
+        //
+        // It is also unreachable on the arena path: this is only called after
+        // siliangem_prepare_async AND siliangem_prepare have both declined.
+        //
+        // Whether it helps an mmap'd out-of-core model without the arena is a
+        // target-specific measurement. Keep it opt-in.
+        const char * e = getenv("GGML_MOE_PREFETCH");
+        state = (e && e[0] != '0') ? 1 : 0;
+        HMODULE h = GetModuleHandleW(L"kernel32.dll");
+        if (h) {
+            pvm = (pfn_pvm_t)(void *) GetProcAddress(h, "PrefetchVirtualMemory");
+        }
+    }
+    if (state == 0 || pvm == NULL || src0->data == NULL || stride == 0) {
+        return;
+    }
+    WIN32_MEMORY_RANGE_ENTRY ranges[GGML_MOE_PREFETCH_MAX];
+    ULONG n = 0;
+    for (int a = 0; a < n_as && n < GGML_MOE_PREFETCH_MAX; ++a) {
+        if (counts[a] == 0) {
+            continue;                           // expert not selected this token
+        }
+        ranges[n].VirtualAddress = (char *) src0->data + (size_t) a * stride;
+        ranges[n].NumberOfBytes  = stride;
+        ++n;
+    }
+    if (n > 0) {
+        pvm(GetCurrentProcess(), n, ranges, 0); // best-effort hint; ignore result
+    }
+}
+#endif // _WIN32
+
 static void ggml_compute_forward_mul_mat_id(
         const struct ggml_compute_params * params,
               struct ggml_tensor * dst) {
@@ -1644,14 +1797,79 @@ static void ggml_compute_forward_mul_mat_id(
 
     ggml_barrier(params->threadpool);
 
-    for (int cur_a = 0; cur_a < n_as; ++cur_a) {
+#if defined(_WIN32)
+    // matrix_row_counts[] is complete here, so the exact expert set is known.
+    //
+    // Preferred path: issue reads for the missing experts WITHOUT waiting, and
+    // get back an ordering with cached experts first. Their compute can then
+    // overlap miss I/O instead of queueing behind it. No prediction is involved:
+    // the router has already run.
+    //
+    // If that declines (no slab, not an expert tensor, or the scattered-source
+    // arm) fall back to the blocking fetch, then to an mmap prefetch hint.
+    if (ith == 0) {
+        // Cross-layer routing correlation probe. Placed before the fetch so it
+        // records in every configuration, including the arms where the fetch
+        // paths decline early.
+        // ids->ne[1] is the token count for this batch: 1 during decode, the
+        // chunk size during prefill. Passed explicitly so the phase split does
+        // not have to be inferred from expert-collision luck.
+        siliangem_observe_layer(src0->name, matrix_row_counts, n_as, ids->ne[1]);
+        siliangem_reordered = siliangem_prepare_async(src0->name, matrix_row_counts, n_as,
+                                        siliangem_order, &siliangem_n_hits, &siliangem_n_active);
+        if (!siliangem_reordered) {
+            if (!siliangem_prepare(src0->name, matrix_row_counts, n_as)) {
+                ggml_moe_prefetch_experts(src0, matrix_row_counts, n_as, nb02);
+            }
+        }
+    }
+    ggml_barrier(params->threadpool);
+#endif
+
+#if defined(_WIN32)
+    const int siliangem_n_iter = siliangem_reordered ? siliangem_n_active : n_as;
+#else
+    const int siliangem_n_iter = n_as;
+#endif
+
+    for (int siliangem_idx = 0; siliangem_idx < siliangem_n_iter; ++siliangem_idx) {
+        int cur_a = siliangem_idx;
+#if defined(_WIN32)
+        if (siliangem_reordered) {
+            // Boundary between resident and in-flight experts. Every thread
+            // reaches it on the same iteration, so the barrier is well formed.
+            if (siliangem_idx == siliangem_n_hits) {
+                if (ith == 0) {
+                    siliangem_wait();
+                }
+                ggml_barrier(params->threadpool);
+            }
+            cur_a = siliangem_order[siliangem_idx];
+        }
+#endif
         const int64_t cne1 = matrix_row_counts[cur_a];
+
+#if defined(_WIN32)
+        if (ith == 0) {
+            siliangem_note_cne1((long long) cne1);
+        }
+#endif
 
         if (cne1 == 0) {
             continue;
         }
 
         const char * src0_cur = (const char *) src0->data + cur_a * nb02;
+#if defined(_WIN32)
+        // The only behavioural hook: serve this expert from the managed cache
+        // when it is resident there. Identical bytes, different residence.
+        // NULL means "not ours" (no slab, not an expert tensor, layout
+        // mismatch, or a read that failed) and the mmap pointer above stands.
+        {
+            const char * cached = siliangem_ptr(src0->name, cur_a, (size_t) nb02, ith);
+            if (cached) src0_cur = cached;
+        }
+#endif
         const void * wdata = (src1->type == vec_dot_type) ? src1->data : params->wdata;
         const size_t row_size = ggml_row_size(vec_dot_type, ne10);
 

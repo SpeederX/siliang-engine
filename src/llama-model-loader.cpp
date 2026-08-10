@@ -2,6 +2,7 @@
 
 #include "ggml-alloc.h"
 #include "ggml.h"
+#include "ggml-cpu.h"   // ggml_siliangem_set_expert_source
 #include "gguf.h"
 #include "llama-hparams.h"
 #include "llama.h"
@@ -811,6 +812,250 @@ llama_model_loader::llama_model_loader(
         this->use_mmap = false;
     }
 
+    // ---- Siliang expert-major layout -------------------------------------
+    // Read after use_mmap is final, because this layout REQUIRES mmap: under
+    // mmap load_data_for() just assigns a pointer into the mapping, which is
+    // correct for a strided tensor. Without mmap, load_all_data() reads
+    // ggml_nbytes(cur) CONTIGUOUS bytes from the tensor's offset, which for a
+    // strided expert tensor is the wrong data -- and it would load and
+    // generate plausible wrong text rather than fail. So refuse instead.
+    {
+        bool em = false;
+        get_key("siliangem.expert_major", em, /*required=*/false);
+        if (em) {
+            // no_alloc means a metadata-only probe (common_fit_params sizes the
+            // model before really loading it). That path never touches tensor
+            // data, so the mmap requirement does not apply and refusing there
+            // would block loading entirely.
+            if (!no_alloc && !this->use_mmap) {
+                throw std::runtime_error(
+                    "this model uses the Siliang expert-major layout, which requires mmap; "
+                    "remove --no-mmap (loading it without mmap would read experts from the "
+                    "wrong offsets and silently produce wrong output)");
+            }
+            std::vector<uint32_t> strides, pbytes, pne0, pne1;
+            std::vector<uint32_t> lidx, ptypes;
+            std::string pnames;
+            const bool ok =
+                get_arr("siliangem.expert_bytes", strides, false) &&
+                get_arr("siliangem.layer_index",  lidx,    false) &&
+                get_arr("siliangem.part_bytes",   pbytes,  false) &&
+                get_arr("siliangem.part_types",   ptypes,  false) &&
+                get_arr("siliangem.part_ne0",     pne0,    false) &&
+                get_arr("siliangem.part_ne1",     pne1,    false) &&
+                get_key("siliangem.part_names",   pnames,  false);
+            uint32_t n_exp = 0;
+            get_key("siliangem.n_experts", n_exp, false);
+
+            std::vector<std::string> parts;
+            for (size_t b = 0, e; b <= pnames.size(); b = e + 1) {
+                e = pnames.find(',', b);
+                if (e == std::string::npos) e = pnames.size();
+                if (e > b) parts.push_back(pnames.substr(b, e - b));
+            }
+
+            const size_t nl = lidx.size(), np = parts.size();
+            if (!ok || nl == 0 || np == 0 || n_exp == 0 ||
+                strides.size() != nl || pbytes.size() != nl*np ||
+                ptypes.size() != nl*np || pne0.size() != nl*np || pne1.size() != nl*np) {
+                throw std::runtime_error(
+                    "siliangem.expert_major is set but its metadata is missing or "
+                    "inconsistent; refusing to guess the expert layout");
+            }
+
+            // A context for the synthesised tensor metas. It must outlive the
+            // loader, so it goes in `contexts` alongside the gguf meta contexts.
+            ggml_init_params mp = {
+                /*.mem_size   =*/ ggml_tensor_overhead() * (nl*np + 1),
+                /*.mem_buffer =*/ nullptr,
+                /*.no_alloc   =*/ true,
+            };
+            ggml_context * mctx = ggml_init(mp);
+            if (!mctx) {
+                throw std::runtime_error("failed to create context for expert-major tensor metas");
+            }
+            contexts.emplace_back(mctx);
+
+            // Tables handed to the out-of-core expert cache so it can read
+            // experts straight from THIS file instead of a repacked slab.
+            std::vector<uint64_t> em_base(nl);
+            std::vector<uint32_t> em_stride(nl);
+            std::vector<uint32_t> em_poff(nl*np), em_pbytes(nl*np);
+            bool em_source_is_monolithic = files.size() == 1;
+
+            for (size_t li = 0; li < nl; li++) {
+                const int L = (int) lidx[li];
+                expert_stride[L] = strides[li];
+
+                const std::string packed = format("blk.%d.ffn_exps_packed.weight", L);
+                auto itp = weights_map.find(packed);
+                if (itp == weights_map.end()) {
+                    throw std::runtime_error(format(
+                        "expert-major model is missing %s", packed.c_str()));
+                }
+                const uint16_t fidx = itp->second.idx;
+                const size_t   base = itp->second.offs;
+                em_source_is_monolithic = em_source_is_monolithic && fidx == 0;
+
+                em_base[li]   = (uint64_t) base;
+                em_stride[li]  = strides[li];
+
+                uint64_t rel = 0;
+                for (size_t pi = 0; pi < np; pi++) {
+                    em_poff[li*np + pi]   = (uint32_t) rel;
+                    em_pbytes[li*np + pi] = pbytes[li*np + pi];
+                    const size_t k = li*np + pi;
+                    const std::string nm = format("blk.%d.ffn_%s_exps.weight", L, parts[pi].c_str());
+
+                    ggml_tensor * mt = ggml_new_tensor_3d(mctx,
+                            (ggml_type) ptypes[k], (int64_t) pne0[k], (int64_t) pne1[k],
+                            (int64_t) n_exp);
+                    ggml_set_name(mt, nm.c_str());
+                    // The meta carries the real stride so anything reading it
+                    // sees the truth; create_tensor() re-applies it because
+                    // ggml_dup_tensor rebuilds nb[] assuming contiguity.
+                    mt->nb[2] = strides[li];
+                    mt->nb[3] = strides[li] * n_exp;
+
+                    weights_map.emplace(nm, llama_tensor_weight(fidx, base + rel, mt));
+                    rel += pbytes[k];
+                }
+                // The packed tensor is an implementation detail: leaving it in
+                // the map would make n_tensors disagree with what the model
+                // actually creates, and done_getting_tensors() throws on that.
+                weights_map.erase(itp);
+            }
+
+            expert_major = true;
+
+            // Point the expert cache at this model file. Without this it would
+            // look for SILIANGEM_SLAB, i.e. a second copy of every expert.
+            if (!fname.empty() && em_source_is_monolithic) {
+                // pnames goes through too: the cache has to match tensor names
+                // against the parts THIS file actually uses, not an assumed
+                // gate/up/down. A fused-gate_up model (Gemma 4) otherwise
+                // parses as "not an expert" and drops silently back to mmap.
+                ggml_siliangem_set_expert_source(fname.c_str(), (int) nl, (int) n_exp,
+                        (int) np, em_base.data(), em_stride.data(),
+                        em_poff.data(), em_pbytes.data(), pnames.c_str());
+                LLAMA_LOG_INFO("%s: expert cache source set to the model file\n", __func__);
+            } else if (!fname.empty()) {
+                LLAMA_LOG_WARN("%s: siliangem: split GGUF (%zu files) cannot use the "
+                               "expert-major model file as an arena source - using mmap\n",
+                               __func__, files.size());
+            }
+
+            // weights_map changed size: each layer's single packed entry was
+            // replaced by one entry per part. n_tensors was computed from the
+            // FILE's tensor count further up, so refresh it -- otherwise
+            // done_getting_tensors() sees the model create more tensors than
+            // the loader expects and throws.
+            n_tensors = weights_map.size();
+
+            LLAMA_LOG_INFO("%s: siliangem expert-major: %zu layers x %u experts, parts [%s], stride %" PRIu64 "..%" PRIu64 " B, %d tensors\n",
+                    __func__, nl, n_exp, pnames.c_str(),
+                    expert_stride.begin()->second, expert_stride.rbegin()->second, n_tensors);
+        }
+    }
+
+    // ---- Siliang scattered source: run the arena on a STOCK GGUF ----------
+    //
+    // Without this, a stock model cannot use the expert cache: siliangem_init requires
+    // either a compatible slab or expert-major metadata and falls back to plain
+    // mmap otherwise.
+    //
+    // A stock file's tensor directory already carries the offset and shape of
+    // ffn_{gate,up,down}_exps for every layer, which is all the geometry the
+    // cache needs. We are already inside the GGUF parser, so publish that
+    // geometry directly instead of maintaining a separate sidecar.
+    //
+    // Deliberately does NOT touch weights_map, synthesise tensors, or change
+    // n_tensors. The model loads exactly as it would without the cache; only
+    // the expert cache learns where the bytes are. So this cannot alter
+    // behaviour when the cache is off or unavailable.
+    if (!expert_major && !no_alloc && this->use_mmap && !fname.empty() && files.size() != 1) {
+        bool has_stock_expert_tensors = false;
+        for (const auto & weight : weights_map) {
+            if (weight.first.find(".ffn_gate_exps.weight") != std::string::npos) {
+                has_stock_expert_tensors = true;
+                break;
+            }
+        }
+        if (has_stock_expert_tensors) {
+            LLAMA_LOG_WARN("%s: siliangem: split GGUF (%zu files) cannot use the "
+                           "stock scattered model files as an arena source - using mmap\n",
+                           __func__, files.size());
+        }
+    }
+
+    if (!expert_major && !no_alloc && this->use_mmap && !fname.empty() && files.size() == 1) {
+        static const char * kParts[3] = { "ffn_gate_exps", "ffn_up_exps", "ffn_down_exps" };
+
+        std::vector<uint64_t> sc_base;       // n_layers * 3, file offsets
+        std::vector<uint32_t> sc_stride;     // n_layers * 3, bytes between experts
+        uint32_t sc_experts = 0;
+        int      sc_layers  = 0;
+        bool     sc_ok      = true;
+
+        for (int il = 0; sc_ok; il++) {
+            char nm[128];
+            snprintf(nm, sizeof(nm), "blk.%d.%s.weight", il, kParts[0]);
+            if (weights_map.find(nm) == weights_map.end()) {
+                break;                      // ran out of layers
+            }
+            for (int p = 0; p < 3 && sc_ok; p++) {
+                snprintf(nm, sizeof(nm), "blk.%d.%s.weight", il, kParts[p]);
+                auto it = weights_map.find(nm);
+                if (it == weights_map.end() || it->second.tensor == nullptr || it->second.idx != 0) {
+                    sc_ok = false;
+                    break;
+                }
+                const ggml_tensor * t = it->second.tensor;
+                if (t->ne[2] <= 1) { sc_ok = false; break; }   // not a routed-expert tensor
+
+                const uint64_t stride = (uint64_t) t->nb[2];   // bytes per expert
+                if (stride == 0 || stride > 0xFFFFFFFFull)     { sc_ok = false; break; }
+
+                if (sc_experts == 0) {
+                    sc_experts = (uint32_t) t->ne[2];
+                } else if (sc_experts != (uint32_t) t->ne[2]) {
+                    LLAMA_LOG_INFO("%s: siliangem: expert count varies at layer %d "
+                                   "(%s has %" PRId64 " vs %u) - scattered source declined\n",
+                                   __func__, il, kParts[p], t->ne[2], sc_experts);
+                    sc_ok = false; break;
+                }
+                sc_stride.push_back((uint32_t) stride);
+                sc_base.push_back((uint64_t) it->second.offs);
+            }
+            if (sc_ok) sc_layers = il + 1;
+        }
+
+        if (sc_ok && sc_layers > 0 && sc_experts > 1 &&
+            sc_base.size() == (size_t) sc_layers * 3 &&
+            sc_stride.size() == (size_t) sc_layers * 3) {
+            uint64_t min_expert_bytes = 0;
+            uint64_t max_expert_bytes = 0;
+            for (int il = 0; il < sc_layers; il++) {
+                uint64_t expert_bytes = 0;
+                for (int p = 0; p < 3; p++) expert_bytes += sc_stride[(size_t) il * 3 + p];
+                if (il == 0 || expert_bytes < min_expert_bytes) min_expert_bytes = expert_bytes;
+                if (expert_bytes > max_expert_bytes) max_expert_bytes = expert_bytes;
+            }
+            if (max_expert_bytes <= 0xFFFFFFFFull) {
+                ggml_siliangem_set_scattered_source(fname.c_str(), sc_layers, (int) sc_experts,
+                                                   sc_base.data(), sc_stride.data());
+                LLAMA_LOG_INFO("%s: siliangem scattered source: %d layers x %u experts, "
+                               "expert bytes %" PRIu64 "..%" PRIu64 " - stock GGUF, no repack\n",
+                               __func__, sc_layers, sc_experts,
+                               min_expert_bytes, max_expert_bytes);
+            } else {
+                LLAMA_LOG_INFO("%s: siliangem: expert size exceeds 32-bit cache geometry "
+                               "(%" PRIu64 " B) - scattered source declined\n",
+                               __func__, max_expert_bytes);
+            }
+        }
+    }
+
     this->check_tensors = check_tensors;
     this->no_alloc = no_alloc;
     this->load_mtp = load_mtp;
@@ -1302,6 +1547,65 @@ struct ggml_tensor * llama_model_loader::create_tensor(
         n_created++;
     }
 
+    // ---- Siliang expert-major: correct the expert stride ------------------
+    // ggml derived nb[2] assuming this tensor's experts are packed back to
+    // back. In an expert-major file they are interleaved with the other
+    // projections, so the true distance between experts is the whole expert
+    // slab. mul_mat_id indexes experts by exactly this field, on CPU
+    // (src0->data + cur_a*nb02) and on CUDA (s02 = nb[2]/type_size, mmvq.cu).
+    //
+    // Only dimension 2 changes; ne and nb[0..1] are already right, since each
+    // expert's own matrix is internally contiguous.
+    //
+    // ONLY for host buffers. A device-resident expert layer is copied once at
+    // load and never read by the cache, so the interleaving buys it nothing -
+    // while the strided nb[2] makes ggml_nbytes() report an address SPAN and
+    // reserve ~3x the VRAM the weights need. Leaving nb[] contiguous there
+    // makes the tensor ordinary and lets load_all_data() gather it instead.
+    if (expert_major && tensor->ne[2] > 1) {
+        int layer = -1;
+        if (sscanf(ggml_get_name(tensor), "blk.%d.", &layer) == 1 &&
+            strstr(ggml_get_name(tensor), "_exps.weight") != nullptr) {
+            auto it = expert_stride.find(layer);
+            if (it != expert_stride.end() && !ggml_backend_buft_is_host(buft)) {
+                // Contiguous nb[] survives; remember that this tensor's bytes
+                // still have to come out of a STRIDED region of the file.
+                em_deinterleaved.insert(tensor);
+                // size_data is summed over the weights_map metas, which carry
+                // the strided nb[2] and so report the address span. This
+                // tensor will only contribute its true size to size_done, so
+                // record the difference. It cannot be subtracted here:
+                // create_tensor() runs before init_mappings(), where size_data
+                // is still 0, and size_t would underflow.
+                const size_t span = ggml_nbytes(&t_meta);
+                const size_t real = ggml_nbytes(tensor);
+                GGML_ASSERT(span >= real);
+                em_span_excess += span - real;
+                return tensor;
+            }
+            if (it != expert_stride.end()) {
+                const uint64_t stride = it->second;
+                // The stride must cover this tensor's own expert slice, and
+                // must divide evenly by the type size or CUDA's integer
+                // division silently truncates it.
+                if (stride < (uint64_t) tensor->nb[2]) {
+                    throw std::runtime_error(format(
+                        "%s: expert stride %" PRIu64 " is smaller than the tensor's own "
+                        "expert size %zu", ggml_get_name(tensor), stride, (size_t) tensor->nb[2]));
+                }
+                if (stride % ggml_type_size(tensor->type) != 0) {
+                    throw std::runtime_error(format(
+                        "%s: expert stride %" PRIu64 " is not a multiple of type size %zu; "
+                        "CUDA computes nb[2]/type_size by integer division and would "
+                        "misaddress every expert after the first",
+                        ggml_get_name(tensor), stride, ggml_type_size(tensor->type)));
+                }
+                tensor->nb[2] = stride;
+                tensor->nb[3] = stride * tensor->ne[2];
+            }
+        }
+    }
+
     return tensor;
 }
 
@@ -1354,6 +1658,13 @@ void llama_model_loader::init_mappings(bool prefetch, llama_mlocks * mlock_mmaps
     for (const auto & it : weights_map) {
         size_data += ggml_nbytes(it.second.tensor);
     }
+
+    // Expert-major tensors that landed on a device buffer were de-interleaved
+    // by create_tensor(), so they will report their true size to size_done
+    // while the metas above reported an address span. Drop the difference or
+    // progress never reaches 1.0.
+    GGML_ASSERT(size_data >= em_span_excess);
+    size_data -= em_span_excess;
 }
 
 void llama_model_loader::get_mapping_range(size_t * first, size_t * last, void ** addr, int idx, ggml_context * ctx) const {
@@ -1534,14 +1845,43 @@ bool llama_model_loader::load_all_data(
             }
             uint8_t * data = (uint8_t *) mapping->addr() + weight->offs;
 
+            // An expert-major tensor bound for a device buffer was left
+            // contiguous by create_tensor(), so its experts sit one stride
+            // apart in the file but back to back in the destination. Both the
+            // copy and the validation have to walk it expert by expert; a
+            // single n_size run would read the neighbouring projections.
+            const bool em_gather = em_deinterleaved.count(cur) > 0;
+            uint64_t   em_stride = 0;
+            size_t     em_part   = 0;
+            if (em_gather) {
+                int layer = -1;
+                GGML_ASSERT(sscanf(ggml_get_name(cur), "blk.%d.", &layer) == 1);
+                em_stride = expert_stride.at(layer);
+                em_part   = cur->nb[2];   // contiguous: bytes of one expert
+            }
+
             if (check_tensors) {
-                validation_result.emplace_back(std::async(std::launch::async, [cur, data, n_size] {
-                    return std::make_pair(cur, ggml_validate_row_data(cur->type, data, n_size));
-                }));
+                if (em_gather) {
+                    validation_result.emplace_back(std::async(std::launch::async, [cur, data, em_stride, em_part] {
+                        bool ok = true;
+                        for (int64_t ie = 0; ie < cur->ne[2]; ie++) {
+                            ok = ggml_validate_row_data(cur->type, data + ie*em_stride, em_part) && ok;
+                        }
+                        return std::make_pair(cur, ok);
+                    }));
+                } else {
+                    validation_result.emplace_back(std::async(std::launch::async, [cur, data, n_size] {
+                        return std::make_pair(cur, ggml_validate_row_data(cur->type, data, n_size));
+                    }));
+                }
             }
 
             GGML_ASSERT(buf_mmap || cur->data); // either we have a buffer to allocate the tensor in, or it is already allocated
             if (buf_mmap && cur->data == nullptr) {
+                // Host path: the tensor keeps the true stride in nb[2] and
+                // points straight into the mapping, which is what the
+                // out-of-core cache requires. em_gather is never set here.
+                GGML_ASSERT(!em_gather);
                 ggml_backend_tensor_alloc(buf_mmap, cur, data);
                 if (lmlocks) {
                     const auto & lmlock = lmlocks->at(weight->idx);
@@ -1551,6 +1891,10 @@ bool llama_model_loader::load_all_data(
                 auto & mmap_used = mmaps_used[weight->idx];
                 mmap_used.first  = std::min(mmap_used.first,  weight->offs);
                 mmap_used.second = std::max(mmap_used.second, weight->offs + n_size);
+            } else if (em_gather) {
+                for (int64_t ie = 0; ie < cur->ne[2]; ie++) {
+                    ggml_backend_tensor_set(cur, data + ie*em_stride, ie*em_part, em_part);
+                }
             } else {
                 ggml_backend_tensor_set(cur, data, 0, n_size);
             }

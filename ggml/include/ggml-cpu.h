@@ -80,6 +80,43 @@ extern "C" {
     // x86
     GGML_BACKEND_API int ggml_cpu_has_sse3       (void);
     GGML_BACKEND_API int ggml_cpu_has_ssse3      (void);
+    // Siliang Engine: publish an expert-major model as the expert source.
+    //
+    // An expert-major GGUF stores each layer's experts interleaved
+    // ([e0: gate|up|down|pad][e1: ...]) so one expert is one contiguous read.
+    // The model loader knows the per-layer file offsets and strides; passing
+    // them here lets the out-of-core expert cache read from the MODEL FILE
+    // itself rather than a separate repacked slab.
+    //
+    // Call before the first graph evaluation. Passing path == NULL disables it.
+    //   base    [n_layers]            absolute file offset of each packed region
+    //   stride  [n_layers]            bytes between consecutive experts
+    //   poff    [n_layers * n_parts]  byte offset of a part inside one expert
+    //   pbytes  [n_layers * n_parts]  logical size of that part
+    //   part_names  comma-separated, exactly as the file's siliangem.part_names
+    //               key spells them ("gate,up,down" or "gate_up,down"). The
+    //               cache matches tensor names against these; passing NULL or
+    //               "" keeps the gate/up/down default. Without it a fused
+    //               gate_up model parses as "not an expert" and silently falls
+    //               back to mmap.
+    GGML_BACKEND_API void ggml_siliangem_set_expert_source(
+            const char * path, int n_layers, int n_experts, int n_parts,
+            const uint64_t * base, const uint32_t * stride,
+            const uint32_t * poff, const uint32_t * pbytes,
+            const char * part_names);
+
+    // Scattered variant: a STOCK GGUF, where an expert's gate/up/down live in
+    // three separate tensors rather than one packed region. `base` and
+    // `stride` are both n_layers*3 entries in (layer, part) order. A per-layer
+    // stride is required because quantization can change projection sizes.
+    //
+    // Lets the expert cache run on a model somebody downloaded, with no repack
+    // and no slab. The geometry is read straight out of the GGUF's own tensor
+    // directory by llama_model_loader, which already parses it.
+    GGML_BACKEND_API void ggml_siliangem_set_scattered_source(
+            const char * path, int n_layers, int n_experts,
+            const uint64_t * base, const uint32_t * stride);
+
     GGML_BACKEND_API int ggml_cpu_has_avx        (void);
     GGML_BACKEND_API int ggml_cpu_has_avx_vnni   (void);
     GGML_BACKEND_API int ggml_cpu_has_avx2       (void);

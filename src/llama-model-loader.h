@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstring>
 #include <map>
+#include <set>
 #include <stdexcept>
 #include <unordered_map>
 
@@ -35,6 +36,14 @@ struct llama_model_loader {
         size_t   offs; // tensor data offset in the original file
 
         ggml_tensor * tensor;
+
+        // Direct construction, for entries that are SYNTHESISED rather than
+        // read from the tensor directory. The Siliang expert-major layout
+        // stores each layer's experts as one opaque packed tensor; the loader
+        // derives gate/up/down entries pointing into it, which have no
+        // directory entry of their own for gguf_find_tensor to locate.
+        llama_tensor_weight(uint16_t idx, size_t offs, ggml_tensor * tensor)
+            : idx(idx), offs(offs), tensor(tensor) {}
 
         llama_tensor_weight(const llama_file * file, uint16_t idx, const struct gguf_context * gguf_ctx, ggml_tensor * tensor) : idx(idx), tensor(tensor) {
             const int tensor_idx = gguf_find_tensor(gguf_ctx,  ggml_get_name(tensor));
@@ -87,6 +96,41 @@ struct llama_model_loader {
     llama_fver  fver;
 
     llama_mmaps mappings;
+
+    // ---- Siliang expert-major layout ------------------------------------
+    // An expert-major GGUF stores each layer's experts interleaved:
+    //   [e0: gate|up|down|pad][e1: ...]
+    // so one expert is one contiguous read instead of scattered projection
+    // reads. gate/up/down remain real tensor-directory entries with their true
+    // names, shapes and types, given overlapping offsets into that region.
+    //
+    // Everything in llama.cpp then works unchanged EXCEPT nb[2], which is
+    // derived assuming contiguity. This map supplies the true expert stride
+    // per layer; create_tensor() writes it into nb[2].
+    bool expert_major = false;
+    std::map<int, uint64_t> expert_stride;   // layer -> bytes between experts
+
+    // ---- expert-major on a DEVICE buffer ---------------------------------
+    // The interleaving exists to make a DISK read contiguous, and only the
+    // out-of-core cache reads from disk. A device-resident expert layer is
+    // copied once at load and never touched by the cache again, so it has no
+    // reason to be interleaved - and staying interleaved is expensive:
+    // ggml_nbytes() measures an address SPAN, part + (ne2-1)*nb2, so each view
+    // spans the packed region rather than only its logical bytes. The allocator
+    // can then reserve and copy redundant device memory, reducing the number of
+    // expert layers that fit.
+    //
+    // So for a device buffer create_tensor() leaves nb[] contiguous - the
+    // tensor is then perfectly ordinary, and CUDA's nb[2]/type_size division
+    // stops being load-bearing - and load_all_data() gathers the experts one
+    // at a time out of the strided file region. Host tensors are untouched:
+    // they still point straight into the mapping with the true stride, which
+    // is what the cache requires.
+    std::set<const struct ggml_tensor *> em_deinterleaved;
+
+    // Sum over em_deinterleaved of (address span - true size). init_mappings()
+    // subtracts it from size_data, which is summed over the strided metas.
+    size_t em_span_excess = 0;
 
     std::map<std::string, llama_tensor_weight, weight_name_comparer> weights_map;
     std::unordered_map<std::string, llama_model_kv_override> kv_overrides;

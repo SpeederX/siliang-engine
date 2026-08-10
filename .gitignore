@@ -153,3 +153,12 @@ a.out.*
 
 AGENTS.local.md
 .pi/SYSTEM.md
+
+# Siliang Engine local artifacts
+/.agent-local/
+/artifacts/
+/.pytest_cache/
+/*.slab
+/*.csv
+/*.pdb
+/*.obj

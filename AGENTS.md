@@ -2,6 +2,13 @@
 
 > [!IMPORTANT]
 >
+> This fork also contains the Siliang Engine product layer. Read and follow
+> [`SILIANG_AGENTS.md`](SILIANG_AGENTS.md) for Siliang-specific evidence,
+> compatibility, benchmark, provenance, STOP, and public-hygiene rules. Both
+> files apply; follow the stricter rule when they overlap.
+
+> [!IMPORTANT]
+>
 > AI-generated code is allowed. What is **not** allowed is submitting code you do not understand. You are 100% responsible for every line, however it was produced.
 >
 > Read more: [CONTRIBUTING.md](CONTRIBUTING.md)

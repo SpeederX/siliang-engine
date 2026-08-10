@@ -1,0 +1,111 @@
+# Scripts
+
+Run these entry points from PowerShell at the repository root. Use paths outside
+the repository for generated builds, models, logs, and benchmark results.
+
+## Build
+
+```powershell
+.\scripts\build.ps1 -Backend Cpu -BuildRoot "<build-root>"
+
+.\scripts\build.ps1 `
+    -Backend Cuda `
+    -CudaArchitecture "<compute-capability>" `
+    -BuildRoot "<build-root>"
+```
+
+The CUDA architecture is mandatory for CUDA builds. The script configures a
+Release build with network-dependent upstream features disabled.
+
+## Model preparation
+
+`repack-model.ps1`, `preflight_repack.py`, and `check_expert_major.py` implement
+the supported expert-major preparation workflow. Follow
+[`../tools/README.md`](../tools/README.md) rather than invoking the converter
+directly.
+
+## Runtime configuration
+
+`siliang-env.ps1` is the single entry point for replacing, inspecting,
+disabling, and resetting the process-local Siliang environment:
+
+```powershell
+.\scripts\siliang-env.ps1 -CacheMiB <measured-MiB>
+.\scripts\siliang-env.ps1 -CacheMiB <measured-MiB> -Verbose
+.\scripts\siliang-env.ps1 -CacheMiB <measured-MiB> -NoMemoryReport
+.\scripts\siliang-env.ps1 -Show
+.\scripts\siliang-env.ps1 -Disable
+.\scripts\siliang-env.ps1 -Reset
+```
+
+Run the helper and the selected engine executable from the same PowerShell
+session. See [`../docs/CONFIGURATION.md`](../docs/CONFIGURATION.md) for the
+meaning of each mode and variable.
+
+## Model-free checks
+
+Verify the pinned upstream base and Siliang delta, then run the Python and
+PowerShell checks:
+
+```powershell
+.\scripts\verify-snapshot.ps1
+.\scripts\test.ps1 -PythonExecutable "<python>"
+```
+
+When a build directory is available, selected upstream CTest cases can be
+included:
+
+```powershell
+.\scripts\test.ps1 `
+    -PythonExecutable "<python>" `
+    -BuildDirectory "<cpu-build-directory>" `
+    -CTestRegex "<upstream-test-regex>"
+```
+
+These checks validate the public fork and tooling. They do not establish
+model correctness or throughput.
+
+## Runtime gate
+
+`runtime-gate.ps1` performs controlled reference/candidate model checks and
+retains a complete evidence directory. It requires distinct reference and
+candidate runtime identities and owns the primary model paths, environment,
+prompt, sampling configuration, and cell lifecycle.
+
+```powershell
+.\scripts\runtime-gate.ps1 `
+    -ReferenceServer "<reference-llama-server.exe>" `
+    -CandidateServer "<candidate-llama-server.exe>" `
+    -DeepSeekModel "<deepseek-expert-major.gguf>" `
+    -GptOssModel "<gpt-oss-expert-major.gguf>" `
+    -GptOssMaxDeviceModelBufferMiB "<measured-limit>" `
+    -ArenaMiB "<measured-MiB>" `
+    -ResultsRoot "<results-root>"
+```
+
+The gate records executable and adjacent-DLL identities, effective runtime
+configuration, output evidence, cache activity, teardown state, and memory
+pressure. If `-AllowMemoryPressure` is deliberately used, the pressure counts
+remain in `summary.json` and must be disclosed with the result.
+
+A passing process launch or model load is not enough. Publish a performance
+cell only when deterministic correctness passes, the intended path is proven
+active, no fallback occurred, and the machine met the declared isolation
+requirements.
+
+## Script inventory
+
+| Script | Purpose |
+| --- | --- |
+| `build.ps1` | Configure and build the CPU or CUDA runtime. |
+| `repack-model.ps1` | Safely orchestrate expert-major conversion. |
+| `preflight_repack.py` | Reject unsupported source geometry before writing. |
+| `check_expert_major.py` | Validate the finalized expert-major structure. |
+| `siliang-env.ps1` | Replace, inspect, disable, or reset process-local runtime settings. |
+| `verify-snapshot.ps1` | Verify the pinned upstream base and Siliang source delta. |
+| `test.ps1` | Run model-free checks and optional selected CTests. |
+| `runtime-gate.ps1` | Produce controlled reference/candidate runtime evidence. |
+
+Long-running model gates should always write to a unique external result
+directory and be judged from their final status marker, not from a quiet log or
+partially written JSON.
