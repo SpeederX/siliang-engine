@@ -42,6 +42,11 @@ def partial_path(destination: Path) -> Path:
 class RepackWrapperTests(unittest.TestCase):
     maxDiff = None
 
+    def test_hashing_does_not_require_get_file_hash_cmdlet(self) -> None:
+        source = REPACK_WRAPPER.read_text(encoding="utf-8")
+        self.assertNotIn("Get-FileHash", source)
+        self.assertIn("[Security.Cryptography.SHA256]::Create()", source)
+
     def run_wrapper(
         self,
         source: Path,

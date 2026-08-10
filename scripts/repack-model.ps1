@@ -79,17 +79,36 @@ function Invoke-NativeJson {
     }
 }
 
+function Get-FileSha256 {
+    param(
+        [Parameter(Mandatory = $true)][string]$PathValue
+    )
+
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    $stream = $null
+    try {
+        $stream = [IO.File]::OpenRead($PathValue)
+        $hash = $algorithm.ComputeHash($stream)
+        return ([BitConverter]::ToString($hash)).Replace('-', '')
+    } finally {
+        if ($null -ne $stream) {
+            $stream.Dispose()
+        }
+        $algorithm.Dispose()
+    }
+}
+
 function Get-ArtifactRecord {
     param(
         [Parameter(Mandatory = $true)][string]$Path
     )
 
     $item = Get-Item -LiteralPath $Path
-    $digest = Get-FileHash -LiteralPath $Path -Algorithm SHA256
+    $digest = Get-FileSha256 -PathValue $Path
     return [PSCustomObject]@{
         Path = $item.FullName
         Bytes = [Int64]$item.Length
-        SHA256 = $digest.Hash.ToLowerInvariant()
+        SHA256 = $digest.ToLowerInvariant()
     }
 }
 

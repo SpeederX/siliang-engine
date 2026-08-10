@@ -18,6 +18,7 @@ POWERSHELL_FUNCTIONS = (
     "Set-CellEnvironment",
     "Assert-ExpertMajorEvidence",
     "Assert-ArenaEvidence",
+    "Get-FileSha256",
     "Get-ArtifactIdentity",
     "Get-StringSha256",
     "Get-RuntimeIdentity",
@@ -201,6 +202,10 @@ Remove-Item Env:BEHEMOTH_LEGACY_SENTINEL -ErrorAction SilentlyContinue
         )
 
     def test_runtime_identity_covers_executable_and_adjacent_dlls(self) -> None:
+        source = RUNTIME_GATE.read_text(encoding="utf-8")
+        self.assertNotIn("Get-FileHash", source)
+        self.assertIn("[Security.Cryptography.SHA256]::Create()", source)
+
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             reference = root / "reference"
@@ -216,6 +221,7 @@ Remove-Item Env:BEHEMOTH_LEGACY_SENTINEL -ErrorAction SilentlyContinue
 
             self.run_powershell(
                 r"""
+function Get-FileHash { throw 'Get-FileHash must not be required by the runtime identity path.' }
 $reference = Get-RuntimeIdentity -ServerPath $env:SILIANG_TEST_REFERENCE -Label reference
 $candidate = Get-RuntimeIdentity -ServerPath $env:SILIANG_TEST_CANDIDATE -Label candidate
 $copy = Get-RuntimeIdentity -ServerPath $env:SILIANG_TEST_COPY -Label copy

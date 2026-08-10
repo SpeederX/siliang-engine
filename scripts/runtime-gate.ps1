@@ -254,6 +254,25 @@ function Get-VramSnapshot {
     }
 }
 
+function Get-FileSha256 {
+    param(
+        [Parameter(Mandatory = $true)][string]$PathValue
+    )
+
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    $stream = $null
+    try {
+        $stream = [IO.File]::OpenRead($PathValue)
+        $hash = $algorithm.ComputeHash($stream)
+        return ([BitConverter]::ToString($hash)).Replace('-', '')
+    } finally {
+        if ($null -ne $stream) {
+            $stream.Dispose()
+        }
+        $algorithm.Dispose()
+    }
+}
+
 function Get-ArtifactIdentity {
     param(
         [Parameter(Mandatory = $true)][string]$PathValue,
@@ -262,7 +281,7 @@ function Get-ArtifactIdentity {
 
     Write-Host ("Hashing {0}: {1}" -f $Label, $PathValue)
     $item = Get-Item -LiteralPath $PathValue
-    $sha256 = (Get-FileHash -LiteralPath $PathValue -Algorithm SHA256).Hash
+    $sha256 = Get-FileSha256 -PathValue $PathValue
     return [pscustomobject]@{
         path = $item.FullName
         bytes = [int64]$item.Length
