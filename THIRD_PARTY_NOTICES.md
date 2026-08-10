@@ -17,6 +17,15 @@ bundled components retain their own copyright notices and license terms.
 The provenance of the Siliang delta on this fork is recorded in
 [`docs/PROVENANCE.md`](docs/PROVENANCE.md).
 
+## Windows release runtime
+
+The Windows release archives include the OpenSSL 3 runtime DLLs selected by
+the tagged CMake build so that `llama-server` TLS support is self-contained.
+OpenSSL 3 is licensed under Apache License 2.0. Each release archive includes
+the exact installed OpenSSL license text as `licenses/OPENSSL-Apache-2.0.txt`
+and records the runtime version in `provenance/BUILD-INFO.txt`. OpenSSL source
+and notices are available from the [OpenSSL project](https://www.openssl.org/source/).
+
 ## Bundled components with separate notices
 
 The upstream tree includes, among other components:

@@ -149,6 +149,45 @@ jobs:
               Copy-Item -LiteralPath $runtimeLibrary.FullName -Destination $binTarget
           }
 
+          # The Windows runner's OpenSSL installation is selected by CMake, but
+          # its runtime DLLs are not copied into bin\Release. Resolve the exact
+          # installation from CMakeCache.txt instead of relying on the runner's
+          # PATH, then package its license alongside the DLLs.
+          $cmakeCachePath = Join-Path $env:SILIANG_RELEASE_BUILD 'CMakeCache.txt'
+          $opensslIncludeMatch = Select-String -LiteralPath $cmakeCachePath -Pattern '^OPENSSL_INCLUDE_DIR:PATH=(.+)$'
+          if ($opensslIncludeMatch.Count -ne 1) {
+              throw "Expected one OPENSSL_INCLUDE_DIR entry in $cmakeCachePath."
+          }
+          $opensslIncludeDirectory = $opensslIncludeMatch.Matches[0].Groups[1].Value
+          if ([string]::IsNullOrWhiteSpace($opensslIncludeDirectory) -or
+              $opensslIncludeDirectory.EndsWith('-NOTFOUND', [StringComparison]::OrdinalIgnoreCase)) {
+              throw 'The release build did not resolve a usable OpenSSL installation.'
+          }
+          $opensslRoot = Split-Path -Parent $opensslIncludeDirectory
+          $opensslBin = Join-Path $opensslRoot 'bin'
+          foreach ($opensslRuntimeName in @('libssl-3-x64.dll', 'libcrypto-3-x64.dll')) {
+              $opensslRuntime = Join-Path $opensslBin $opensslRuntimeName
+              if (-not (Test-Path -LiteralPath $opensslRuntime -PathType Leaf)) {
+                  throw "Required OpenSSL runtime was not found: $opensslRuntime"
+              }
+              Copy-Item -LiteralPath $opensslRuntime -Destination $binTarget
+          }
+          $opensslLicense = Get-ChildItem -LiteralPath $opensslRoot -File |
+              Where-Object { $_.Name -imatch '^license(?:\.txt)?$' } |
+              Select-Object -First 1
+          if (-not $opensslLicense) {
+              throw "OpenSSL license text was not found under $opensslRoot."
+          }
+          Copy-Item -LiteralPath $opensslLicense.FullName -Destination (Join-Path $licenseTarget 'OPENSSL-Apache-2.0.txt')
+          $opensslExecutable = Join-Path $opensslBin 'openssl.exe'
+          if (-not (Test-Path -LiteralPath $opensslExecutable -PathType Leaf)) {
+              throw "OpenSSL executable was not found: $opensslExecutable"
+          }
+          $opensslVersion = (& $opensslExecutable version).Trim()
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($opensslVersion)) {
+              throw 'Failed to record the packaged OpenSSL version.'
+          }
+
           if ('${{ matrix.backend }}' -eq 'Cuda') {
               $cudaRuntimeFiles = @()
               foreach ($searchRoot in @(
@@ -192,6 +231,7 @@ jobs:
               "commit=$env:GITHUB_SHA"
               "upstream_base=07132750825a4f2d27a547cd9cdde1c6f6001885"
               "backend=${{ matrix.backend }}"
+              "openssl_runtime=$opensslVersion"
               "cuda_toolkit=$(if ('${{ matrix.backend }}' -eq 'Cuda') { '13.2.0' } else { 'none' })"
               "cuda_architecture=$(if ('${{ matrix.backend }}' -eq 'Cuda') { '${{ matrix.cuda_architecture }}' } else { 'none' })"
               "runner_image=$env:ImageOS"
@@ -204,6 +244,23 @@ jobs:
               $buildInfo,
               [Text.UTF8Encoding]::new($false)
           )
+
+          # Smoke the assembled package with a deliberately isolated PATH so
+          # missing adjacent runtime DLLs cannot be masked by runner software.
+          $originalPath = $env:PATH
+          Push-Location $binTarget
+          try {
+              $env:PATH = "$binTarget;$env:SystemRoot\System32;$env:SystemRoot"
+              foreach ($executableName in @('llama-server.exe', 'llama-cli.exe')) {
+                  & (Join-Path $binTarget $executableName) --version
+                  if ($LASTEXITCODE -ne 0) {
+                      throw "$executableName --version failed from the assembled package with exit code $LASTEXITCODE."
+                  }
+              }
+          } finally {
+              $env:PATH = $originalPath
+              Pop-Location
+          }
 
           $zipPath = Join-Path $env:RUNNER_TEMP "$artifactName.zip"
           Compress-Archive -LiteralPath $packageRoot -DestinationPath $zipPath -CompressionLevel Optimal
