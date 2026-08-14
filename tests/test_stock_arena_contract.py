@@ -6,6 +6,7 @@ import unittest
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 CPU_SOURCE = (REPOSITORY_ROOT / "ggml/src/ggml-cpu/ggml-cpu.c").read_text(encoding="utf-8")
+CPU_REGISTRY_SOURCE = (REPOSITORY_ROOT / "ggml/src/ggml-cpu/ggml-cpu.cpp").read_text(encoding="utf-8")
 CACHE_SOURCE = (REPOSITORY_ROOT / "ggml/src/ggml-cpu/siliangem_moe_cache.h").read_text(encoding="utf-8")
 LOADER_SOURCE = (REPOSITORY_ROOT / "src/llama-model-loader.cpp").read_text(encoding="utf-8")
 
@@ -25,6 +26,33 @@ def function_body(source: str, signature: str) -> str:
 
 
 class StockArenaSourceContractTests(unittest.TestCase):
+    def test_selected_cpu_variant_exposes_and_receives_siliang_sources(self) -> None:
+        for proc_name in (
+            "ggml_siliangem_set_expert_source",
+            "ggml_siliangem_set_scattered_source",
+        ):
+            self.assertIn(f'if (strcmp(name, "{proc_name}") == 0)', CPU_REGISTRY_SOURCE)
+            self.assertIn(f'llama_siliangem_get_cpu_proc("{proc_name}")', LOADER_SOURCE)
+
+        self.assertIn("ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU)", LOADER_SOURCE)
+        self.assertIn("ggml_backend_reg_get_proc_address(reg, name)", LOADER_SOURCE)
+        self.assertIn("if (set_expert_source)", LOADER_SOURCE)
+        self.assertIn("if (set_scattered_source)", LOADER_SOURCE)
+        self.assertIn("skipping Siliang model-file arena source", LOADER_SOURCE)
+        self.assertIn("Siliang model-file arena source is unavailable", LOADER_SOURCE)
+        self.assertNotIn("ggml_siliangem_set_expert_source(fname.c_str()", LOADER_SOURCE)
+        self.assertNotIn("ggml_siliangem_set_scattered_source(fname.c_str()", LOADER_SOURCE)
+        registry_window = CPU_REGISTRY_SOURCE[
+            CPU_REGISTRY_SOURCE.index('#if defined(_WIN32)', CPU_REGISTRY_SOURCE.index('ggml_backend_cpu_set_use_ref')):
+            CPU_REGISTRY_SOURCE.index('#endif', CPU_REGISTRY_SOURCE.index('ggml_siliangem_set_scattered_source')) + len('#endif')
+        ]
+        self.assertIn("ggml_siliangem_set_expert_source", registry_window)
+        self.assertIn("ggml_siliangem_set_scattered_source", registry_window)
+        helper = function_body(LOADER_SOURCE, "static void * llama_siliangem_get_cpu_proc")
+        self.assertIn("#if defined(_WIN32)", helper)
+        self.assertIn("#else", helper)
+        self.assertIn("(void) name;", helper)
+
     def test_loader_publishes_every_layer_part_stride(self) -> None:
         self.assertIn("std::vector<uint32_t> sc_stride;", LOADER_SOURCE)
         self.assertIn("sc_stride.push_back((uint32_t) stride);", LOADER_SOURCE)

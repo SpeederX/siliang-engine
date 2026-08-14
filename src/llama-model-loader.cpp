@@ -2,7 +2,7 @@
 
 #include "ggml-alloc.h"
 #include "ggml.h"
-#include "ggml-cpu.h"   // ggml_siliangem_set_expert_source
+#include "ggml-cpu.h"
 #include "gguf.h"
 #include "llama-hparams.h"
 #include "llama.h"
@@ -18,6 +18,27 @@
 static const size_t kiB = 1024;
 static const size_t MiB = 1024*kiB;
 static const size_t GiB = 1024*MiB;
+
+static void * llama_siliangem_get_cpu_proc(const char * name) {
+#if defined(_WIN32)
+    ggml_backend_dev_t dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
+    if (!dev) {
+        LLAMA_LOG_DEBUG("%s: CPU backend is not loaded; skipping Siliang model-file arena source\n", __func__);
+        return nullptr;
+    }
+
+    ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(dev);
+    void * proc = ggml_backend_reg_get_proc_address(reg, name);
+    if (!proc) {
+        LLAMA_LOG_WARN("%s: selected CPU backend does not provide %s; Siliang model-file arena source is unavailable\n",
+                __func__, name);
+    }
+    return proc;
+#else
+    (void) name;
+    return nullptr;
+#endif
+}
 
 const char * llama_file_version_name(llama_fver version) {
     switch (version) {
@@ -935,10 +956,14 @@ llama_model_loader::llama_model_loader(
                 // against the parts THIS file actually uses, not an assumed
                 // gate/up/down. A fused-gate_up model (Gemma 4) otherwise
                 // parses as "not an expert" and drops silently back to mmap.
-                ggml_siliangem_set_expert_source(fname.c_str(), (int) nl, (int) n_exp,
-                        (int) np, em_base.data(), em_stride.data(),
-                        em_poff.data(), em_pbytes.data(), pnames.c_str());
-                LLAMA_LOG_INFO("%s: expert cache source set to the model file\n", __func__);
+                auto * set_expert_source = (decltype(ggml_siliangem_set_expert_source) *)
+                        llama_siliangem_get_cpu_proc("ggml_siliangem_set_expert_source");
+                if (set_expert_source) {
+                    set_expert_source(fname.c_str(), (int) nl, (int) n_exp,
+                            (int) np, em_base.data(), em_stride.data(),
+                            em_poff.data(), em_pbytes.data(), pnames.c_str());
+                    LLAMA_LOG_INFO("%s: expert cache source set to the model file\n", __func__);
+                }
             } else if (!fname.empty()) {
                 LLAMA_LOG_WARN("%s: siliangem: split GGUF (%zu files) cannot use the "
                                "expert-major model file as an arena source - using mmap\n",
@@ -1042,12 +1067,16 @@ llama_model_loader::llama_model_loader(
                 if (expert_bytes > max_expert_bytes) max_expert_bytes = expert_bytes;
             }
             if (max_expert_bytes <= 0xFFFFFFFFull) {
-                ggml_siliangem_set_scattered_source(fname.c_str(), sc_layers, (int) sc_experts,
-                                                   sc_base.data(), sc_stride.data());
-                LLAMA_LOG_INFO("%s: siliangem scattered source: %d layers x %u experts, "
-                               "expert bytes %" PRIu64 "..%" PRIu64 " - stock GGUF, no repack\n",
-                               __func__, sc_layers, sc_experts,
-                               min_expert_bytes, max_expert_bytes);
+                auto * set_scattered_source = (decltype(ggml_siliangem_set_scattered_source) *)
+                        llama_siliangem_get_cpu_proc("ggml_siliangem_set_scattered_source");
+                if (set_scattered_source) {
+                    set_scattered_source(fname.c_str(), sc_layers, (int) sc_experts,
+                                                        sc_base.data(), sc_stride.data());
+                    LLAMA_LOG_INFO("%s: siliangem scattered source: %d layers x %u experts, "
+                                   "expert bytes %" PRIu64 "..%" PRIu64 " - stock GGUF, no repack\n",
+                                   __func__, sc_layers, sc_experts,
+                                   min_expert_bytes, max_expert_bytes);
+                }
             } else {
                 LLAMA_LOG_INFO("%s: siliangem: expert size exceeds 32-bit cache geometry "
                                "(%" PRIu64 " B) - scattered source declined\n",

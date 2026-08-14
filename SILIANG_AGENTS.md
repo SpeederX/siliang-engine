@@ -131,7 +131,7 @@ which outputs are incomplete.
 
 Before committing, run the repository hygiene and provenance checks and inspect
 the staged diff. Scope whitespace checking to the public-authored files plus the
-five engine-delta paths listed in `docs/PROVENANCE.md`; the pinned
+six engine-delta paths listed in `docs/PROVENANCE.md`; the pinned
 upstream tree contains preexisting whitespace that is not part of this patch.
 Do not normalize or reformat unrelated upstream files to make a whole-tree
 check clean. Do not add a remote, push, publish, or rewrite history unless the

@@ -10,12 +10,24 @@ the repository for generated builds, models, logs, and benchmark results.
 
 .\scripts\build.ps1 `
     -Backend Cuda `
-    -CudaArchitecture "<compute-capability>" `
     -BuildRoot "<build-root>"
 ```
 
-The CUDA architecture is mandatory for CUDA builds. The script configures a
-Release build with network-dependent upstream features disabled.
+When `-CudaArchitecture` is omitted, CUDA delegates architecture selection to
+the pinned upstream `llama.cpp` source and installed CUDA toolkit. A local
+diagnostic build can still select a
+single target, for example `-CudaArchitecture 75` for compute capability 7.5.
+The script configures a Release build with network-dependent upstream features
+disabled. CPU code uses the same portable dispatch model as official
+`llama.cpp` packages:
+`GGML_NATIVE=OFF`, `GGML_BACKEND_DL=ON`, and
+`GGML_CPU_ALL_VARIANTS=ON`. The package selects the best compatible CPU backend
+at runtime instead of inheriting the instruction set of the build machine.
+
+The helper above is the supported Windows release entry point. Linux and macOS
+currently use the ordinary upstream CMake build surface; release CI compiles
+representative Linux CPU and macOS Metal configurations to preserve fork
+compatibility. The Siliang expert arena itself remains Windows-only.
 
 ## Model preparation
 

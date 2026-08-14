@@ -63,9 +63,119 @@ jobs:
         shell: pwsh
         run: .\scripts\test.ps1 -PythonExecutable python -BuildDirectory $env:SILIANG_CI_BUILD
 
+  validate-linux:
+    name: Validate Linux CPU compatibility
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out full fork history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: gguf-py/pyproject.toml
+
+      - name: Install gguf-py
+        run: python -m pip install --disable-pip-version-check ./gguf-py
+
+      - name: Run portable source contracts
+        run: |
+          python -m unittest -v \
+            tests.test_hygiene \
+            tests.test_converter \
+            tests.test_release_packaging \
+            tests.test_stock_arena_contract
+
+      - name: Configure portable Linux build
+        run: |
+          cmake -S . -B "$RUNNER_TEMP/siliang-linux" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=ON \
+            -DGGML_NATIVE=OFF \
+            -DGGML_BACKEND_DL=ON \
+            -DGGML_CPU_ALL_VARIANTS=ON \
+            -DGGML_CUDA=OFF \
+            -DLLAMA_CURL=OFF \
+            -DLLAMA_BUILD_TESTS=ON \
+            -DLLAMA_BUILD_TOOLS=ON \
+            -DLLAMA_BUILD_SERVER=ON \
+            -DLLAMA_BUILD_EXAMPLES=OFF \
+            -DLLAMA_BUILD_UI=OFF \
+            -DLLAMA_USE_PREBUILT_UI=OFF
+
+      - name: Build and smoke Linux runtime
+        run: |
+          cmake --build "$RUNNER_TEMP/siliang-linux" --config Release --parallel 2
+          "$RUNNER_TEMP/siliang-linux/bin/llama-cli" --version
+          "$RUNNER_TEMP/siliang-linux/bin/llama-cli" --verbose --list-devices
+          ctest --test-dir "$RUNNER_TEMP/siliang-linux" --output-on-failure \
+            -R '^(test-gguf|test-log|test-arg-parser)$'
+
+  validate-macos:
+    name: Validate macOS Metal compatibility
+    runs-on: macos-14
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out full fork history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: gguf-py/pyproject.toml
+
+      - name: Install gguf-py
+        run: python -m pip install --disable-pip-version-check ./gguf-py
+
+      - name: Run portable source contracts
+        run: |
+          python -m unittest -v \
+            tests.test_hygiene \
+            tests.test_converter \
+            tests.test_release_packaging \
+            tests.test_stock_arena_contract
+
+      - name: Configure upstream-compatible Metal build
+        run: |
+          cmake -S . -B "$RUNNER_TEMP/siliang-macos" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=ON \
+            -DGGML_NATIVE=OFF \
+            -DGGML_BACKEND_DL=ON \
+            -DGGML_CPU_ALL_VARIANTS=OFF \
+            -DGGML_METAL=ON \
+            -DLLAMA_CURL=OFF \
+            -DLLAMA_BUILD_TESTS=ON \
+            -DLLAMA_BUILD_TOOLS=ON \
+            -DLLAMA_BUILD_SERVER=ON \
+            -DLLAMA_BUILD_EXAMPLES=OFF \
+            -DLLAMA_BUILD_UI=OFF \
+            -DLLAMA_USE_PREBUILT_UI=OFF
+
+      - name: Build and smoke macOS runtime
+        run: |
+          cmake --build "$RUNNER_TEMP/siliang-macos" --config Release --parallel 2
+          "$RUNNER_TEMP/siliang-macos/bin/llama-cli" --version
+          "$RUNNER_TEMP/siliang-macos/bin/llama-cli" --verbose --list-devices
+          ctest --test-dir "$RUNNER_TEMP/siliang-macos" --output-on-failure \
+            -R '^(test-gguf|test-log|test-arg-parser)$'
+
   package-windows:
     name: Package Windows ${{ matrix.label }}
-    needs: validate-windows
+    needs: [validate-windows, validate-linux, validate-macos]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: windows-2022
     timeout-minutes: 180
@@ -76,11 +186,9 @@ jobs:
           - backend: Cpu
             label: CPU
             slug: cpu
-            cuda_architecture: ''
           - backend: Cuda
-            label: CUDA 13.2 sm75
-            slug: cuda-13.2-sm75
-            cuda_architecture: '75'
+            label: CUDA 13.2 multi-arch
+            slug: cuda-13.2
 
     steps:
       - name: Check out full fork history
@@ -108,7 +216,7 @@ jobs:
           $buildDirectory = Join-Path $env:RUNNER_TEMP ("siliang-release-${{ matrix.slug }}-{0}-{1}" -f $env:GITHUB_RUN_ID, $env:GITHUB_RUN_ATTEMPT)
           $env:SOURCE_DATE_EPOCH = (& git show -s --format=%ct $env:GITHUB_SHA).Trim()
           if ('${{ matrix.backend }}' -eq 'Cuda') {
-              .\scripts\build.ps1 -Backend Cuda -CudaArchitecture '${{ matrix.cuda_architecture }}' -BuildDirectory $buildDirectory -Parallel 2
+              .\scripts\build.ps1 -Backend Cuda -BuildDirectory $buildDirectory -Parallel 2
           } else {
               .\scripts\build.ps1 -Backend Cpu -BuildDirectory $buildDirectory -Parallel 2
           }
@@ -149,11 +257,80 @@ jobs:
               Copy-Item -LiteralPath $runtimeLibrary.FullName -Destination $binTarget
           }
 
+          $expectedCpuVariants = @(
+              'ggml-cpu-alderlake.dll'
+              'ggml-cpu-cannonlake.dll'
+              'ggml-cpu-cascadelake.dll'
+              'ggml-cpu-haswell.dll'
+              'ggml-cpu-icelake.dll'
+              'ggml-cpu-sandybridge.dll'
+              'ggml-cpu-skylakex.dll'
+              'ggml-cpu-sse42.dll'
+              'ggml-cpu-x64.dll'
+          )
+          $actualCpuVariants = @(
+              Get-ChildItem -LiteralPath $binTarget -Filter 'ggml-cpu*.dll' -File |
+                  Select-Object -ExpandProperty Name |
+                  Sort-Object
+          )
+          if (($actualCpuVariants -join "`n") -cne (($expectedCpuVariants | Sort-Object) -join "`n")) {
+              throw "Portable CPU backend inventory mismatch. Found: $($actualCpuVariants -join ', ')."
+          }
+
+          $cmakeCachePath = Join-Path $env:SILIANG_RELEASE_BUILD 'CMakeCache.txt'
+          $expectedCacheEntries = [ordered]@{
+              BUILD_SHARED_LIBS = 'ON'
+              GGML_NATIVE = 'OFF'
+              GGML_BACKEND_DL = 'ON'
+              GGML_CPU_ALL_VARIANTS = 'ON'
+          }
+          foreach ($cacheEntry in $expectedCacheEntries.GetEnumerator()) {
+              $cacheMatch = @(Select-String -LiteralPath $cmakeCachePath -Pattern ("^{0}:BOOL=(.+)$" -f $cacheEntry.Key))
+              if ($cacheMatch.Count -ne 1 -or $cacheMatch[0].Matches[0].Groups[1].Value -cne $cacheEntry.Value) {
+                  throw "Effective CMake cache does not contain $($cacheEntry.Key):BOOL=$($cacheEntry.Value)."
+              }
+          }
+
+          $buildReceiptPath = Join-Path $env:SILIANG_RELEASE_BUILD 'SILIANG-BUILD-CONFIG.json'
+          if (-not (Test-Path -LiteralPath $buildReceiptPath -PathType Leaf)) {
+              throw "Siliang build receipt was not produced: $buildReceiptPath"
+          }
+          $buildReceipt = Get-Content -LiteralPath $buildReceiptPath -Raw | ConvertFrom-Json
+          if ($buildReceipt.schema -cne 'siliang-build-config-v1' -or
+              $buildReceipt.backend -cne '${{ matrix.backend }}') {
+              throw 'Siliang build receipt identity does not match the package arm.'
+          }
+          $effectiveCudaArchitectures = [string]$buildReceipt.cuda_architectures
+          if ('${{ matrix.backend }}' -eq 'Cuda') {
+              if ($buildReceipt.cuda_architecture_source -cne 'llama.cpp-upstream') {
+                  throw "Tagged CUDA releases must use upstream architecture selection, got: $($buildReceipt.cuda_architecture_source)."
+              }
+              $cudaArchitectureEntries = @(
+                  $effectiveCudaArchitectures -split ';' |
+                      Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+              )
+              if ($cudaArchitectureEntries.Count -lt 2 -or
+                  $effectiveCudaArchitectures -ceq 'native') {
+                  throw "Expected an upstream multi-architecture CUDA release build, got: $effectiveCudaArchitectures."
+              }
+          } elseif ($effectiveCudaArchitectures -cne 'none' -or
+                    $buildReceipt.cuda_architecture_source -cne 'not-applicable') {
+              throw 'CPU release build receipt contains CUDA architecture state.'
+          }
+
+          $cudaBackend = Join-Path $binTarget 'ggml-cuda.dll'
+          if ('${{ matrix.backend }}' -eq 'Cuda') {
+              if (-not (Test-Path -LiteralPath $cudaBackend -PathType Leaf)) {
+                  throw "CUDA backend was not packaged: $cudaBackend"
+              }
+          } elseif (Test-Path -LiteralPath $cudaBackend -PathType Leaf) {
+              throw 'The CPU package unexpectedly contains ggml-cuda.dll.'
+          }
+
           # The Windows runner's OpenSSL installation is selected by CMake, but
           # its runtime DLLs are not copied into bin\Release. Resolve the exact
           # installation from CMakeCache.txt instead of relying on the runner's
           # PATH, then package its license alongside the DLLs.
-          $cmakeCachePath = Join-Path $env:SILIANG_RELEASE_BUILD 'CMakeCache.txt'
           $opensslIncludeMatch = Select-String -LiteralPath $cmakeCachePath -Pattern '^OPENSSL_INCLUDE_DIR:PATH=(.+)$'
           if ($opensslIncludeMatch.Count -ne 1) {
               throw "Expected one OPENSSL_INCLUDE_DIR entry in $cmakeCachePath."
@@ -188,25 +365,51 @@ jobs:
               throw 'Failed to record the packaged OpenSSL version.'
           }
 
+          $cudaRuntimeNames = [ordered]@{
+              cudart = 'none'
+              cublas = 'none'
+              cublasLt = 'none'
+          }
           if ('${{ matrix.backend }}' -eq 'Cuda') {
-              $cudaRuntimeFiles = @()
-              foreach ($searchRoot in @(
+              $cudaSearchRoots = @(
                   (Join-Path $env:CUDA_PATH 'bin'),
                   (Join-Path $env:CUDA_PATH 'bin\x64'),
                   (Join-Path $env:CUDA_PATH 'lib')
-              )) {
-                  if (Test-Path -LiteralPath $searchRoot -PathType Container) {
-                      foreach ($pattern in @('cudart64_*.dll', 'cublas64_*.dll', 'cublasLt64_*.dll')) {
-                          $cudaRuntimeFiles += Get-ChildItem -LiteralPath $searchRoot -Filter $pattern -File
+              )
+              $cudaRuntimePatterns = [ordered]@{
+                  cudart = 'cudart64_*.dll'
+                  cublas = 'cublas64_*.dll'
+                  cublasLt = 'cublasLt64_*.dll'
+              }
+              foreach ($runtimePattern in $cudaRuntimePatterns.GetEnumerator()) {
+                  $runtimeMatches = @()
+                  foreach ($searchRoot in $cudaSearchRoots) {
+                      if (Test-Path -LiteralPath $searchRoot -PathType Container) {
+                          $runtimeMatches += Get-ChildItem -LiteralPath $searchRoot -Filter $runtimePattern.Value -File
                       }
                   }
+                  $runtimeNames = @($runtimeMatches | Select-Object -ExpandProperty Name | Sort-Object -Unique)
+                  if ($runtimeNames.Count -ne 1) {
+                      throw "Expected one $($runtimePattern.Key) runtime DLL name, found: $($runtimeNames -join ', ')."
+                  }
+                  $cudaRuntime = $runtimeMatches |
+                      Where-Object { $_.Name -ceq $runtimeNames[0] } |
+                      Sort-Object -Property FullName |
+                      Select-Object -First 1
+                  Copy-Item -LiteralPath $cudaRuntime.FullName -Destination $binTarget
+                  $cudaRuntimeNames[$runtimePattern.Key] = $cudaRuntime.Name
               }
-              $cudaRuntimeFiles = @($cudaRuntimeFiles | Sort-Object -Property Name -Unique)
-              if ($cudaRuntimeFiles.Count -lt 3) {
-                  throw 'The CUDA runtime package is incomplete.'
-              }
-              foreach ($cudaRuntimeFile in $cudaRuntimeFiles) {
-                  Copy-Item -LiteralPath $cudaRuntimeFile.FullName -Destination $binTarget
+
+              foreach ($runtimePattern in $cudaRuntimePatterns.GetEnumerator()) {
+                  $packagedRuntimeNames = @(
+                      Get-ChildItem -LiteralPath $binTarget -Filter $runtimePattern.Value -File |
+                          Select-Object -ExpandProperty Name |
+                          Sort-Object -Unique
+                  )
+                  if ($packagedRuntimeNames.Count -ne 1 -or
+                      $packagedRuntimeNames[0] -cne $cudaRuntimeNames[$runtimePattern.Key]) {
+                      throw "Packaged $($runtimePattern.Key) runtime inventory is not exact."
+                  }
               }
 
               foreach ($licenseName in @('EULA.txt', 'LICENSE')) {
@@ -217,12 +420,81 @@ jobs:
               }
           }
 
+          $selectedCpuVariant = $null
+          $loadedCudaBackend = $null
+          $originalPath = $env:PATH
+          Push-Location $binTarget
+          try {
+              $env:PATH = "$binTarget;$env:SystemRoot\System32;$env:SystemRoot"
+              if ('${{ matrix.backend }}' -eq 'Cuda') {
+                  $cudaLoadOrder = @(
+                      $cudaRuntimeNames.cudart
+                      $cudaRuntimeNames.cublasLt
+                      $cudaRuntimeNames.cublas
+                      'ggml-cuda.dll'
+                  )
+                  $cudaLoadHandles = New-Object 'Collections.Generic.List[IntPtr]'
+                  try {
+                      foreach ($cudaLoadName in $cudaLoadOrder) {
+                          $cudaLoadPath = Join-Path $binTarget $cudaLoadName
+                          try {
+                              $cudaLoadHandle = [Runtime.InteropServices.NativeLibrary]::Load($cudaLoadPath)
+                          } catch {
+                              throw "Packaged CUDA library is not loadable: $cudaLoadName. $($_.Exception.Message)"
+                          }
+                          if ($cudaLoadHandle -eq [IntPtr]::Zero) {
+                              throw "Packaged CUDA library returned a null load handle: $cudaLoadName."
+                          }
+                          $cudaLoadHandles.Add($cudaLoadHandle)
+                      }
+                  } finally {
+                      for ($cudaHandleIndex = $cudaLoadHandles.Count - 1; $cudaHandleIndex -ge 0; $cudaHandleIndex--) {
+                          [Runtime.InteropServices.NativeLibrary]::Free($cudaLoadHandles[$cudaHandleIndex])
+                      }
+                  }
+              }
+
+              $dispatchOutput = @(& (Join-Path $binTarget 'llama-cli.exe') --verbose --list-devices 2>&1)
+              if ($LASTEXITCODE -ne 0) {
+                  throw "llama-cli.exe --list-devices failed from the assembled package with exit code $LASTEXITCODE."
+              }
+              foreach ($dispatchLine in @($dispatchOutput | ForEach-Object { $_.ToString() })) {
+                  if ($dispatchLine -match 'loaded CPU backend from .*[\\/](ggml-cpu-[A-Za-z0-9._-]+\.dll)\s*$') {
+                      if ($null -ne $selectedCpuVariant -and $selectedCpuVariant -cne $Matches[1]) {
+                          throw "Runtime loaded more than one CPU variant: $selectedCpuVariant and $($Matches[1])."
+                      }
+                      $selectedCpuVariant = $Matches[1]
+                  }
+                  if ($dispatchLine -match 'loaded CUDA backend from .*[\\/](ggml-cuda\.dll)\s*$') {
+                      if ($null -ne $loadedCudaBackend) {
+                          throw 'Runtime reported the packaged CUDA backend more than once.'
+                      }
+                      $loadedCudaBackend = $Matches[1]
+                  }
+              }
+          } finally {
+              $env:PATH = $originalPath
+              Pop-Location
+          }
+          if ([string]::IsNullOrWhiteSpace($selectedCpuVariant) -or
+              -not (Test-Path -LiteralPath (Join-Path $binTarget $selectedCpuVariant) -PathType Leaf)) {
+              throw 'Runtime CPU dispatch did not select exactly one packaged CPU backend variant.'
+          }
+          if ('${{ matrix.backend }}' -eq 'Cuda') {
+              if ($loadedCudaBackend -cne 'ggml-cuda.dll') {
+                  throw 'Runtime did not load exactly the packaged ggml-cuda.dll backend.'
+              }
+          } elseif ($null -ne $loadedCudaBackend) {
+              throw 'The CPU package unexpectedly reported a loaded CUDA backend.'
+          }
+
           Copy-Item -LiteralPath '.\README.md', '.\THIRD_PARTY_NOTICES.md', '.\LICENSE' -Destination $packageRoot
           foreach ($licenseFile in (Get-ChildItem -LiteralPath '.\licenses' -File)) {
               Copy-Item -LiteralPath $licenseFile.FullName -Destination $licenseTarget
           }
           Copy-Item -LiteralPath '.\vendor\cpp-httplib\LICENSE' -Destination (Join-Path $licenseTarget 'CPP-HTTPLIB-MIT.txt')
           Copy-Item -LiteralPath '.\docs\PROVENANCE.md', '.\docs\source-manifest.json', '.\patches\siliang-engine.patch' -Destination $provenanceTarget
+          Copy-Item -LiteralPath $buildReceiptPath -Destination $provenanceTarget
           Copy-Item -LiteralPath '.\scripts\siliang-env.ps1' -Destination $scriptTarget
 
           $cmakeVersion = (& cmake --version | Select-Object -First 1)
@@ -233,11 +505,19 @@ jobs:
               "backend=${{ matrix.backend }}"
               "openssl_runtime=$opensslVersion"
               "cuda_toolkit=$(if ('${{ matrix.backend }}' -eq 'Cuda') { '13.2.0' } else { 'none' })"
-              "cuda_architecture=$(if ('${{ matrix.backend }}' -eq 'Cuda') { '${{ matrix.cuda_architecture }}' } else { 'none' })"
+              "cuda_architectures=$effectiveCudaArchitectures"
+              "cuda_runtime_cudart=$($cudaRuntimeNames.cudart)"
+              "cuda_runtime_cublas=$($cudaRuntimeNames.cublas)"
+              "cuda_runtime_cublaslt=$($cudaRuntimeNames.cublasLt)"
+              "cuda_backend_loadability=$(if ('${{ matrix.backend }}' -eq 'Cuda') { 'native-library-load-pass' } else { 'not-applicable' })"
               "runner_image=$env:ImageOS"
               "runner_image_version=$env:ImageVersion"
               "cmake=$cmakeVersion"
-              'ggml_native=OFF (SOURCE_DATE_EPOCH set from the tagged commit)'
+              'ggml_native=OFF'
+              'ggml_backend_dl=ON'
+              'ggml_cpu_all_variants=ON'
+              'cpu_dispatch=runtime-selected'
+              "cpu_dispatch_build_host_selection=$selectedCpuVariant"
           )
           [IO.File]::WriteAllLines(
               (Join-Path $provenanceTarget 'BUILD-INFO.txt'),

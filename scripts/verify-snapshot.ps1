@@ -29,9 +29,9 @@ $expected = [ordered]@{
     upstreamTag = 'b10270'
     upstreamRootTree = '46f77bf060878e2b3b9d7c43b4d8a3a566ba3384'
     patchPath = 'patches/siliang-engine.patch'
-    patchSha256 = 'A4FE4D79DCBF0E17F04979ECECEA08C3C9DC7B7FF90AA959DE44774ADD127FF6'
-    patchGitBlob = '81744cd073906cee6819312e8acd03270f745b65'
-    patchInsertions = 2303
+    patchSha256 = 'ED45181907A0B3AEBC6E2E662486B5729871502FA8B265D7719CC87842D8266B'
+    patchGitBlob = '4875174bd377fe906fb68e3359985088690d34a7'
+    patchInsertions = 2340
     patchDeletions = 4
 }
 
@@ -51,6 +51,13 @@ $expectedFiles = @(
         finalBlob = '9c18ea720354a1e82be5aa67c286ada4dea96f8d'
     },
     [ordered]@{
+        path = 'ggml/src/ggml-cpu/ggml-cpu.cpp'
+        status = 'modified'
+        mode = '100644'
+        baseBlob = '16cc5116c5451787c6a1dd1988e38b761f20ef12'
+        finalBlob = '4ab2467b5bbe1a95801c65a3b46e0454ec679bbc'
+    },
+    [ordered]@{
         path = 'ggml/src/ggml-cpu/siliangem_moe_cache.h'
         status = 'added'
         mode = '100644'
@@ -62,7 +69,8 @@ $expectedFiles = @(
         status = 'modified'
         mode = '100644'
         baseBlob = 'b31e92e2da7ef42eabbb47173bb1f2088c952f39'
-        finalBlob = '7241fd79312f7ff6812cd8492df361b3e637e7ae'
+        previousBlob = '7241fd79312f7ff6812cd8492df361b3e637e7ae'
+        finalBlob = '80994ea1e4d0cc1fb0e3eb8db2dcb5238d106c97'
     },
     [ordered]@{
         path = 'src/llama-model-loader.h'
@@ -360,6 +368,9 @@ foreach ($file in $expectedFiles) {
     $headEntry = Get-HeadEntry $file.path
     if ($Authoring) {
         $allowedBlobs = @($file.baseBlob, $file.finalBlob) | Where-Object { $null -ne $_ }
+        if ($file.Contains('previousBlob')) {
+            $allowedBlobs += $file.previousBlob
+        }
         if ($null -ne $indexEntry -and
             ($indexEntry.Mode -cne $file.mode -or $indexEntry.Blob -notin $allowedBlobs)) {
             throw "Authoring index has an invalid entry for $($file.path): $($indexEntry.Mode) $($indexEntry.Blob)."
@@ -401,7 +412,7 @@ if (-not $Authoring) {
 }
 
 $mode = if ($Authoring) { 'authoring' } else { 'strict' }
-Write-Host ("Fork-root provenance verified ({0}): base {1}; tree {2}; five paths; patch +{3}/-{4}; SHA-256 {5}." -f
+Write-Host ("Fork-root provenance verified ({0}): base {1}; tree {2}; six paths; patch +{3}/-{4}; SHA-256 {5}." -f
     $mode,
     $expected.upstreamBase,
     $expected.upstreamRootTree,

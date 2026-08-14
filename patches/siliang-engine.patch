@@ -291,6 +291,25 @@ index 491316f7491252248d6f74a60440d3efa7aa6177..9c18ea720354a1e82be5aa67c286ada4
          const void * wdata = (src1->type == vec_dot_type) ? src1->data : params->wdata;
          const size_t row_size = ggml_row_size(vec_dot_type, ne10);
  
+diff --git a/ggml/src/ggml-cpu/ggml-cpu.cpp b/ggml/src/ggml-cpu/ggml-cpu.cpp
+index 16cc5116c5451787c6a1dd1988e38b761f20ef12..4ab2467b5bbe1a95801c65a3b46e0454ec679bbc 100644
+--- a/ggml/src/ggml-cpu/ggml-cpu.cpp
++++ b/ggml/src/ggml-cpu/ggml-cpu.cpp
+@@ -669,6 +669,14 @@ static void * ggml_backend_cpu_get_proc_address(ggml_backend_reg_t reg, const ch
+     if (strcmp(name, "ggml_backend_cpu_set_use_ref") == 0) {
+         return (void *)ggml_backend_cpu_set_use_ref;
+     }
++#if defined(_WIN32)
++    if (strcmp(name, "ggml_siliangem_set_expert_source") == 0) {
++        return (void *)ggml_siliangem_set_expert_source;
++    }
++    if (strcmp(name, "ggml_siliangem_set_scattered_source") == 0) {
++        return (void *)ggml_siliangem_set_scattered_source;
++    }
++#endif
+ 
+     // threadpool - TODO:  move to ggml-base
+     if (strcmp(name, "ggml_threadpool_new") == 0) {
 diff --git a/ggml/src/ggml-cpu/siliangem_moe_cache.h b/ggml/src/ggml-cpu/siliangem_moe_cache.h
 new file mode 100644
 index 0000000000000000000000000000000000000000..7b151a326decaec47585bdadf8ca567b616ab868
@@ -1954,18 +1973,46 @@ index 0000000000000000000000000000000000000000..7b151a326decaec47585bdadf8ca567b
 +
 +#endif /* _WIN32 */
 diff --git a/src/llama-model-loader.cpp b/src/llama-model-loader.cpp
-index b31e92e2da7ef42eabbb47173bb1f2088c952f39..7241fd79312f7ff6812cd8492df361b3e637e7ae 100644
+index b31e92e2da7ef42eabbb47173bb1f2088c952f39..80994ea1e4d0cc1fb0e3eb8db2dcb5238d106c97 100644
 --- a/src/llama-model-loader.cpp
 +++ b/src/llama-model-loader.cpp
 @@ -2,6 +2,7 @@
  
  #include "ggml-alloc.h"
  #include "ggml.h"
-+#include "ggml-cpu.h"   // ggml_siliangem_set_expert_source
++#include "ggml-cpu.h"
  #include "gguf.h"
  #include "llama-hparams.h"
  #include "llama.h"
-@@ -811,6 +812,250 @@ llama_model_loader::llama_model_loader(
+@@ -18,6 +19,27 @@ static const size_t kiB = 1024;
+ static const size_t MiB = 1024*kiB;
+ static const size_t GiB = 1024*MiB;
+ 
++static void * llama_siliangem_get_cpu_proc(const char * name) {
++#if defined(_WIN32)
++    ggml_backend_dev_t dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
++    if (!dev) {
++        LLAMA_LOG_DEBUG("%s: CPU backend is not loaded; skipping Siliang model-file arena source\n", __func__);
++        return nullptr;
++    }
++
++    ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(dev);
++    void * proc = ggml_backend_reg_get_proc_address(reg, name);
++    if (!proc) {
++        LLAMA_LOG_WARN("%s: selected CPU backend does not provide %s; Siliang model-file arena source is unavailable\n",
++                __func__, name);
++    }
++    return proc;
++#else
++    (void) name;
++    return nullptr;
++#endif
++}
++
+ const char * llama_file_version_name(llama_fver version) {
+     switch (version) {
+         case GGUF_FILE_VERSION_V1: return "GGUF V1 (support until nov 2023)";
+@@ -811,6 +833,258 @@ llama_model_loader::llama_model_loader(
          this->use_mmap = false;
      }
  
@@ -2092,10 +2139,14 @@ index b31e92e2da7ef42eabbb47173bb1f2088c952f39..7241fd79312f7ff6812cd8492df361b3
 +                // against the parts THIS file actually uses, not an assumed
 +                // gate/up/down. A fused-gate_up model (Gemma 4) otherwise
 +                // parses as "not an expert" and drops silently back to mmap.
-+                ggml_siliangem_set_expert_source(fname.c_str(), (int) nl, (int) n_exp,
-+                        (int) np, em_base.data(), em_stride.data(),
-+                        em_poff.data(), em_pbytes.data(), pnames.c_str());
-+                LLAMA_LOG_INFO("%s: expert cache source set to the model file\n", __func__);
++                auto * set_expert_source = (decltype(ggml_siliangem_set_expert_source) *)
++                        llama_siliangem_get_cpu_proc("ggml_siliangem_set_expert_source");
++                if (set_expert_source) {
++                    set_expert_source(fname.c_str(), (int) nl, (int) n_exp,
++                            (int) np, em_base.data(), em_stride.data(),
++                            em_poff.data(), em_pbytes.data(), pnames.c_str());
++                    LLAMA_LOG_INFO("%s: expert cache source set to the model file\n", __func__);
++                }
 +            } else if (!fname.empty()) {
 +                LLAMA_LOG_WARN("%s: siliangem: split GGUF (%zu files) cannot use the "
 +                               "expert-major model file as an arena source - using mmap\n",
@@ -2199,12 +2250,16 @@ index b31e92e2da7ef42eabbb47173bb1f2088c952f39..7241fd79312f7ff6812cd8492df361b3
 +                if (expert_bytes > max_expert_bytes) max_expert_bytes = expert_bytes;
 +            }
 +            if (max_expert_bytes <= 0xFFFFFFFFull) {
-+                ggml_siliangem_set_scattered_source(fname.c_str(), sc_layers, (int) sc_experts,
-+                                                   sc_base.data(), sc_stride.data());
-+                LLAMA_LOG_INFO("%s: siliangem scattered source: %d layers x %u experts, "
-+                               "expert bytes %" PRIu64 "..%" PRIu64 " - stock GGUF, no repack\n",
-+                               __func__, sc_layers, sc_experts,
-+                               min_expert_bytes, max_expert_bytes);
++                auto * set_scattered_source = (decltype(ggml_siliangem_set_scattered_source) *)
++                        llama_siliangem_get_cpu_proc("ggml_siliangem_set_scattered_source");
++                if (set_scattered_source) {
++                    set_scattered_source(fname.c_str(), sc_layers, (int) sc_experts,
++                                                        sc_base.data(), sc_stride.data());
++                    LLAMA_LOG_INFO("%s: siliangem scattered source: %d layers x %u experts, "
++                                   "expert bytes %" PRIu64 "..%" PRIu64 " - stock GGUF, no repack\n",
++                                   __func__, sc_layers, sc_experts,
++                                   min_expert_bytes, max_expert_bytes);
++                }
 +            } else {
 +                LLAMA_LOG_INFO("%s: siliangem: expert size exceeds 32-bit cache geometry "
 +                               "(%" PRIu64 " B) - scattered source declined\n",
@@ -2216,7 +2271,7 @@ index b31e92e2da7ef42eabbb47173bb1f2088c952f39..7241fd79312f7ff6812cd8492df361b3
      this->check_tensors = check_tensors;
      this->no_alloc = no_alloc;
      this->load_mtp = load_mtp;
-@@ -1302,6 +1547,65 @@ struct ggml_tensor * llama_model_loader::create_tensor(
+@@ -1302,6 +1576,65 @@ struct ggml_tensor * llama_model_loader::create_tensor(
          n_created++;
      }
  
@@ -2282,7 +2337,7 @@ index b31e92e2da7ef42eabbb47173bb1f2088c952f39..7241fd79312f7ff6812cd8492df361b3
      return tensor;
  }
  
-@@ -1354,6 +1658,13 @@ void llama_model_loader::init_mappings(bool prefetch, llama_mlocks * mlock_mmaps
+@@ -1354,6 +1687,13 @@ void llama_model_loader::init_mappings(bool prefetch, llama_mlocks * mlock_mmaps
      for (const auto & it : weights_map) {
          size_data += ggml_nbytes(it.second.tensor);
      }
@@ -2296,7 +2351,7 @@ index b31e92e2da7ef42eabbb47173bb1f2088c952f39..7241fd79312f7ff6812cd8492df361b3
  }
  
  void llama_model_loader::get_mapping_range(size_t * first, size_t * last, void ** addr, int idx, ggml_context * ctx) const {
-@@ -1534,14 +1845,43 @@ bool llama_model_loader::load_all_data(
+@@ -1534,14 +1874,43 @@ bool llama_model_loader::load_all_data(
              }
              uint8_t * data = (uint8_t *) mapping->addr() + weight->offs;
  
@@ -2343,7 +2398,7 @@ index b31e92e2da7ef42eabbb47173bb1f2088c952f39..7241fd79312f7ff6812cd8492df361b3
                  ggml_backend_tensor_alloc(buf_mmap, cur, data);
                  if (lmlocks) {
                      const auto & lmlock = lmlocks->at(weight->idx);
-@@ -1551,6 +1891,10 @@ bool llama_model_loader::load_all_data(
+@@ -1551,6 +1920,10 @@ bool llama_model_loader::load_all_data(
                  auto & mmap_used = mmaps_used[weight->idx];
                  mmap_used.first  = std::min(mmap_used.first,  weight->offs);
                  mmap_used.second = std::max(mmap_used.second, weight->offs + n_size);

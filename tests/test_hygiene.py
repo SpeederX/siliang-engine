@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import re
 import unittest
@@ -37,6 +38,7 @@ SILIANG_AUTHORED_FILES = (
     "tests/test_converter.py",
     "tests/test_hygiene.py",
     "tests/test_repack_wrapper.py",
+    "tests/test_release_packaging.py",
     "tests/test_runtime_gate.py",
     "tests/test_siliang_env.py",
     "tests/test_stock_arena_contract.py",
@@ -48,12 +50,31 @@ ENGINE_DELTA_FILES = (
     "ggml/include/ggml-cpu.h",
     "ggml/src/ggml-cpu/siliangem_moe_cache.h",
     "ggml/src/ggml-cpu/ggml-cpu.c",
+    "ggml/src/ggml-cpu/ggml-cpu.cpp",
     "src/llama-model-loader.cpp",
     "src/llama-model-loader.h",
 )
 
 
 class PublicTreeHygieneTests(unittest.TestCase):
+    def test_engine_delta_provenance_uses_the_same_six_path_boundary(self) -> None:
+        manifest = json.loads((REPOSITORY_ROOT / "docs/source-manifest.json").read_text(encoding="utf-8"))
+        manifest_paths = {
+            entry["path"] for entry in manifest["source"]["engineDelta"]["files"]
+        }
+        self.assertEqual(manifest_paths, set(ENGINE_DELTA_FILES))
+        self.assertEqual(len(manifest_paths), 6)
+
+        patch_text = (REPOSITORY_ROOT / "patches/siliang-engine.patch").read_text(encoding="utf-8")
+        patch_paths = set(re.findall(r"^diff --git a/(.+) b/\1$", patch_text, re.MULTILINE))
+        self.assertEqual(patch_paths, set(ENGINE_DELTA_FILES))
+
+        provenance = (REPOSITORY_ROOT / "docs/PROVENANCE.md").read_text(encoding="utf-8")
+        verifier = (REPOSITORY_ROOT / "scripts/verify-snapshot.ps1").read_text(encoding="utf-8")
+        self.assertIn("across six paths", provenance)
+        self.assertIn("exact six-path boundary", provenance)
+        self.assertIn("six paths; patch", verifier)
+
     def test_no_machine_bound_paths_or_obvious_secrets(self) -> None:
         patterns = {
             "Windows user-profile path": re.compile(r"[A-Za-z]:[\\/]+Users[\\/]+[^\\/\r\n]+", re.IGNORECASE),

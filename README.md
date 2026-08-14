@@ -17,7 +17,10 @@ also accelerate compatible monolithic stock GGUFs. In validated workloads, the
 recommended expert-major path has approached twice the decode throughput of the
 standard mmap baseline.
 
-Windows is supported today. Linux support is planned.
+The Siliang expert arena is supported on Windows today. The fork preserves the
+upstream backend architecture, and release CI also builds Linux CPU and macOS
+Metal configurations so Siliang changes cannot silently make the fork
+Windows-only. Porting the Siliang arena itself beyond Windows remains planned.
 
 The arena is opt-in: without an explicit positive `SILIANGEM_CACHE_MIB`, the
 engine keeps the ordinary mmap path and allocates no arena memory.
@@ -124,18 +127,35 @@ CPU:
 .\scripts\build.ps1 -Backend Cpu -BuildRoot "<build-root>"
 ```
 
-CUDA requires the GPU compute capability. For example, use `75` only for a GPU
-whose CUDA compute capability is 7.5.
+CUDA builds use the upstream `llama.cpp` multi-architecture selection for the
+installed CUDA toolkit when no architecture is supplied:
 
 ```powershell
 .\scripts\build.ps1 `
     -Backend Cuda `
-    -CudaArchitecture "<compute-capability>" `
     -BuildRoot "<build-root>"
 ```
 
-The scripts produce Release builds and do not choose a model or inference
-settings for you. More details are in [`scripts/README.md`](scripts/README.md).
+For a local diagnostic build, `-CudaArchitecture` can narrow the binary to one
+compute capability. For example, use `75` only for a GPU whose CUDA compute
+capability is 7.5:
+
+```powershell
+.\scripts\build.ps1 `
+    -Backend Cuda `
+    -CudaArchitecture 75 `
+    -BuildRoot "<build-root>"
+```
+
+Release builds do not pin one GPU generation or duplicate an architecture list
+inside Siliang. The effective CUDA architecture set selected by the pinned
+`llama.cpp`/CUDA toolchain is recorded in `provenance/BUILD-INFO.txt`.
+
+The scripts produce portable Release builds with runtime-selected CPU backend
+variants. `GGML_NATIVE` stays off so a package is not tied to the build host;
+compatible systems select an optimized variant such as Haswell/AVX2 when the
+process starts. The scripts do not choose a model or inference settings for
+you. More details are in [`scripts/README.md`](scripts/README.md).
 
 ## Credits
 
@@ -186,9 +206,16 @@ Contributors and coding agents should follow both the upstream
 
 ### Tagged artifacts
 
-Pushing a `v*` tag runs validation, then builds checksummed Windows CPU and
-CUDA packages. Actions retains them for 30 days; the workflow does not publish
-a GitHub Release, so maintainers review and promote the artifacts separately.
+Pushing a `v*` tag runs Windows, Linux, and macOS compatibility validation, then
+builds the release packages on Windows. The downloadable artifacts are:
+
+- `siliang-engine-<tag>-windows-x64-cpu.zip`
+- `siliang-engine-<tag>-windows-x64-cuda-13.2.zip`
+- `SHA256SUMS`
+
+Actions retains the verified packages for 30 days. Maintainers review them before
+attaching them to the corresponding [GitHub Release](https://github.com/SpeederX/siliang-engine/releases).
+For v0.1.2, see the [release notes](docs/releases/v0.1.2.md).
 
 ## License
 
