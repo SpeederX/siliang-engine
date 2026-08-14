@@ -1,0 +1,412 @@
+name: Publish Siliang Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to package and release"
+        required: true
+        default: "v0.1.2"
+        type: string
+
+concurrency:
+  group: siliang-release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  package-windows:
+    name: Package Windows ${{ matrix.label }}
+    runs-on: windows-2022
+    timeout-minutes: 180
+
+    permissions:
+      contents: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - backend: Cpu
+            label: CPU
+            slug: cpu
+
+          - backend: Cuda
+            label: CUDA 13.2 multi-arch
+            slug: cuda-13.2
+
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify release tag
+        shell: pwsh
+        run: |
+          $actual = (& git describe --tags --exact-match HEAD).Trim()
+
+          if ($actual -cne '${{ inputs.tag }}') {
+              throw "Expected tag '${{ inputs.tag }}', got '$actual'"
+          }
+
+          Write-Host "Packaging tag: $actual"
+          git log -1 --oneline
+
+      - name: Verify fork provenance
+        shell: pwsh
+        run: .\scripts\verify-snapshot.ps1
+
+      - name: Install CUDA Toolkit 13.2
+        if: matrix.backend == 'Cuda'
+        uses: Jimver/cuda-toolkit@3d45d157f327c09c04b50ee6ccdea2d9d017ec76
+        with:
+          cuda: '13.2.0'
+          use-github-cache: false
+          use-local-cache: false
+
+      - name: Build release
+        shell: pwsh
+        run: |
+          $buildDirectory = Join-Path `
+            $env:RUNNER_TEMP `
+            "siliang-release-${{ matrix.slug }}"
+
+          if ('${{ matrix.backend }}' -eq 'Cuda') {
+              .\scripts\build.ps1 `
+                -Backend Cuda `
+                -BuildDirectory $buildDirectory `
+                -Parallel 2
+          }
+          else {
+              .\scripts\build.ps1 `
+                -Backend Cpu `
+                -BuildDirectory $buildDirectory `
+                -Parallel 2
+          }
+
+          "SILIANG_RELEASE_BUILD=$buildDirectory" |
+            Out-File `
+              -FilePath $env:GITHUB_ENV `
+              -Append `
+              -Encoding utf8
+
+      - name: Assemble portable package
+        id: package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $tag = '${{ inputs.tag }}'
+
+          if ($tag -notmatch '^v[0-9A-Za-z][0-9A-Za-z._-]*$') {
+              throw "Unsafe release tag: $tag"
+          }
+
+          $artifactName = "siliang-engine-$tag-windows-x64-${{ matrix.slug }}"
+
+          $packageRoot = Join-Path $env:RUNNER_TEMP $artifactName
+          $binTarget = Join-Path $packageRoot 'bin'
+          $licenseTarget = Join-Path $packageRoot 'licenses'
+          $provenanceTarget = Join-Path $packageRoot 'provenance'
+          $scriptTarget = Join-Path $packageRoot 'scripts'
+
+          New-Item `
+            -ItemType Directory `
+            -Path $binTarget, $licenseTarget, $provenanceTarget, $scriptTarget |
+            Out-Null
+
+          $binSource = Join-Path $env:SILIANG_RELEASE_BUILD 'bin\Release'
+
+          foreach ($fileName in @(
+              'llama-server.exe',
+              'llama-cli.exe'
+          )) {
+              $source = Join-Path $binSource $fileName
+
+              if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+                  throw "Expected binary not found: $source"
+              }
+
+              Copy-Item $source $binTarget
+          }
+
+          Get-ChildItem `
+            -LiteralPath $binSource `
+            -Filter '*.dll' `
+            -File |
+            ForEach-Object {
+                Copy-Item $_.FullName $binTarget
+            }
+
+          # OpenSSL runtime used by the Windows build
+          $cmakeCache = Join-Path `
+            $env:SILIANG_RELEASE_BUILD `
+            'CMakeCache.txt'
+
+          $opensslMatch = Select-String `
+            -LiteralPath $cmakeCache `
+            -Pattern '^OPENSSL_INCLUDE_DIR:PATH=(.+)$'
+
+          if ($opensslMatch.Count -ne 1) {
+              throw 'Could not resolve OpenSSL from CMakeCache.txt'
+          }
+
+          $opensslInclude = `
+            $opensslMatch.Matches[0].Groups[1].Value
+
+          $opensslRoot = Split-Path -Parent $opensslInclude
+          $opensslBin = Join-Path $opensslRoot 'bin'
+
+          foreach ($runtime in @(
+              'libssl-3-x64.dll',
+              'libcrypto-3-x64.dll'
+          )) {
+              $source = Join-Path $opensslBin $runtime
+
+              if (-not (Test-Path $source)) {
+                  throw "Missing OpenSSL runtime: $runtime"
+              }
+
+              Copy-Item $source $binTarget -Force
+          }
+
+          $opensslLicense = Get-ChildItem `
+            -LiteralPath $opensslRoot `
+            -File |
+            Where-Object {
+                $_.Name -imatch '^license(?:\.txt)?$'
+            } |
+            Select-Object -First 1
+
+          if ($opensslLicense) {
+              Copy-Item `
+                $opensslLicense.FullName `
+                (Join-Path $licenseTarget 'OPENSSL-Apache-2.0.txt')
+          }
+
+          # CUDA runtime
+          if ('${{ matrix.backend }}' -eq 'Cuda') {
+              foreach ($pattern in @(
+                  'cudart64_*.dll',
+                  'cublas64_*.dll',
+                  'cublasLt64_*.dll'
+              )) {
+                  $runtime = Get-ChildItem `
+                    -Path (Join-Path $env:CUDA_PATH 'bin') `
+                    -Filter $pattern `
+                    -File |
+                    Select-Object -First 1
+
+                  if (-not $runtime) {
+                      throw "Missing CUDA runtime matching $pattern"
+                  }
+
+                  Copy-Item $runtime.FullName $binTarget -Force
+              }
+
+              foreach ($licenseName in @(
+                  'EULA.txt',
+                  'LICENSE'
+              )) {
+                  $cudaLicense = Join-Path `
+                    $env:CUDA_PATH `
+                    $licenseName
+
+                  if (Test-Path $cudaLicense) {
+                      Copy-Item `
+                        $cudaLicense `
+                        (Join-Path $licenseTarget "NVIDIA-CUDA-$licenseName")
+                  }
+              }
+          }
+
+          # Siliang documentation and licenses
+          Copy-Item `
+            '.\README.md', `
+            '.\THIRD_PARTY_NOTICES.md', `
+            '.\LICENSE' `
+            -Destination $packageRoot
+
+          if (Test-Path '.\licenses') {
+              Get-ChildItem '.\licenses' -File |
+                ForEach-Object {
+                    Copy-Item $_.FullName $licenseTarget
+                }
+          }
+
+          Copy-Item `
+            '.\vendor\cpp-httplib\LICENSE' `
+            (Join-Path $licenseTarget 'CPP-HTTPLIB-MIT.txt')
+
+          Copy-Item `
+            '.\docs\PROVENANCE.md', `
+            '.\docs\source-manifest.json', `
+            '.\patches\siliang-engine.patch' `
+            -Destination $provenanceTarget
+
+          $buildReceipt = Join-Path `
+            $env:SILIANG_RELEASE_BUILD `
+            'SILIANG-BUILD-CONFIG.json'
+
+          if (-not (Test-Path $buildReceipt)) {
+              throw 'SILIANG-BUILD-CONFIG.json was not generated'
+          }
+
+          Copy-Item $buildReceipt $provenanceTarget
+
+          Copy-Item `
+            '.\scripts\siliang-env.ps1' `
+            $scriptTarget
+
+          # Smoke test assembled package
+          Push-Location $binTarget
+
+          $oldPath = $env:PATH
+
+          try {
+              $env:PATH = `
+                "$binTarget;$env:SystemRoot\System32;$env:SystemRoot"
+
+              .\llama-cli.exe --version
+
+              if ($LASTEXITCODE -ne 0) {
+                  throw 'Packaged llama-cli.exe failed'
+              }
+
+              .\llama-server.exe --version
+
+              if ($LASTEXITCODE -ne 0) {
+                  throw 'Packaged llama-server.exe failed'
+              }
+          }
+          finally {
+              $env:PATH = $oldPath
+              Pop-Location
+          }
+
+          $zipPath = Join-Path `
+            $env:RUNNER_TEMP `
+            "$artifactName.zip"
+
+          Compress-Archive `
+            -LiteralPath $packageRoot `
+            -DestinationPath $zipPath `
+            -CompressionLevel Optimal
+
+          $digest = (
+              Get-FileHash `
+                $zipPath `
+                -Algorithm SHA256
+          ).Hash.ToLowerInvariant()
+
+          Write-Host "$artifactName.zip"
+          Write-Host "SHA256: $digest"
+
+          "artifact_name=$artifactName" |
+            Out-File `
+              $env:GITHUB_OUTPUT `
+              -Append `
+              -Encoding utf8
+
+          "zip_path=$zipPath" |
+            Out-File `
+              $env:GITHUB_OUTPUT `
+              -Append `
+              -Encoding utf8
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.artifact_name }}
+          path: ${{ steps.package.outputs.zip_path }}
+          if-no-files-found: error
+          retention-days: 30
+
+  checksums:
+    name: Create SHA256SUMS
+    needs: package-windows
+    runs-on: ubuntu-24.04
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Download packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: siliang-engine-${{ inputs.tag }}-windows-x64-*
+          path: packages
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS
+        run: |
+          cd packages
+
+          test "$(find . -maxdepth 1 -name '*.zip' | wc -l)" -eq 2
+
+          sha256sum *.zip | sort > SHA256SUMS
+
+          cat SHA256SUMS
+
+      - name: Upload SHA256SUMS
+        uses: actions/upload-artifact@v4
+        with:
+          name: siliang-engine-${{ inputs.tag }}-SHA256SUMS
+          path: packages/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: Create GitHub Release
+    needs: checksums
+    runs-on: ubuntu-24.04
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: siliang-engine-${{ inputs.tag }}-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Inspect release assets
+        run: |
+          ls -lah release-assets
+
+          test -f \
+            "release-assets/siliang-engine-${{ inputs.tag }}-windows-x64-cpu.zip"
+
+          test -f \
+            "release-assets/siliang-engine-${{ inputs.tag }}-windows-x64-cuda-13.2.zip"
+
+          test -f \
+            "release-assets/SHA256SUMS"
+
+          test -f \
+            "docs/releases/${{ inputs.tag }}.md"
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          gh release create "$TAG" \
+            "release-assets/siliang-engine-$TAG-windows-x64-cpu.zip" \
+            "release-assets/siliang-engine-$TAG-windows-x64-cuda-13.2.zip" \
+            "release-assets/SHA256SUMS" \
+            --verify-tag \
+            --title "Siliang Engine $TAG (Experimental)" \
+            --notes-file "docs/releases/$TAG.md" \
+            --prerelease \
+            --draft
