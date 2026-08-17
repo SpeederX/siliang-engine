@@ -77,13 +77,13 @@ jobs:
               .\scripts\build.ps1 `
                 -Backend Cuda `
                 -BuildDirectory $buildDirectory `
-                -Parallel 2
+                -Parallel 8
           }
           else {
               .\scripts\build.ps1 `
                 -Backend Cpu `
                 -BuildDirectory $buildDirectory `
-                -Parallel 2
+                -Parallel 8
           }
 
           "SILIANG_RELEASE_BUILD=$buildDirectory" |
@@ -188,21 +188,34 @@ jobs:
 
           # CUDA runtime
           if ('${{ matrix.backend }}' -eq 'Cuda') {
+              $cudaRuntimeDirs = @(
+                  (Join-Path $env:CUDA_PATH 'bin\x64')
+                  (Join-Path $env:CUDA_PATH 'bin')
+                  (Join-Path $env:CUDA_PATH 'lib')
+              ) | Where-Object {
+                  Test-Path -LiteralPath $_ -PathType Container
+              }
+              
               foreach ($pattern in @(
                   'cudart64_*.dll',
                   'cublas64_*.dll',
                   'cublasLt64_*.dll'
               )) {
-                  $runtime = Get-ChildItem `
-                    -Path (Join-Path $env:CUDA_PATH 'bin') `
-                    -Filter $pattern `
-                    -File |
-                    Select-Object -First 1
-
+                  $runtime = $cudaRuntimeDirs |
+                      ForEach-Object {
+                          Get-ChildItem `
+                              -LiteralPath $_ `
+                              -Filter $pattern `
+                              -File `
+                              -ErrorAction SilentlyContinue
+                      } |
+                      Select-Object -First 1
+              
                   if (-not $runtime) {
-                      throw "Missing CUDA runtime matching $pattern"
+                      throw "Missing CUDA runtime matching $pattern under $env:CUDA_PATH"
                   }
-
+              
+                  Write-Host "Bundling CUDA runtime: $($runtime.FullName)"
                   Copy-Item $runtime.FullName $binTarget -Force
               }
 
