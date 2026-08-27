@@ -62,6 +62,115 @@ extern "C" {
     struct llama_model;
     struct llama_context;
     struct llama_sampler;
+    struct llama_siliang_ds4_front_slab_runtime;
+
+    enum llama_siliang_expert_cache_policy {
+        LLAMA_SILIANG_EXPERT_CACHE_POLICY_LRU = 0,
+        LLAMA_SILIANG_EXPERT_CACHE_POLICY_LFU,
+        LLAMA_SILIANG_EXPERT_CACHE_POLICY_WTINYLFU_W10_SLRU_P80,
+        LLAMA_SILIANG_EXPERT_CACHE_POLICY_CUMULATIVE_LFU_ADMISSION,
+    };
+
+    enum llama_siliang_expert_cache_roll {
+        LLAMA_SILIANG_EXPERT_CACHE_ROLL_NONE = 0,
+        LLAMA_SILIANG_EXPERT_CACHE_ROLL_DEEPSEEK4,
+    };
+
+    // Typed configuration for Siliang's routed-expert memory hierarchy.
+    // Disabled and zero-sized by default. l1_k is the total persistent policy
+    // budget. Homogeneous models use one K set plus one exchange_r tail;
+    // heterogeneous models partition K and allocate one R tail per schema.
+    // elevator_p is one global pinned-host ring sized to the largest schema.
+    // K, R, and P are expressed as expert slots.
+    struct llama_siliang_expert_cache_params {
+        uint64_t l2_bytes;
+        uint32_t l1_k;
+        uint32_t exchange_r;
+        uint32_t elevator_p;
+        enum llama_siliang_expert_cache_policy l2_policy;
+        enum llama_siliang_expert_cache_policy l1_policy;
+        enum llama_siliang_expert_cache_roll roll;
+        bool enabled;
+        bool prefill;
+        bool memory_report;
+        bool deferred_wait;
+    };
+
+    enum llama_siliang_moe_arena_part_role {
+        LLAMA_SILIANG_MOE_ARENA_GATE_WEIGHT = 0,
+        LLAMA_SILIANG_MOE_ARENA_UP_WEIGHT,
+        LLAMA_SILIANG_MOE_ARENA_DOWN_WEIGHT,
+        LLAMA_SILIANG_MOE_ARENA_GATE_UP_WEIGHT,
+        LLAMA_SILIANG_MOE_ARENA_GATE_BIAS,
+        LLAMA_SILIANG_MOE_ARENA_UP_BIAS,
+        LLAMA_SILIANG_MOE_ARENA_DOWN_BIAS,
+        LLAMA_SILIANG_MOE_ARENA_GATE_UP_BIAS,
+        LLAMA_SILIANG_MOE_ARENA_GATE_SCALE,
+        LLAMA_SILIANG_MOE_ARENA_UP_SCALE,
+        LLAMA_SILIANG_MOE_ARENA_DOWN_SCALE,
+        LLAMA_SILIANG_MOE_ARENA_PART_ROLE_COUNT,
+    };
+
+    struct llama_siliang_moe_arena_model_info {
+        int32_t layer_count;
+        int32_t routed_layer_count;
+        int32_t expert_count;
+        int32_t top_k;
+        int32_t homogeneous_schema;
+    };
+
+    struct llama_siliang_moe_arena_part_info {
+        enum llama_siliang_moe_arena_part_role role;
+        const struct ggml_tensor * source;
+        enum ggml_type type;
+        int32_t expert_axis;
+        int64_t ne[4];
+        size_t nb[4];
+        size_t bytes_per_expert;
+        size_t source_expert_stride;
+    };
+
+    struct llama_siliang_moe_arena_layer_info {
+        int32_t layer;
+        int32_t expert_count;
+        size_t part_count;
+        struct llama_siliang_moe_arena_part_info parts[LLAMA_SILIANG_MOE_ARENA_PART_ROLE_COUNT];
+    };
+
+    struct llama_siliang_moe_arena_part_binding {
+        int32_t layer;
+        enum llama_siliang_moe_arena_part_role role;
+        struct ggml_tensor * arena;
+        uint32_t arena_slot_capacity;
+        uint32_t layer_slot_first;
+        uint32_t layer_slot_count;
+        uint32_t exchange_slot_first;
+        uint32_t exchange_slot_count;
+    };
+
+    typedef int (*llama_siliang_moe_arena_slot_mapper)(
+            void * user_data, int32_t layer,
+            const int32_t * logical_expert_ids,
+            int32_t * physical_slot_ids,
+            size_t count);
+    typedef int32_t (*llama_siliang_moe_arena_failure_query)(void * user_data);
+    typedef int (*llama_siliang_moe_arena_compute_wait_hook)(void * user_data, int32_t layer);
+
+    struct llama_siliang_ds4_front_slab_metrics {
+        int32_t prepared;
+        int32_t bound;
+        int32_t active;
+        size_t bank_bytes;
+        size_t host_store_bytes;
+        int32_t resident_layer;
+        uint64_t tokens;
+        uint64_t copies;
+        uint64_t waits;
+        uint64_t payload_h2d_bytes;
+        uint64_t wire_h2d_bytes;
+        uint64_t submission_host_ns;
+        uint64_t wait_enqueue_host_ns;
+    };
 
     typedef struct llama_memory_i * llama_memory_t;
 
@@ -406,6 +515,10 @@ extern "C" {
         // a source/target/parent context
         // can be utilized in various ways, for example by sharing results or llama_memory between 2 contexts
         struct llama_context * ctx_other;
+
+        // Siliang v0.1.3 extension. This release requires callers and binaries
+        // to be rebuilt together because llama_context_params is passed by value.
+        struct llama_siliang_expert_cache_params expert_cache;
     };
 
     struct llama_model_tensor_override {
@@ -568,6 +681,68 @@ extern "C" {
     LLAMA_API const struct llama_model * llama_get_model   (const struct llama_context * ctx);
     LLAMA_API           llama_memory_t   llama_get_memory  (const struct llama_context * ctx);
     LLAMA_API  enum llama_pooling_type   llama_pooling_type(const struct llama_context * ctx); // TODO: rename to llama_get_pooling_type
+
+    // Siliang routed-expert arena bridge. The native router still selects and
+    // weights logical experts; the mapper only translates those IDs to caller-
+    // owned physical CUDA slots. Bounded prefill is separately opt-in.
+    LLAMA_API int llama_siliang_moe_arena_get_model_info(
+            const struct llama_model * model,
+            struct llama_siliang_moe_arena_model_info * info);
+    LLAMA_API int llama_siliang_moe_arena_get_layer_info(
+            const struct llama_model * model,
+            int32_t layer,
+            struct llama_siliang_moe_arena_layer_info * info);
+    LLAMA_API int llama_siliang_moe_arena_bind(
+            struct llama_context * ctx,
+            const int32_t * managed_layers,
+            size_t managed_layer_count,
+            const struct llama_siliang_moe_arena_part_binding * parts,
+            size_t part_count,
+            uint32_t capacity,
+            llama_siliang_moe_arena_slot_mapper mapper,
+            llama_siliang_moe_arena_failure_query failure_query,
+            void * user_data);
+    LLAMA_API int llama_siliang_moe_arena_set_compute_wait(
+            struct llama_context * ctx,
+            llama_siliang_moe_arena_compute_wait_hook hook,
+            void * user_data);
+    LLAMA_API void llama_siliang_moe_arena_clear(struct llama_context * ctx);
+    LLAMA_API int32_t llama_siliang_moe_arena_failure(const struct llama_context * ctx);
+    LLAMA_API int llama_siliang_moe_arena_metrics(
+            const struct llama_context * ctx,
+            uint64_t * generation,
+            uint64_t * map_calls);
+    LLAMA_API struct ggml_backend * llama_siliang_cuda_backend(struct llama_context * ctx);
+    LLAMA_API struct ggml_backend * llama_siliang_cpu_backend(struct llama_context * ctx);
+
+    // Bind shallow alternate DeepSeek-V4 layer descriptors for the packed FRONT slab.
+    // The descriptors remain owned by the caller and must outlive the binding.
+    LLAMA_API int llama_siliang_ds4_front_slab_bind(
+            struct llama_context * ctx,
+            const void * const * alternate_layers,
+            size_t layer_count);
+    LLAMA_API void llama_siliang_ds4_front_slab_clear(struct llama_context * ctx);
+
+    // Opaque FRONT slab lifecycle. Create after model load, bind and activate
+    // after context creation, then deactivate and free before the context/model.
+    LLAMA_API struct llama_siliang_ds4_front_slab_runtime *
+        llama_siliang_ds4_front_slab_runtime_create(const struct llama_model * model);
+    LLAMA_API int llama_siliang_ds4_front_slab_runtime_bind(
+            struct llama_siliang_ds4_front_slab_runtime * runtime,
+            struct llama_context * ctx);
+    LLAMA_API int llama_siliang_ds4_front_slab_runtime_activate(
+            struct llama_siliang_ds4_front_slab_runtime * runtime);
+    LLAMA_API void llama_siliang_ds4_front_slab_runtime_deactivate(
+            struct llama_siliang_ds4_front_slab_runtime * runtime);
+    LLAMA_API void llama_siliang_ds4_front_slab_runtime_free(
+            struct llama_siliang_ds4_front_slab_runtime * runtime);
+    LLAMA_API int32_t llama_siliang_ds4_front_slab_runtime_failure(
+            const struct llama_siliang_ds4_front_slab_runtime * runtime);
+    LLAMA_API const char * llama_siliang_ds4_front_slab_runtime_failure_message(
+            const struct llama_siliang_ds4_front_slab_runtime * runtime);
+    LLAMA_API int llama_siliang_ds4_front_slab_runtime_metrics(
+            const struct llama_siliang_ds4_front_slab_runtime * runtime,
+            struct llama_siliang_ds4_front_slab_metrics * metrics);
 
     LLAMA_API const struct llama_vocab * llama_model_get_vocab(const struct llama_model * model);
     LLAMA_API enum llama_rope_type       llama_model_rope_type(const struct llama_model * model);

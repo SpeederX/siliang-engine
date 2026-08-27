@@ -1,5 +1,7 @@
 #pragma once
 
+#include "siliang-expert-source.h"
+
 #include "llama.h"
 #include "llama-arch.h"
 #include "llama-graph.h"
@@ -556,6 +558,8 @@ struct llama_model {
 
     llama_hparams hparams = {};
     llama_vocab   vocab;
+
+    llama_siliang_expert_source siliang_expert_source;
 
     // for classifier models
     std::vector<std::string> classifier_labels;

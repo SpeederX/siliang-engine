@@ -10,16 +10,16 @@ param(
 
     [string]$PythonExecutable = 'python',
     [string]$ResultsRoot,
-    [Parameter(Mandatory = $true)]
-    [ValidateRange(1, 1048576)][int]$ArenaMiB,
+    [ValidateRange(1, 1048576)][int]$DeepSeekExpertCacheL2MiB = 12288,
+    [ValidateRange(1, 1048576)][int]$GptOssExpertCacheL2MiB = 18432,
     [ValidateRange(1024, 65535)][int]$DeepSeekPort = 8140,
     [ValidateRange(1024, 65535)][int]$GptOssPort = 8141,
     [string[]]$DeepSeekServerArguments = @(
         '-ngl', '99', '-ncmoe', '43', '-nkvo', '--no-op-offload',
-        '-c', '2048', '-b', '512', '-ub', '512', '-t', '12', '-tb', '12'
+        '-c', '8192', '-b', '512', '-ub', '512', '-t', '2', '-tb', '2'
     ),
     [string[]]$GptOssServerArguments = @(
-        '-ngl', '99', '-ncmoe', '33', '-nkvo', '--no-op-offload',
+        '-ngl', '99', '-ncmoe', '36', '-nkvo', '--no-op-offload',
         '-c', '4096', '-b', '512', '-ub', '512', '-t', '12', '-tb', '12',
         '-lv', '4'
     ),
@@ -43,7 +43,6 @@ $repositoryRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Pat
 $expertMajorProbe = Join-Path $repositoryRoot 'scripts\check_expert_major.py'
 $fixedPrompt = 'The memory hierarchy of a modern workstation spans five orders of magnitude in latency. Registers answer in a fraction of a nanosecond while'
 $performanceRegressionLimitPercent = 5.0
-$managedEnvironmentPattern = '^(SILIANGEM_|GGML_MOE_)'
 
 function Resolve-RequiredFile {
     param([Parameter(Mandatory = $true)][string]$PathValue)
@@ -52,6 +51,35 @@ function Resolve-RequiredFile {
         throw "Required file does not exist: $PathValue"
     }
     return (Resolve-Path -LiteralPath $PathValue).Path
+}
+
+function Assert-TypedExpertCacheHelp {
+    param(
+        [Parameter(Mandatory = $true)][string]$ServerPath,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    $helpLines = @(& $ServerPath --help 2>&1)
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) {
+        throw "$Label --help failed with exit code $exitCode."
+    }
+    $helpText = $helpLines -join "`n"
+    foreach ($option in @(
+        '--expert-cache', '--no-expert-cache',
+        '--expert-cache-l2-mib', '--expert-cache-l2-policy',
+        '--expert-cache-l1-k', '--expert-cache-exchange-r',
+        '--expert-cache-elevator-p', '--expert-cache-l1-policy',
+        '--expert-cache-roll',
+        '--expert-cache-prefill', '--no-expert-cache-prefill',
+        '--expert-cache-memory-report', '--no-expert-cache-memory-report',
+        '--expert-cache-deferred-wait', '--no-expert-cache-deferred-wait'
+    )) {
+        $helpPattern = '(?m)(?<![A-Za-z0-9-])' + [regex]::Escape($option) + '(?![A-Za-z0-9-])'
+        if (-not [regex]::IsMatch($helpText, $helpPattern)) {
+            throw "$Label is not a typed v0.1.3-compatible runtime: --help is missing $option."
+        }
+    }
 }
 
 function Assert-NoModelOverrideArguments {
@@ -64,13 +92,22 @@ function Assert-NoModelOverrideArguments {
         '-m', '--model',
         '-mu', '--model-url',
         '-hf', '-hfr', '--hf-repo',
-        '-hff', '--hf-file'
+        '-hff', '--hf-file',
+        '-np', '--parallel',
+        '--expert-cache', '--no-expert-cache',
+        '--expert-cache-l2-mib', '--expert-cache-l2-policy',
+        '--expert-cache-l1-k', '--expert-cache-exchange-r',
+        '--expert-cache-elevator-p', '--expert-cache-l1-policy',
+        '--expert-cache-roll',
+        '--expert-cache-prefill', '--no-expert-cache-prefill',
+        '--expert-cache-memory-report', '--no-expert-cache-memory-report',
+        '--expert-cache-deferred-wait', '--no-expert-cache-deferred-wait'
     )
     foreach ($argument in $Arguments) {
         $normalizedArgument = ([string]$argument).ToLowerInvariant()
         foreach ($option in $ownedModelOptions) {
             if ($normalizedArgument -ceq $option -or $normalizedArgument.StartsWith($option + '=')) {
-                throw "$Label must not contain primary-model option $argument; the runtime gate owns the model path."
+                throw "$Label must not contain owned runtime option $argument; the runtime gate owns the model, serial mode, and expert-cache configuration."
             }
         }
     }
@@ -92,6 +129,8 @@ $CandidateServer = Resolve-RequiredFile $CandidateServer
 $DeepSeekModel = Resolve-RequiredFile $DeepSeekModel
 $GptOssModel = Resolve-RequiredFile $GptOssModel
 Assert-DistinctServerPaths -ReferencePath $ReferenceServer -CandidatePath $CandidateServer
+Assert-TypedExpertCacheHelp -ServerPath $ReferenceServer -Label 'reference runtime'
+Assert-TypedExpertCacheHelp -ServerPath $CandidateServer -Label 'candidate runtime'
 Assert-NoModelOverrideArguments -Label '-DeepSeekServerArguments' -Arguments $DeepSeekServerArguments
 Assert-NoModelOverrideArguments -Label '-GptOssServerArguments' -Arguments $GptOssServerArguments
 if (-not (Test-Path -LiteralPath $expertMajorProbe -PathType Leaf)) {
@@ -134,32 +173,44 @@ function Save-Results {
     $payload | ConvertTo-Json -Depth 12 | Out-File -LiteralPath $script:resultsPath -Encoding utf8
 }
 
-function Get-ManagedEnvironment {
-    $values = [ordered]@{}
-    foreach ($item in @(Get-ChildItem Env: | Where-Object { $_.Name -match $managedEnvironmentPattern } | Sort-Object Name)) {
-        $values[$item.Name] = $item.Value
-    }
-    return $values
-}
+function Get-CellExpertCacheArguments {
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('Disabled', 'Arena')][string]$ArenaState,
+        [Parameter(Mandatory = $true)][ValidateSet('DeepSeek4', 'GptOss')][string]$Profile
+    )
 
-function Clear-ManagedEnvironment {
-    foreach ($item in @(Get-ChildItem Env: | Where-Object { $_.Name -match $managedEnvironmentPattern })) {
-        Remove-Item -LiteralPath ('Env:{0}' -f $item.Name) -ErrorAction SilentlyContinue
-    }
-}
-
-function Set-CellEnvironment {
-    param([Parameter(Mandatory = $true)][ValidateSet('Disabled', 'Arena')][string]$ArenaState)
-
-    Clear-ManagedEnvironment
-    $env:SILIANGEM_VERBOSE = '1'
-    $env:GGML_MOE_PREFETCH = '0'
     if ($ArenaState -eq 'Disabled') {
-        $env:SILIANGEM_DISABLE = '1'
-    } else {
-        $env:SILIANGEM_CACHE_MIB = $ArenaMiB.ToString([Globalization.CultureInfo]::InvariantCulture)
-        $env:SILIANGEM_DEFER = '1'
+        return @('--no-expert-cache')
     }
+
+    $l2MiB = if ($Profile -eq 'DeepSeek4') {
+        $DeepSeekExpertCacheL2MiB
+    } else {
+        $GptOssExpertCacheL2MiB
+    }
+    $l2MiBText = $l2MiB.ToString([Globalization.CultureInfo]::InvariantCulture)
+    $arguments = @(
+        '--expert-cache',
+        '--expert-cache-l2-mib', $l2MiBText,
+        '--expert-cache-memory-report',
+        '--expert-cache-deferred-wait'
+    )
+    if ($Profile -eq 'DeepSeek4') {
+        return $arguments + @(
+            '--expert-cache-l2-policy', 'lfu',
+            '--expert-cache-l1-k', '216',
+            '--expert-cache-exchange-r', '12',
+            '--expert-cache-elevator-p', '12',
+            '--expert-cache-l1-policy', 'cumulative-lfu',
+            '--expert-cache-roll', 'deepseek4'
+        )
+    }
+
+    return $arguments + @(
+        '--expert-cache-l2-policy', 'lru',
+        '--expert-cache-roll', 'off',
+        '--no-expert-cache-prefill'
+    )
 }
 
 function ConvertTo-WindowsCommandLineArgument {
@@ -533,14 +584,46 @@ function Assert-ExpertMajorEvidence {
 function Assert-ArenaEvidence {
     param(
         [Parameter(Mandatory = $true)][ValidateSet('Disabled', 'Arena')][string]$ArenaState,
-        [Parameter(Mandatory = $true)][string]$LogText
+        [Parameter(Mandatory = $true)][ValidateSet('DeepSeek4', 'GptOss')][string]$Profile,
+        [Parameter(Mandatory = $true)][string]$LogText,
+        [Parameter(Mandatory = $true)][string[]]$Arguments
     )
 
+    $cacheEnabledArgument = $Arguments -ccontains '--expert-cache'
+    $cacheDisabledArgument = $Arguments -ccontains '--no-expert-cache'
+    $typedConfigurationMatch = [regex]::Match($LogText,
+        '(?im)Siliang expert cache enabled:\s+L2=(?<l2>\d+) MiB K=(?<k>\d+) R=(?<r>\d+) P=(?<p>\d+) roll=(?<roll>\d+)')
+    $typedConfiguration = $typedConfigurationMatch.Success
     $armed = $LogText -match '(?im)siliangem:.*cache\s+\d+\s+slots'
     $directIo = $LogText -match '(?im)unbuffered\+overlapped'
     $fallback = $LogText -match '(?im)siliangem:.*using mmap'
-    $explicitlyDisabled = $LogText -match '(?im)siliangem: disabled by SILIANGEM_DISABLE - using mmap'
+    $runtimeFailure = $LogText -match '(?im)siliang_moe_runtime: fail-closed|expert cache: DeepSeek-V4 FRONT slab failed'
+    if ($runtimeFailure) {
+        throw 'Cell is void: the requested runtime reported a fail-closed cache or FRONT error.'
+    }
     if ($ArenaState -eq 'Arena') {
+        if (-not $cacheEnabledArgument -or $cacheDisabledArgument) {
+            throw 'Cell is void: the recorded command line does not select the typed expert-cache path.'
+        }
+        if (-not $typedConfiguration) {
+            throw 'Cell is void: the log does not report the resolved typed expert-cache configuration.'
+        }
+        $expectedL2MiB = if ($Profile -eq 'DeepSeek4') {
+            $DeepSeekExpertCacheL2MiB
+        } else {
+            $GptOssExpertCacheL2MiB
+        }
+        $expectedK = if ($Profile -eq 'DeepSeek4') { 216 } else { 0 }
+        $expectedR = if ($Profile -eq 'DeepSeek4') { 12 } else { 0 }
+        $expectedP = if ($Profile -eq 'DeepSeek4') { 12 } else { 0 }
+        $expectedRoll = if ($Profile -eq 'DeepSeek4') { 1 } else { 0 }
+        if ([int64]$typedConfigurationMatch.Groups['l2'].Value -ne $expectedL2MiB -or
+            [int64]$typedConfigurationMatch.Groups['k'].Value -ne $expectedK -or
+            [int64]$typedConfigurationMatch.Groups['r'].Value -ne $expectedR -or
+            [int64]$typedConfigurationMatch.Groups['p'].Value -ne $expectedP -or
+            [int64]$typedConfigurationMatch.Groups['roll'].Value -ne $expectedRoll) {
+            throw "Cell is void: resolved typed expert-cache configuration does not match the $Profile profile."
+        }
         if (-not $armed) {
             throw 'Cell is void: the requested arena did not report a nonzero slot count.'
         }
@@ -550,6 +633,63 @@ function Assert-ArenaEvidence {
         if ($fallback) {
             throw 'Cell is void: the arena log contains a fallback-to-mmap message.'
         }
+
+        $moeEvidence = $null
+        $frontEvidence = $null
+        if ($Profile -eq 'DeepSeek4') {
+            $armedMatch = [regex]::Match($LogText,
+                '(?im)siliang_moe_runtime: armed decode-only arena layers=(?<managed>\d+)/(?<total>\d+) schemas=(?<schemas>\d+) layout=(?<layout>\S+) experts=(?<experts>\d+) top_k=(?<topk>\d+) K=(?<k>\d+) R=(?<r>\d+) P=(?<p>\d+) policy=(?<policy>\S+) source=(?<source>\S+)')
+            $routeMatch = [regex]::Match($LogText,
+                '(?im)siliang_moe_runtime: serving decode route map=1 layer=(?<layer>\d+) K_hits=(?<hits>\d+) K_misses=(?<misses>\d+) admissions=(?<admissions>\d+) R_bypass=(?<bypass>\d+) H2D_ops=(?<h2d>\d+) failure=0')
+            $waitMatch = [regex]::Match($LogText,
+                '(?im)siliang_moe_runtime: serving decode compute_wait=1 layer=(?<layer>\d+) failure=0')
+            $frontArmMatch = [regex]::Match($LogText,
+                '(?im)expert cache: DeepSeek-V4 FRONT slab armed bank=(?<bank>\d+) MiB host=(?<host>\d+) MiB resident_layer=0')
+            $frontActivityMatch = [regex]::Match($LogText,
+                '(?im)siliang_ds4_front_slab: serving decode tokens=1 copies=(?<copies>\d+) waits=(?<waits>\d+) H2D_bytes=(?<bytes>\d+) failure=0')
+            if (-not $armedMatch.Success -or -not $routeMatch.Success -or -not $waitMatch.Success -or
+                -not $frontArmMatch.Success -or -not $frontActivityMatch.Success) {
+                throw 'Cell is void: DeepSeek4 did not prove K/R/P arm, route, compute-wait, and FRONT activity.'
+            }
+            if ([int]$armedMatch.Groups['managed'].Value -le 0 -or
+                [int]$armedMatch.Groups['managed'].Value -ne [int]$armedMatch.Groups['total'].Value -or
+                [int]$armedMatch.Groups['schemas'].Value -ne 1 -or
+                [string]$armedMatch.Groups['layout'].Value -cne 'global' -or
+                [int]$armedMatch.Groups['experts'].Value -ne 256 -or
+                [int]$armedMatch.Groups['topk'].Value -ne 6 -or
+                [int]$armedMatch.Groups['k'].Value -ne 216 -or
+                [int]$armedMatch.Groups['r'].Value -ne 12 -or
+                [int]$armedMatch.Groups['p'].Value -ne 12 -or
+                [string]$armedMatch.Groups['policy'].Value -cne 'cumulative-lfu' -or
+                [string]$armedMatch.Groups['source'].Value -cne 'host-l2' -or
+                [int64]$routeMatch.Groups['h2d'].Value -le 0 -or
+                [int64]$frontArmMatch.Groups['bank'].Value -le 0 -or
+                [int64]$frontArmMatch.Groups['host'].Value -le 0 -or
+                [int64]$frontActivityMatch.Groups['copies'].Value -le 0 -or
+                [int64]$frontActivityMatch.Groups['waits'].Value -le 0 -or
+                [int64]$frontActivityMatch.Groups['bytes'].Value -le 0) {
+                throw 'Cell is void: DeepSeek4 runtime telemetry does not match the predeclared K216/R12/P12 FRONT path.'
+            }
+            $moeEvidence = [pscustomobject]@{
+                managedLayers = [int]$armedMatch.Groups['managed'].Value
+                schemaCount = [int]$armedMatch.Groups['schemas'].Value
+                layout = [string]$armedMatch.Groups['layout'].Value
+                firstRouteLayer = [int]$routeMatch.Groups['layer'].Value
+                firstRouteH2dOperations = [int64]$routeMatch.Groups['h2d'].Value
+                firstComputeWaitLayer = [int]$waitMatch.Groups['layer'].Value
+                failure = 0
+            }
+            $frontEvidence = [pscustomobject]@{
+                bankMiB = [int64]$frontArmMatch.Groups['bank'].Value
+                hostMiB = [int64]$frontArmMatch.Groups['host'].Value
+                copies = [int64]$frontActivityMatch.Groups['copies'].Value
+                waits = [int64]$frontActivityMatch.Groups['waits'].Value
+                h2dBytes = [int64]$frontActivityMatch.Groups['bytes'].Value
+                failure = 0
+            }
+        } elseif ($LogText -match '(?im)siliang_moe_runtime: armed|DeepSeek-V4 FRONT slab armed') {
+            throw 'Cell is void: the GPT-OSS L2-only profile unexpectedly armed K/R/P or FRONT rolling.'
+        }
         $failurePattern = '(?im)^.*siliangem.*(?:read failed|ISSUE failed|cannot open|cannot read|bad slab|not sector aligned|zero expert stride|source declined|alloc failed|metadata is missing).*$'
         $failureMatch = [regex]::Match($LogText, $failurePattern)
         if ($failureMatch.Success) {
@@ -558,7 +698,7 @@ function Assert-ArenaEvidence {
 
         $workMatches = @([regex]::Matches(
             $LogText,
-            '(?im)siliangem\[[^\]]+\]:\s+(?<lookups>\d+) lookups,\s+(?<hits>\d+) hits \([^\)]*\),\s+(?<misses>\d+) misses,.*?(?<gib>[0-9]+(?:\.[0-9]+)?) GiB read from slab'
+            '(?im)siliangem\[(?:periodic|final)\]:\s+(?<lookups>\d+) lookups,\s+(?<hits>\d+) hits \([^\)]*\),\s+(?<misses>\d+) misses,.*?(?<gib>[0-9]+(?:\.[0-9]+)?) GiB read from slab'
         ))
         $submitMatches = @([regex]::Matches(
             $LogText,
@@ -618,17 +758,23 @@ function Assert-ArenaEvidence {
             memoryPressureObserved = $pressureObserved
             memoryPressureReportCount = $pressureMatches.Count
             memoryPressureGateEnforced = -not [bool]$AllowMemoryPressure
+            typedConfigurationPresent = $true
+            moeRuntime = $moeEvidence
+            frontSlab = $frontEvidence
         }
     } else {
-        if (-not $explicitlyDisabled) {
-            throw 'Cell is void: the log does not prove SILIANGEM_DISABLE selected mmap.'
+        if (-not $cacheDisabledArgument -or $cacheEnabledArgument) {
+            throw 'Cell is void: the recorded command line does not select --no-expert-cache.'
         }
-        if ($armed) {
+        if ($armed -or $typedConfiguration) {
             throw 'Cell is void: the arena armed in an arena-disabled control.'
         }
         return [pscustomobject]@{
             armed = $false
             explicitlyDisabled = $true
+            commandLineControl = '--no-expert-cache'
+            moeRuntime = $null
+            frontSlab = $null
         }
     }
 }
@@ -853,6 +999,7 @@ function Invoke-Cell {
         [Parameter(Mandatory = $true)][string]$ModelPath,
         [Parameter(Mandatory = $true)][int]$Port,
         [Parameter(Mandatory = $true)][string[]]$ServerArguments,
+        [Parameter(Mandatory = $true)][ValidateSet('DeepSeek4', 'GptOss')][string]$Profile,
         [Parameter(Mandatory = $true)][ValidateSet('Disabled', 'Arena')][string]$ArenaState,
         [ValidateRange(0.0, 1048576.0)][double]$MaximumDeviceModelBufferMiB = 0.0,
         [switch]$Warmup,
@@ -866,10 +1013,10 @@ function Invoke-Cell {
         $idleSamples = @(Assert-MachineIdle -CellName $Name)
     }
     Assert-PortAvailable -Port $Port
-    Set-CellEnvironment -ArenaState $ArenaState
-    $environment = Get-ManagedEnvironment
+    $expertCacheArguments = @(Get-CellExpertCacheArguments -ArenaState $ArenaState -Profile $Profile)
 
-    $allArguments = @('-m', $ModelPath) + $ServerArguments + @(
+    $allArguments = @('-m', $ModelPath) + $ServerArguments + $expertCacheArguments + @(
+        '--parallel', '1',
         '--host', '127.0.0.1', '--port', $Port.ToString([Globalization.CultureInfo]::InvariantCulture), '--no-webui'
     )
     $commandLineArguments = @($allArguments | ForEach-Object { ConvertTo-WindowsCommandLineArgument ([string]$_) })
@@ -879,10 +1026,6 @@ function Invoke-Cell {
     Write-Host ('  executable : {0}' -f $ServerPath)
     Write-Host ('  model      : {0}' -f $ModelPath)
     Write-Host ('  flags      : {0}' -f ($commandLineArguments -join ' '))
-    Write-Host '  environment:'
-    foreach ($key in $environment.Keys) {
-        Write-Host ('    {0}={1}' -f $key, $environment[$key])
-    }
 
     $process = $null
     $termination = $null
@@ -897,7 +1040,7 @@ function Invoke-Cell {
         modelIdentity = $script:artifactIdentityByPath[$ModelPath]
         modelStorage = $script:storageIdentityByPath[$ModelPath]
         arguments = $allArguments
-        environment = $environment
+        expertCacheArguments = $expertCacheArguments
         idleSamples = $idleSamples
         stdout = $stdoutPath
         stderr = $stderrPath
@@ -931,7 +1074,8 @@ function Invoke-Cell {
             $warmupResult = Invoke-Completion -Port $Port -Tokens $WarmupTokens
             Start-Sleep -Seconds 1
             $warmupLog = Read-CellLog -StandardOutputPath $stdoutPath -StandardErrorPath $stderrPath
-            $warmupEvidence = Assert-ArenaEvidence -ArenaState $ArenaState -LogText $warmupLog
+            $warmupEvidence = Assert-ArenaEvidence -ArenaState $ArenaState -Profile $Profile -LogText $warmupLog `
+                -Arguments $allArguments
         }
 
         $gpuBeforeMeasurement = Get-GpuSnapshot
@@ -940,7 +1084,8 @@ function Invoke-Cell {
         $completion = Invoke-Completion -Port $Port -Tokens $NPredict -MeasureVram
         Start-Sleep -Seconds 1
         $finalLog = Read-CellLog -StandardOutputPath $stdoutPath -StandardErrorPath $stderrPath
-        $arenaEvidence = Assert-ArenaEvidence -ArenaState $ArenaState -LogText $finalLog
+        $arenaEvidence = Assert-ArenaEvidence -ArenaState $ArenaState -Profile $Profile -LogText $finalLog `
+            -Arguments $allArguments
         $deviceModelBufferEvidence = $null
         if ($MaximumDeviceModelBufferMiB -gt 0) {
             $deviceModelBufferEvidence = Get-DeviceModelBufferEvidence `
@@ -1013,7 +1158,6 @@ function Invoke-Cell {
             }
             $process.Dispose()
         }
-        Clear-ManagedEnvironment
         if ($SettleSeconds -gt 0) {
             Start-Sleep -Seconds $SettleSeconds
         }
@@ -1121,7 +1265,6 @@ foreach ($modelPath in @($DeepSeekModel, $GptOssModel)) {
     }
 }
 
-$originalManagedEnvironment = Get-ManagedEnvironment
 $configurationPath = Join-Path $runDirectory 'configuration.json'
 $configuration = [ordered]@{
     generatedUtc = [DateTime]::UtcNow.ToString('o')
@@ -1145,7 +1288,26 @@ $configuration = [ordered]@{
         cachePrompt = $false
         ignoreEos = $true
     }
-    arenaMiB = $ArenaMiB
+    expertCache = [ordered]@{
+        deepSeek4 = [ordered]@{
+            l2MiB = $DeepSeekExpertCacheL2MiB
+            l2Policy = 'lfu'
+            l1K = 216
+            exchangeR = 12
+            elevatorP = 12
+            l1Policy = 'cumulative-lfu'
+            roll = 'deepseek4'
+        }
+        gptOss = [ordered]@{
+            l2MiB = $GptOssExpertCacheL2MiB
+            l2Policy = 'lru'
+            l1K = 0
+            roll = 'off'
+        }
+        memoryReport = $true
+        deferredWait = $true
+        parallelSlots = 1
+    }
     allowMemoryPressure = [bool]$AllowMemoryPressure
     gptOssMaxDeviceModelBufferMiB = $GptOssMaxDeviceModelBufferMiB
     performanceStartsPerBuild = 3
@@ -1171,19 +1333,17 @@ if ($AllowMemoryPressure) {
 }
 
 try {
-    Clear-ManagedEnvironment
-
     Write-Host ''
     Write-Host '--- DeepSeek deterministic correctness ---'
     $deepReferenceDisabled = Invoke-Cell -Name 'deepseek-correctness-reference-disabled' `
         -Build Reference -ServerPath $ReferenceServer -ModelPath $DeepSeekModel `
-        -Port $DeepSeekPort -ServerArguments $DeepSeekServerArguments -ArenaState Disabled
+        -Port $DeepSeekPort -ServerArguments $DeepSeekServerArguments -Profile DeepSeek4 -ArenaState Disabled
     $deepCandidateDisabled = Invoke-Cell -Name 'deepseek-correctness-candidate-disabled' `
         -Build Candidate -ServerPath $CandidateServer -ModelPath $DeepSeekModel `
-        -Port $DeepSeekPort -ServerArguments $DeepSeekServerArguments -ArenaState Disabled
+        -Port $DeepSeekPort -ServerArguments $DeepSeekServerArguments -Profile DeepSeek4 -ArenaState Disabled
     $deepCandidateArena = Invoke-Cell -Name 'deepseek-correctness-candidate-arena' `
         -Build Candidate -ServerPath $CandidateServer -ModelPath $DeepSeekModel `
-        -Port $DeepSeekPort -ServerArguments $DeepSeekServerArguments -ArenaState Arena
+        -Port $DeepSeekPort -ServerArguments $DeepSeekServerArguments -Profile DeepSeek4 -ArenaState Arena
     Assert-IdenticalOutput -GateName 'DeepSeek reference/candidate/arena-disabled equivalence' `
         -Cells @($deepReferenceDisabled, $deepCandidateDisabled, $deepCandidateArena)
 
@@ -1200,7 +1360,7 @@ try {
             $server = if ($buildName -eq 'Reference') { $ReferenceServer } else { $CandidateServer }
             $cell = Invoke-Cell -Name ('deepseek-performance-{0}-r{1}' -f $buildName.ToLowerInvariant(), $repetition) `
                 -Build $buildName -ServerPath $server -ModelPath $DeepSeekModel `
-                -Port $DeepSeekPort -ServerArguments $DeepSeekServerArguments -ArenaState Arena `
+                -Port $DeepSeekPort -ServerArguments $DeepSeekServerArguments -Profile DeepSeek4 -ArenaState Arena `
                 -Warmup -RequireIdle
             $performanceRows += $cell
         }
@@ -1237,15 +1397,15 @@ try {
     Write-Host '--- gpt-oss correctness and VRAM smoke ---'
     $gptReference = Invoke-Cell -Name 'gptoss-smoke-reference-arena' `
         -Build Reference -ServerPath $ReferenceServer -ModelPath $GptOssModel `
-        -Port $GptOssPort -ServerArguments $GptOssServerArguments -ArenaState Arena `
+        -Port $GptOssPort -ServerArguments $GptOssServerArguments -Profile GptOss -ArenaState Arena `
         -MaximumDeviceModelBufferMiB $GptOssMaxDeviceModelBufferMiB -RequireIdle
     $gptCandidateDisabled = Invoke-Cell -Name 'gptoss-smoke-candidate-disabled' `
         -Build Candidate -ServerPath $CandidateServer -ModelPath $GptOssModel `
-        -Port $GptOssPort -ServerArguments $GptOssServerArguments -ArenaState Disabled `
+        -Port $GptOssPort -ServerArguments $GptOssServerArguments -Profile GptOss -ArenaState Disabled `
         -MaximumDeviceModelBufferMiB $GptOssMaxDeviceModelBufferMiB -RequireIdle
     $gptCandidate = Invoke-Cell -Name 'gptoss-smoke-candidate-arena' `
         -Build Candidate -ServerPath $CandidateServer -ModelPath $GptOssModel `
-        -Port $GptOssPort -ServerArguments $GptOssServerArguments -ArenaState Arena `
+        -Port $GptOssPort -ServerArguments $GptOssServerArguments -Profile GptOss -ArenaState Arena `
         -MaximumDeviceModelBufferMiB $GptOssMaxDeviceModelBufferMiB -RequireIdle
     Assert-IdenticalOutput -GateName 'gpt-oss reference/candidate arena-disabled equivalence' `
         -Cells @($gptReference, $gptCandidateDisabled, $gptCandidate)
@@ -1306,8 +1466,5 @@ try {
     Write-Host ''
     Write-Host ('PASS: runtime gate complete. Raw evidence: {0}' -f $runDirectory)
 } finally {
-    Clear-ManagedEnvironment
-    foreach ($key in $originalManagedEnvironment.Keys) {
-        [Environment]::SetEnvironmentVariable($key, [string]$originalManagedEnvironment[$key], 'Process')
-    }
+    Write-Verbose 'Runtime gate cleanup complete.'
 }

@@ -11,11 +11,10 @@ import unittest
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_GATE = REPOSITORY_ROOT / "scripts" / "runtime-gate.ps1"
 POWERSHELL_FUNCTIONS = (
+    "Assert-TypedExpertCacheHelp",
     "Assert-NoModelOverrideArguments",
     "Assert-DistinctServerPaths",
-    "Get-ManagedEnvironment",
-    "Clear-ManagedEnvironment",
-    "Set-CellEnvironment",
+    "Get-CellExpertCacheArguments",
     "Assert-ExpertMajorEvidence",
     "Assert-ArenaEvidence",
     "Get-FileSha256",
@@ -30,6 +29,11 @@ POWERSHELL_FUNCTIONS = (
 
 
 class RuntimeGateContractTests(unittest.TestCase):
+    def test_declared_l1_policy_matches_deepseek_profile(self) -> None:
+        source = RUNTIME_GATE.read_text(encoding="utf-8")
+        self.assertIn("l1Policy = 'cumulative-lfu'", source)
+        self.assertNotIn("l1Policy = 'lfu'", source)
+
     def run_powershell(self, body: str, *, environment: dict[str, str] | None = None) -> None:
         function_names = ", ".join(f"'{name}'" for name in POWERSHELL_FUNCTIONS)
         prelude = f"""
@@ -109,6 +113,9 @@ Assert-Rejected @('-hf', 'owner/model')
 Assert-Rejected @('--hf-repo=owner/model')
 Assert-Rejected @('-hff', 'model.gguf')
 Assert-Rejected @('--hf-file=model.gguf')
+Assert-Rejected @('--parallel', '2')
+Assert-Rejected @('--expert-cache')
+Assert-Rejected @('--expert-cache-l2-mib=8192')
 Assert-NoModelOverrideArguments -Label test -Arguments @('-mmproj', 'vision.gguf', '--model-draft', 'draft.gguf')
 
 $samePathRejected = $false
@@ -123,45 +130,100 @@ if (-not $samePathRejected) {
 """
         )
 
-    def test_siliangem_environment_and_log_contracts(self) -> None:
+    def test_typed_help_preflight_rejects_legacy_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            typed = root / "typed-server.cmd"
+            legacy = root / "legacy-server.cmd"
+            deceptive = root / "deceptive-server.cmd"
+            typed.write_text(
+                "@echo off\n"
+                "echo --expert-cache --no-expert-cache --expert-cache-l2-mib --expert-cache-l2-policy\n"
+                "echo --expert-cache-l1-k --expert-cache-exchange-r --expert-cache-elevator-p --expert-cache-l1-policy\n"
+                "echo --expert-cache-roll --expert-cache-prefill --no-expert-cache-prefill\n"
+                "echo --expert-cache-memory-report --no-expert-cache-memory-report\n"
+                "echo --expert-cache-deferred-wait --no-expert-cache-deferred-wait\n"
+                "exit /b 0\n",
+                encoding="ascii",
+            )
+            legacy.write_text("@echo off\necho legacy help\nexit /b 0\n", encoding="ascii")
+            deceptive.write_text(
+                "@echo off\n"
+                "echo --expert-cache --no-expert-cache --expert-cache-l2-mib --expert-cache-l2-policy\n"
+                "echo --expert-cache-l1-k --expert-cache-exchange-r --expert-cache-elevator-p --expert-cache-l1-policy\n"
+                "echo --expert-cache-roll --no-expert-cache-prefill --no-expert-cache-memory-report\n"
+                "echo --expert-cache-deferred-wait --no-expert-cache-deferred-wait\n"
+                "exit /b 0\n",
+                encoding="ascii",
+            )
+            self.run_powershell(
+                r"""
+Assert-TypedExpertCacheHelp -ServerPath $env:SILIANG_TEST_TYPED_SERVER -Label typed
+$legacyRejected = $false
+try {
+    Assert-TypedExpertCacheHelp -ServerPath $env:SILIANG_TEST_LEGACY_SERVER -Label legacy
+} catch {
+    $legacyRejected = $true
+}
+if (-not $legacyRejected) {
+    throw 'A legacy runtime without typed expert-cache help was accepted.'
+}
+$deceptiveRejected = $false
+try {
+    Assert-TypedExpertCacheHelp -ServerPath $env:SILIANG_TEST_DECEPTIVE_SERVER -Label deceptive
+} catch {
+    $deceptiveRejected = $true
+}
+if (-not $deceptiveRejected) {
+    throw 'The negative memory-report spelling falsely satisfied the positive help option.'
+}
+""",
+                environment={
+                    "SILIANG_TEST_TYPED_SERVER": str(typed),
+                    "SILIANG_TEST_LEGACY_SERVER": str(legacy),
+                    "SILIANG_TEST_DECEPTIVE_SERVER": str(deceptive),
+                },
+            )
+
+    def test_typed_expert_cache_argument_and_log_contracts(self) -> None:
         self.run_powershell(
             r"""
-$script:managedEnvironmentPattern = '^(SILIANGEM_|GGML_MOE_)'
-$script:ArenaMiB = 4096
+$script:DeepSeekExpertCacheL2MiB = 12288
+$script:GptOssExpertCacheL2MiB = 18432
 $script:AllowMemoryPressure = $false
 
-$env:BEHEMOTH_LEGACY_SENTINEL = 'untouched'
-$env:SILIANGEM_STALE = 'remove-me'
-$env:GGML_MOE_PREFETCH = '1'
-Clear-ManagedEnvironment
-if (Test-Path Env:SILIANGEM_STALE) {
-    throw 'Clear-ManagedEnvironment retained a SILIANGEM variable.'
-}
-if (Test-Path Env:GGML_MOE_PREFETCH) {
-    throw 'Clear-ManagedEnvironment retained a GGML_MOE variable.'
-}
-if ($env:BEHEMOTH_LEGACY_SENTINEL -cne 'untouched') {
-    throw 'The retired namespace is still managed as an alias.'
-}
-
-Set-CellEnvironment -ArenaState Disabled
-if ($env:SILIANGEM_VERBOSE -cne '1' -or $env:SILIANGEM_DISABLE -cne '1' -or
-    $env:GGML_MOE_PREFETCH -cne '0') {
-    throw 'The disabled cell did not use the SILIANGEM environment contract.'
-}
-if (Test-Path Env:BEHEMOTH_DISABLE) {
-    throw 'The disabled cell emitted a retired environment variable.'
+$disabledArguments = @(Get-CellExpertCacheArguments -ArenaState Disabled -Profile DeepSeek4)
+if (($disabledArguments -join ' ') -cne '--no-expert-cache') {
+    throw 'The disabled cell did not select the typed CLI control.'
 }
 $disabled = Assert-ArenaEvidence -ArenaState Disabled `
-    -LogText 'siliangem: disabled by SILIANGEM_DISABLE - using mmap'
+    -Profile DeepSeek4 -LogText 'ordinary mmap path' -Arguments $disabledArguments
 if ($disabled.armed -or -not $disabled.explicitlyDisabled) {
-    throw 'The SILIANGEM disabled marker was not accepted.'
+    throw 'The typed CLI disabled control was not accepted.'
 }
 
-Set-CellEnvironment -ArenaState Arena
-if ($env:SILIANGEM_VERBOSE -cne '1' -or $env:SILIANGEM_CACHE_MIB -cne '4096' -or
-    $env:SILIANGEM_DEFER -cne '1' -or (Test-Path Env:SILIANGEM_DISABLE)) {
-    throw 'The arena cell did not use the SILIANGEM environment contract.'
+$deepSeekArguments = @(Get-CellExpertCacheArguments -ArenaState Arena -Profile DeepSeek4)
+$deepSeekText = $deepSeekArguments -join ' '
+foreach ($expected in @(
+    '--expert-cache', '--expert-cache-l2-mib 12288', '--expert-cache-l2-policy lfu',
+    '--expert-cache-l1-k 216', '--expert-cache-exchange-r 12',
+    '--expert-cache-elevator-p 12', '--expert-cache-l1-policy cumulative-lfu',
+    '--expert-cache-roll deepseek4', '--expert-cache-memory-report',
+    '--expert-cache-deferred-wait'
+)) {
+    if (-not $deepSeekText.Contains($expected)) {
+        throw "The DeepSeek4 profile is missing: $expected"
+    }
+}
+
+$gptArguments = @(Get-CellExpertCacheArguments -ArenaState Arena -Profile GptOss)
+$gptText = $gptArguments -join ' '
+if (-not $gptText.Contains('--expert-cache-l2-mib 18432') -or
+    -not $gptText.Contains('--expert-cache-l2-policy lru') -or
+    -not $gptText.Contains('--expert-cache-roll off') -or
+    -not $gptText.Contains('--no-expert-cache-prefill') -or
+    $gptText.Contains('--expert-cache-l1-k')) {
+    throw 'The GPT-OSS profile did not remain an L2-only diagnostic.'
 }
 
 $metadata = [pscustomobject]@{ status = 'expert-major-metadata-ok' }
@@ -169,37 +231,89 @@ $loader = Assert-ExpertMajorEvidence `
     -LogText 'load_model: siliangem expert-major: 2 layers x 2 experts' `
     -MetadataEvidence $metadata
 if (-not $loader.loaderInfoMarkerPresent) {
-    throw 'The SILIANGEM loader marker was not recognized.'
+    throw 'The expert-major loader marker was not recognized.'
 }
 
 $arenaLog = @'
-siliangem: slab 2x2 experts, 1.000 MiB each, cache 4 slots (unbuffered+overlapped)
-siliangem[decode]: 10 lookups, 6 hits (60.0%), 4 misses, 1.250 GiB read from slab
+llama_context: Siliang expert cache enabled: L2=12288 MiB K=216 R=12 P=12 roll=1
+siliangem: source 2x2 experts, 1.000 MiB each, cache 4 slots (0.004 GiB), policy 1, unbuffered+overlapped, deferred-wait ON
+siliang_moe_runtime: armed decode-only arena layers=43/43 schemas=1 layout=global experts=256 top_k=6 K=216 R=12 P=12 policy=cumulative-lfu source=host-l2 transport=private-stream-staged arena=1536 MiB pinned=81 MiB
+expert cache: DeepSeek-V4 FRONT slab armed bank=64 MiB host=2752 MiB resident_layer=0
+siliang_moe_runtime: serving decode route map=1 layer=0 K_hits=0 K_misses=6 admissions=6 R_bypass=0 H2D_ops=6 failure=0
+siliang_moe_runtime: serving decode compute_wait=1 layer=0 failure=0
+siliang_ds4_front_slab: serving decode tokens=1 copies=1 waits=2 H2D_bytes=67108864 failure=0
+siliangem[periodic]: 10 lookups, 6 hits (60.0%), 4 misses, expert-level hit 40.0%, 1.250 GiB read from slab
 siliangem[submit]: 1 sync (25.0%), 3 pending (75.0%)
 siliangem[mem]: available 8192 MiB | file cache 4096 MiB | commit charged 1000 MiB
 '@
-$arena = Assert-ArenaEvidence -ArenaState Arena -LogText $arenaLog
+$arena = Assert-ArenaEvidence -ArenaState Arena -Profile DeepSeek4 -LogText $arenaLog -Arguments $deepSeekArguments
 if (-not $arena.armed -or $arena.lookups -ne 10 -or $arena.hits -ne 6 -or
     $arena.misses -ne 4 -or $arena.synchronousSubmissions -ne 1 -or
-    $arena.pendingSubmissions -ne 3) {
-    throw 'The SILIANGEM telemetry contract was not parsed correctly.'
+    $arena.pendingSubmissions -ne 3 -or -not $arena.typedConfigurationPresent -or
+    $arena.moeRuntime.firstRouteH2dOperations -ne 6 -or $arena.frontSlab.copies -ne 1) {
+    throw 'The typed expert-cache telemetry contract was not parsed correctly.'
+}
+
+$gptLog = @'
+llama_context: Siliang expert cache enabled: L2=18432 MiB K=0 R=0 P=0 roll=0
+siliangem: source 36x128 experts, 4.000 MiB each, cache 4608 slots (18.000 GiB), policy 0, unbuffered+overlapped, deferred-wait ON
+siliangem[periodic]: 12 lookups, 8 hits (66.7%), 4 misses, expert-level hit 33.3%, 1.000 GiB read from slab
+siliangem[submit]: 1 sync (25.0%), 3 pending (75.0%)
+siliangem[mem]: available 4096 MiB | file cache 2048 MiB | commit charged 12000 MiB
+'@
+$gptArena = Assert-ArenaEvidence -ArenaState Arena -Profile GptOss -LogText $gptLog -Arguments $gptArguments
+if (-not $gptArena.armed -or $gptArena.moeRuntime -ne $null -or $gptArena.frontSlab -ne $null) {
+    throw 'The GPT-OSS L2-only telemetry contract was not accepted.'
+}
+
+$wrongResolvedRejected = $false
+try {
+    $wrongResolved = $gptLog.Replace('L2=18432 MiB K=0 R=0 P=0 roll=0', 'L2=12288 MiB K=0 R=0 P=0 roll=0')
+    Assert-ArenaEvidence -ArenaState Arena -Profile GptOss -LogText $wrongResolved -Arguments $gptArguments
+} catch {
+    $wrongResolvedRejected = $true
+}
+if (-not $wrongResolvedRejected) {
+    throw 'A GPT-OSS log with the wrong resolved L2 capacity was accepted.'
+}
+
+$missingFrontRejected = $false
+try {
+    $missingFront = $arenaLog.Replace(
+        'siliang_ds4_front_slab: serving decode tokens=1 copies=1 waits=2 H2D_bytes=67108864 failure=0', '')
+    Assert-ArenaEvidence -ArenaState Arena -Profile DeepSeek4 -LogText $missingFront `
+        -Arguments $deepSeekArguments
+} catch {
+    $missingFrontRejected = $true
+}
+if (-not $missingFrontRejected) {
+    throw 'A DeepSeek4 cell without FRONT activity evidence was accepted.'
 }
 
 $retiredMarkersRejected = $false
 try {
     $legacyLog = $arenaLog.Replace('siliangem', 'behemoth')
-    Assert-ArenaEvidence -ArenaState Arena -LogText $legacyLog
+    Assert-ArenaEvidence -ArenaState Arena -Profile DeepSeek4 -LogText $legacyLog -Arguments $deepSeekArguments
 } catch {
     $retiredMarkersRejected = $true
 }
 if (-not $retiredMarkersRejected) {
     throw 'Retired log markers were accepted as current evidence.'
 }
-
-Clear-ManagedEnvironment
-Remove-Item Env:BEHEMOTH_LEGACY_SENTINEL -ErrorAction SilentlyContinue
 """
         )
+
+    def test_runtime_gate_does_not_configure_expert_cache_through_environment(self) -> None:
+        source = RUNTIME_GATE.read_text(encoding="utf-8")
+        retired_prefix = "SILIANG" + "EM_"
+        retired_prefetch_prefix = "GGML_" + "MOE_"
+
+        self.assertNotIn(f"$env:{retired_prefix}", source)
+        self.assertNotIn(f"$env:{retired_prefetch_prefix}", source)
+        self.assertIn("Get-CellExpertCacheArguments", source)
+        self.assertIn("'--parallel', '1'", source)
+        self.assertIn("'-c', '8192', '-b', '512', '-ub', '512', '-t', '2', '-tb', '2'", source)
+        self.assertIn("'-ngl', '99', '-ncmoe', '36'", source)
 
     def test_runtime_identity_covers_executable_and_adjacent_dlls(self) -> None:
         source = RUNTIME_GATE.read_text(encoding="utf-8")

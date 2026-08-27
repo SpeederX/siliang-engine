@@ -25,9 +25,46 @@ struct ggml_compute_params {
 
     struct ggml_threadpool * threadpool;
 
+    // Owned by the CPU backend context and propagated through ggml_cplan.
+    // It is deliberately not attached to the reusable threadpool.
+    struct ggml_siliangem_cache_state * siliangem_cache;
+
     // use reference implementation
     bool use_ref;
 };
+
+struct ggml_siliangem_cache_config;
+struct ggml_siliangem_source_desc;
+struct ggml_siliangem_cache_info;
+
+struct ggml_siliangem_cache_state * ggml_siliangem_cache_state_create(void);
+void ggml_siliangem_cache_state_destroy(struct ggml_siliangem_cache_state * state);
+int ggml_siliangem_cache_state_configure(
+        struct ggml_siliangem_cache_state * state,
+        const struct ggml_siliangem_cache_config * config,
+        const struct ggml_siliangem_source_desc * source);
+void ggml_siliangem_cache_state_reset(struct ggml_siliangem_cache_state * state);
+int ggml_siliangem_cache_state_query(
+        struct ggml_siliangem_cache_state * state,
+        struct ggml_siliangem_cache_info * info);
+int ggml_siliangem_cache_state_prepare_experts(
+        struct ggml_siliangem_cache_state * state, uint32_t layer,
+        const int32_t * experts, uint32_t expert_count);
+int ggml_siliangem_cache_state_prepare_experts_async(
+        struct ggml_siliangem_cache_state * state, uint32_t layer,
+        const int32_t * experts, uint32_t expert_count,
+        int32_t * order, uint32_t order_capacity,
+        uint32_t * n_hits, uint32_t * n_misses, uint32_t * n_active);
+int ggml_siliangem_cache_state_wait_experts(struct ggml_siliangem_cache_state * state);
+int ggml_siliangem_cache_state_copy_cached_part(
+        struct ggml_siliangem_cache_state * state, uint32_t layer, uint32_t expert, uint32_t part,
+        void * destination, size_t destination_size);
+int ggml_siliangem_cache_state_release_cached_expert(
+        struct ggml_siliangem_cache_state * state, uint32_t layer, uint32_t expert,
+        uint32_t * released_slot);
+int ggml_siliangem_cache_state_occupancy(
+        struct ggml_siliangem_cache_state * state,
+        uint32_t * capacity_slots, uint32_t * occupied_slots);
 
 
 #if defined(_MSC_VER)

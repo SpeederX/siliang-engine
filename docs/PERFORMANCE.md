@@ -1,9 +1,15 @@
 # Performance evidence
 
 This page contains the sanitized measurements behind the performance table in
-the root [`README.md`](../README.md). All values are decode throughput in tokens
-per second. They describe one Windows workstation and the named model and
-runtime configurations; they are not general performance guarantees.
+the root [`README.md`](../README.md). Values are decode throughput unless a
+section is explicitly labeled prompt processing. They describe one Windows
+workstation and the named model and runtime configurations; they are not general
+performance guarantees.
+
+The environment-variable commands retained on this page are historical
+v0.1.2 evidence, not the v0.1.3 operator interface. v0.1.3 uses the typed
+`--expert-cache*` CLI options documented in [`CONFIGURATION.md`](CONFIGURATION.md);
+the recorded commands below are intentionally not rewritten retroactively.
 
 The measurements do not have equal evidence depth:
 
@@ -14,6 +20,7 @@ The measurements do not have equal evidence depth:
 | DeepSeek V4 Flash 0731, stock GGUF mmap versus expert-major GGUF arena | Every raw timing repetition, schedule, artifact hashes, runtime hash, command, request, and result summary | Historical precursor; superseded for the direct layout claim |
 | DeepSeek V4 pre-0731 | Every raw timing repetition for three matched arms; partial timing configuration and artifact identity | Historical matched run |
 | gpt-oss-120B | Every raw timing repetition for two matched arms; partial timing configuration and artifact identity | Historical matched run |
+| DeepSeek V4 Flash 0731 prompt processing, pre-prefill-port runtime | Two completed interactive requests and cumulative runtime telemetry; prompts differed and no matched arm was frozen | Observational prefill controls only |
 
 ## Workstation
 
@@ -33,6 +40,44 @@ targeting compute capability 7.5, CUDA 13.2.51, MSVC 19.44.35225.0 x64, and the
 same physical NVMe device for both GGUF files. The older rows were measured on
 this workstation, but their retained summaries do not contain an equally
 complete build packet.
+
+## DeepSeek4 prompt-processing observation (2026-08-27)
+
+One interactive request on the same workstation completed 1,854 prompt tokens
+in 992,584.21 ms: 535.37 ms/token, or 1.87 prompt tok/s. The server used the
+0731 expert-major model, context 2,048, batch/ubatch 512, two prompt threads,
+L2=2,048 MiB, K216/R12/P12, L2 LFU, the L1 cumulative-LFU admission/bypass
+policy then spelled `lfu`, and DeepSeek4 FRONT rolling. The machine remained in
+ordinary interactive use during the request.
+
+A separate fresh request using twelve batch threads completed 1,570 prompt
+tokens in 343,328.27 ms: 218.68 ms/token, or 4.57 prompt tok/s. The operator
+reported `-tb 12` as the relevant configuration change. This is 2.44x the first
+observed rate, but the prompt lengths and contents differed, so it is not a
+matched thread-count speedup claim. It establishes twelve batch threads as the
+control setting for the prefill experiment.
+
+The cumulative host-cache report reached 102,142 projection lookups, 68,007
+hits, 34,135 misses, and 224.28 GiB read from the expert slab. Its 66.6% lookup
+hit rate is mostly the packed expert's three projections sharing one admission;
+it must not be read as 66.6% expert residency reuse. The old binary's
+`expert-level hit` field overflowed and its cross-layer statistic included
+prefill, so those two printed values are invalid. v0.1.3 now counts explicit
+expert requests/hits and labels cross-layer overlap as decode-only.
+
+Late in the first prompt, only 20.0% of cache calls used the `cne1 == 1` fast
+path, and both requests reported zero graph reuses. This makes bounded
+microbatching a reasonable experiment, not a demonstrated optimization. These
+were unfrozen interactive workloads with no output-equivalence arm and no
+interleaved schedule. They are pre-port observational controls only; no product
+speedup claim follows from them.
+
+The current v0.1.3 candidate removes the selected mixture-weight tensor from
+the CPU route-mapping dependency while leaving GPU top-k scoring and expert
+weighting unchanged. It also records four-word, per-layer route bitmaps for
+strictly ordered prefill sweeps and reports adjacent-sweep coverage and
+precision. These are implementation and telemetry changes, not measured
+throughput gains. Speculative bitmap-driven L2 lookahead remains disabled.
 
 ## DeepSeek V4 Flash 0731
 
@@ -296,8 +341,8 @@ llama-server -m "<stock-or-expert-major.gguf>" -ngl 99 -ncmoe 43 -nkvo `
     --host 127.0.0.1 --port "<per-cell-port>" --no-webui
 ```
 
-The measured binary predates the namespace-only rename. In current public
-names, the mmap arms are equivalent to:
+The measured binary predates the namespace-only rename. In the historical
+v0.1.2 public names, the mmap arms are equivalent to:
 
 ```powershell
 $env:SILIANGEM_DISABLE = "1"
@@ -381,7 +426,7 @@ llama-server -m "<stock-or-expert-major.gguf>" -ngl 99 -ncmoe 43 -nkvo `
     --host 127.0.0.1 --port "<per-cell-port>" --no-webui
 ```
 
-In current public names, both mmap arms are equivalent to
+In the historical v0.1.2 public names, both mmap arms are equivalent to
 `SILIANGEM_DISABLE=1`; the arena arm is equivalent to
 `SILIANGEM_CACHE_MIB=12288` and `SILIANGEM_DEFER=1`. All arms used verbose
 statistics and `GGML_MOE_PREFETCH=0`.
@@ -442,7 +487,7 @@ llama-server -m "<expert-major.gguf>" -ngl 99 -ncmoe 36 -nkvo `
     --host 127.0.0.1 --port "<per-cell-port>" --no-webui
 ```
 
-In current public names, the mmap arm is equivalent to
+In the historical v0.1.2 public names, the mmap arm is equivalent to
 `SILIANGEM_DISABLE=1` with verbose statistics. The arena arm is equivalent to
 `SILIANGEM_CACHE_MIB=18432`, `SILIANGEM_DEFER=1`, and verbose statistics.
 `GGML_MOE_PREFETCH` was unset in both arms.

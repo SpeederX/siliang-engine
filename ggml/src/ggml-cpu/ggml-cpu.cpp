@@ -107,6 +107,8 @@ struct ggml_backend_cpu_context {
     void *              abort_callback_data;
 
     bool                use_ref;  // use reference implementation
+
+    ggml_siliangem_cache_state * siliangem_cache;
 };
 
 static const char * ggml_backend_cpu_get_name(ggml_backend_t backend) {
@@ -117,6 +119,7 @@ static const char * ggml_backend_cpu_get_name(ggml_backend_t backend) {
 
 static void ggml_backend_cpu_free(ggml_backend_t backend) {
     struct ggml_backend_cpu_context * cpu_ctx = (struct ggml_backend_cpu_context *)backend->context;
+    ggml_siliangem_cache_state_destroy(cpu_ctx->siliangem_cache);
     delete[] cpu_ctx->work_data;
     delete cpu_ctx;
     delete backend;
@@ -146,6 +149,7 @@ static ggml_backend_graph_plan_t ggml_backend_cpu_graph_plan_create(ggml_backend
     cpu_plan->cplan.abort_callback      = cpu_ctx->abort_callback;
     cpu_plan->cplan.abort_callback_data = cpu_ctx->abort_callback_data;
     cpu_plan->cplan.use_ref             = cpu_ctx->use_ref;
+    cpu_plan->cplan.siliangem_cache     = cpu_ctx->siliangem_cache;
 
     return cpu_plan;
 }
@@ -186,6 +190,7 @@ static enum ggml_status ggml_backend_cpu_graph_compute(ggml_backend_t backend, s
     cplan.abort_callback      = cpu_ctx->abort_callback;
     cplan.abort_callback_data = cpu_ctx->abort_callback_data;
     cplan.use_ref             = cpu_ctx->use_ref;
+    cplan.siliangem_cache     = cpu_ctx->siliangem_cache;
 
     return ggml_graph_compute(cgraph, &cplan);
 }
@@ -230,6 +235,12 @@ ggml_backend_t ggml_backend_cpu_init(void) {
     ctx->abort_callback      = NULL;
     ctx->abort_callback_data = NULL;
     ctx->use_ref             = false;
+    ctx->siliangem_cache     = ggml_siliangem_cache_state_create();
+
+    if (ctx->siliangem_cache == NULL) {
+        delete ctx;
+        return NULL;
+    }
 
     ggml_backend_t cpu_backend = new ggml_backend {
         /* .guid    = */ ggml_backend_cpu_guid(),
@@ -239,11 +250,105 @@ ggml_backend_t ggml_backend_cpu_init(void) {
     };
 
     if (cpu_backend == NULL) {
+        ggml_siliangem_cache_state_destroy(ctx->siliangem_cache);
         delete ctx;
         return NULL;
     }
 
     return cpu_backend;
+}
+
+int ggml_backend_cpu_siliangem_configure(
+        ggml_backend_t backend_cpu,
+        const ggml_siliangem_cache_config * config,
+        const ggml_siliangem_source_desc * source) {
+    if (!ggml_backend_is_cpu(backend_cpu) || !config || !source) {
+        return 0;
+    }
+    auto * ctx = (ggml_backend_cpu_context *) backend_cpu->context;
+    return ggml_siliangem_cache_state_configure(ctx->siliangem_cache, config, source);
+}
+
+void ggml_backend_cpu_siliangem_reset(ggml_backend_t backend_cpu) {
+    if (!ggml_backend_is_cpu(backend_cpu)) {
+        return;
+    }
+    auto * ctx = (ggml_backend_cpu_context *) backend_cpu->context;
+    ggml_siliangem_cache_state_reset(ctx->siliangem_cache);
+}
+
+int ggml_backend_cpu_siliangem_query(
+        ggml_backend_t backend_cpu, ggml_siliangem_cache_info * info) {
+    if (!ggml_backend_is_cpu(backend_cpu) || !info) {
+        return 0;
+    }
+    auto * ctx = (ggml_backend_cpu_context *) backend_cpu->context;
+    return ggml_siliangem_cache_state_query(ctx->siliangem_cache, info);
+}
+
+int ggml_backend_cpu_siliangem_prepare_experts(
+        ggml_backend_t backend_cpu, uint32_t layer,
+        const int32_t * experts, uint32_t expert_count) {
+    if (!ggml_backend_is_cpu(backend_cpu)) {
+        return 0;
+    }
+    auto * ctx = (ggml_backend_cpu_context *) backend_cpu->context;
+    return ggml_siliangem_cache_state_prepare_experts(
+            ctx->siliangem_cache, layer, experts, expert_count);
+}
+
+int ggml_backend_cpu_siliangem_prepare_experts_async(
+        ggml_backend_t backend_cpu, uint32_t layer,
+        const int32_t * experts, uint32_t expert_count,
+        int32_t * order, uint32_t order_capacity,
+        uint32_t * n_hits, uint32_t * n_misses, uint32_t * n_active) {
+    if (!ggml_backend_is_cpu(backend_cpu)) {
+        return 0;
+    }
+    auto * ctx = (ggml_backend_cpu_context *) backend_cpu->context;
+    return ggml_siliangem_cache_state_prepare_experts_async(
+            ctx->siliangem_cache, layer, experts, expert_count,
+            order, order_capacity, n_hits, n_misses, n_active);
+}
+
+int ggml_backend_cpu_siliangem_wait_experts(ggml_backend_t backend_cpu) {
+    if (!ggml_backend_is_cpu(backend_cpu)) {
+        return 0;
+    }
+    auto * ctx = (ggml_backend_cpu_context *) backend_cpu->context;
+    return ggml_siliangem_cache_state_wait_experts(ctx->siliangem_cache);
+}
+
+int ggml_backend_cpu_siliangem_copy_cached_part(
+        ggml_backend_t backend_cpu, uint32_t layer, uint32_t expert, uint32_t part,
+        void * destination, size_t destination_size) {
+    if (!ggml_backend_is_cpu(backend_cpu)) {
+        return 0;
+    }
+    auto * ctx = (ggml_backend_cpu_context *) backend_cpu->context;
+    return ggml_siliangem_cache_state_copy_cached_part(
+            ctx->siliangem_cache, layer, expert, part, destination, destination_size);
+}
+
+int ggml_backend_cpu_siliangem_release_cached_expert(
+        ggml_backend_t backend_cpu, uint32_t layer, uint32_t expert,
+        uint32_t * released_slot) {
+    if (!ggml_backend_is_cpu(backend_cpu)) {
+        return 0;
+    }
+    auto * ctx = (ggml_backend_cpu_context *) backend_cpu->context;
+    return ggml_siliangem_cache_state_release_cached_expert(
+            ctx->siliangem_cache, layer, expert, released_slot);
+}
+
+int ggml_backend_cpu_siliangem_cache_occupancy(
+        ggml_backend_t backend_cpu, uint32_t * capacity_slots, uint32_t * occupied_slots) {
+    if (!ggml_backend_is_cpu(backend_cpu)) {
+        return 0;
+    }
+    auto * ctx = (ggml_backend_cpu_context *) backend_cpu->context;
+    return ggml_siliangem_cache_state_occupancy(
+            ctx->siliangem_cache, capacity_slots, occupied_slots);
 }
 
 bool ggml_backend_is_cpu(ggml_backend_t backend) {
@@ -669,14 +774,33 @@ static void * ggml_backend_cpu_get_proc_address(ggml_backend_reg_t reg, const ch
     if (strcmp(name, "ggml_backend_cpu_set_use_ref") == 0) {
         return (void *)ggml_backend_cpu_set_use_ref;
     }
-#if defined(_WIN32)
-    if (strcmp(name, "ggml_siliangem_set_expert_source") == 0) {
-        return (void *)ggml_siliangem_set_expert_source;
+    if (strcmp(name, "ggml_backend_cpu_siliangem_configure") == 0) {
+        return (void *)ggml_backend_cpu_siliangem_configure;
     }
-    if (strcmp(name, "ggml_siliangem_set_scattered_source") == 0) {
-        return (void *)ggml_siliangem_set_scattered_source;
+    if (strcmp(name, "ggml_backend_cpu_siliangem_reset") == 0) {
+        return (void *)ggml_backend_cpu_siliangem_reset;
     }
-#endif
+    if (strcmp(name, "ggml_backend_cpu_siliangem_query") == 0) {
+        return (void *)ggml_backend_cpu_siliangem_query;
+    }
+    if (strcmp(name, "ggml_backend_cpu_siliangem_prepare_experts") == 0) {
+        return (void *)ggml_backend_cpu_siliangem_prepare_experts;
+    }
+    if (strcmp(name, "ggml_backend_cpu_siliangem_prepare_experts_async") == 0) {
+        return (void *)ggml_backend_cpu_siliangem_prepare_experts_async;
+    }
+    if (strcmp(name, "ggml_backend_cpu_siliangem_wait_experts") == 0) {
+        return (void *)ggml_backend_cpu_siliangem_wait_experts;
+    }
+    if (strcmp(name, "ggml_backend_cpu_siliangem_copy_cached_part") == 0) {
+        return (void *)ggml_backend_cpu_siliangem_copy_cached_part;
+    }
+    if (strcmp(name, "ggml_backend_cpu_siliangem_release_cached_expert") == 0) {
+        return (void *)ggml_backend_cpu_siliangem_release_cached_expert;
+    }
+    if (strcmp(name, "ggml_backend_cpu_siliangem_cache_occupancy") == 0) {
+        return (void *)ggml_backend_cpu_siliangem_cache_occupancy;
+    }
 
     // threadpool - TODO:  move to ggml-base
     if (strcmp(name, "ggml_threadpool_new") == 0) {

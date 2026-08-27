@@ -5,6 +5,7 @@
 #include "ggml-backend.h"
 #include "traits.h"
 #include "ggml-cpu-impl.h"
+#include "ggml-cpu.h"
 #include "ggml-impl.h"
 #include "quants.h"
 #include "ggml-threading.h"
@@ -1543,7 +1544,7 @@ static void * incr_ptr_aligned(void ** p, size_t size, size_t align) {
 // request. It is a hint, not a load: threads may still fault, but against I/O
 // that is already in flight and coalesced.
 //
-// Toggle with GGML_MOE_PREFETCH=0 so baseline and patched are the same binary.
+// Explicitly controlled by ggml_siliangem_cache_config::mmap_prefetch.
 #if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -1554,95 +1555,306 @@ static void * incr_ptr_aligned(void ** p, size_t size, size_t align) {
 #include <windows.h>
 #include "siliangem_moe_cache.h"
 
-// Siliang Engine: receive the expert-major source from the model loader.
-// Copied rather than referenced: the loader's vectors do not outlive loading,
-// while the cache is consulted for the life of the process.
-void ggml_siliangem_set_expert_source(
-        const char * path, int n_layers, int n_experts, int n_parts,
-        const uint64_t * base, const uint32_t * stride,
-        const uint32_t * poff, const uint32_t * pbytes,
-        const char * part_names) {
-#if defined(_WIN32)
-    if (!path || n_layers <= 0 || n_layers > 512 || n_parts <= 0 || n_parts > 4) {
-        g_em.set = 0;
-        return;
-    }
-    // The file names its own parts. Without this the cache assumed
-    // gate/up/down and returned NULL for every access on a fused-gate_up model
-    // like Gemma 4, falling back to mmap silently.
-    siliangem_set_part_names(part_names);
-    snprintf(g_em.path, sizeof(g_em.path), "%s", path);
-    g_em.n_layers  = n_layers;
-    g_em.n_experts = n_experts;
-    g_em.n_parts   = n_parts;
-    for (int i = 0; i < n_layers; i++) {
-        g_em.base[i]   = base[i];
-        g_em.stride[i] = stride[i];
-        for (int p = 0; p < n_parts; p++) {
-            g_em.poff[i*n_parts + p]   = poff[i*n_parts + p];
-            g_em.pbytes[i*n_parts + p] = pbytes[i*n_parts + p];
-        }
-    }
-    g_em.set = 1;
-#else
-    (void) path; (void) n_layers; (void) n_experts; (void) n_parts;
-    (void) base; (void) stride; (void) poff; (void) pbytes;
-#endif
+static void siliangem_state_defaults(struct ggml_siliangem_cache_state * state) {
+    memcpy(state->part_name[0], "gate", 5);
+    memcpy(state->part_name[1], "up", 3);
+    memcpy(state->part_name[2], "down", 5);
+    state->n_part_name = 3;
 }
 
-// Scattered geometry from a STOCK GGUF - an expert's gate/up/down live in three
-// separate tensors, so there are three bases and three strides per layer.
-//
-// This is what lets the cache run on a stock model. Without published stock
-// geometry, siliangem_init needs a slab or expert-major metadata and otherwise
-// declines, leaving plain mmap.
-void ggml_siliangem_set_scattered_source(
-        const char * path, int n_layers, int n_experts,
-        const uint64_t * base, const uint32_t * stride) {
-#if defined(_WIN32)
-    g_scat.set = 0;
-    if (!path || n_layers <= 0 || n_layers > 512 || n_experts <= 1 ||
-        !base || !stride) {
-        return;
-    }
-    for (int L = 0; L < n_layers; L++) {
-        uint64_t expert_bytes = 0;
-        for (int p = 0; p < 3; p++) {
-            const uint32_t part_bytes = stride[L * 3 + p];
-            if (part_bytes == 0) return;
-            expert_bytes += part_bytes;
-        }
-        if (expert_bytes > UINT32_MAX) return;
-    }
-    snprintf(g_scat.path, sizeof(g_scat.path), "%s", path);
-    g_scat.n_layers  = n_layers;
-    g_scat.n_experts = n_experts;
-    for (int i = 0; i < n_layers * 3; i++) {
-        g_scat.stride[i] = stride[i];
-        g_scat.base[i]   = base[i];
-    }
-    g_scat.set = 1;
-#else
-    (void) path; (void) n_layers; (void) n_experts; (void) base; (void) stride;
-#endif
+struct ggml_siliangem_cache_state * ggml_siliangem_cache_state_create(void) {
+    struct ggml_siliangem_cache_state * state =
+            (struct ggml_siliangem_cache_state *) calloc(1, sizeof(*state));
+    if (state) siliangem_state_defaults(state);
+    return state;
 }
+
+void ggml_siliangem_cache_state_reset(struct ggml_siliangem_cache_state * state) {
+    if (!state) return;
+    siliangem_bind_state(state);
+    siliangem_shutdown();
+    memset(state, 0, sizeof(*state));
+    siliangem_state_defaults(state);
+}
+
+void ggml_siliangem_cache_state_destroy(struct ggml_siliangem_cache_state * state) {
+    if (!state) return;
+    ggml_siliangem_cache_state_reset(state);
+    if (siliangem_tls_state == state) siliangem_tls_state = NULL;
+    free(state);
+}
+
+static int siliangem_copy_source_path(char destination[1024], const char * path) {
+    if (!path) return 0;
+    const size_t length = strlen(path);
+    if (length == 0 || length >= 1024) return 0;
+    memcpy(destination, path, length + 1);
+    return 1;
+}
+
+int ggml_siliangem_cache_state_configure(
+        struct ggml_siliangem_cache_state * state,
+        const struct ggml_siliangem_cache_config * config,
+        const struct ggml_siliangem_source_desc * source) {
+    if (!state || !config || !source ||
+        config->struct_size < sizeof(*config) || source->struct_size < sizeof(*source)) return 0;
+
+    ggml_siliangem_cache_state_reset(state);
+    siliangem_bind_state(state);
+
+    if (config->policy != GGML_SILIANGEM_CACHE_POLICY_LRU &&
+        config->policy != GGML_SILIANGEM_CACHE_POLICY_LFU &&
+        config->policy != GGML_SILIANGEM_CACHE_POLICY_WTINYLFU_W10_SLRU_P80) return 0;
+
+    state->enabled = config->enabled != 0;
+    state->capacity_mib = config->capacity_mib;
+    state->policy = (int) config->policy;
+    state->deferred_io = config->deferred_io != 0;
+    state->verbose = config->verbose != 0;
+    state->memory_report = config->memory_report != 0;
+    state->mmap_prefetch = config->mmap_prefetch != 0;
+    state->source_kind = source->kind;
+
+    if (!state->enabled) {
+        state->configured = 1;
+        return 1;
+    }
+    if (state->capacity_mib == 0 || !siliangem_copy_source_path(state->source_path, source->path)) return 0;
+
+    if (source->kind == GGML_SILIANGEM_SOURCE_EXPERT_MAJOR) {
+        if (source->n_layers == 0 || source->n_layers > 512 ||
+            source->n_experts <= 1 || source->n_experts > 65535 ||
+            source->n_parts == 0 || source->n_parts > SILIANGEM_MAX_PARTS ||
+            !source->base || !source->stride || !source->part_offset || !source->part_bytes) return 0;
+        if (!siliangem_copy_source_path(g_em.path, source->path)) return 0;
+        g_em.n_layers = (int) source->n_layers;
+        g_em.n_experts = (int) source->n_experts;
+        g_em.n_parts = (int) source->n_parts;
+        for (uint32_t layer = 0; layer < source->n_layers; ++layer) {
+            const uint32_t expert_stride = source->stride[layer];
+            if (expert_stride == 0) return 0;
+            g_em.base[layer] = source->base[layer];
+            g_em.stride[layer] = expert_stride;
+            for (uint32_t part = 0; part < source->n_parts; ++part) {
+                const size_t index = (size_t) layer * source->n_parts + part;
+                const uint32_t offset = source->part_offset[index];
+                const uint32_t bytes = source->part_bytes[index];
+                if (bytes == 0 || offset > expert_stride || bytes > expert_stride - offset) return 0;
+                g_em.poff[index] = offset;
+                g_em.pbytes[index] = bytes;
+            }
+        }
+        siliangem_set_part_names(source->part_names);
+        if ((uint32_t) g_n_part_name != source->n_parts) return 0;
+        g_em.set = 1;
+    } else if (source->kind == GGML_SILIANGEM_SOURCE_SCATTERED) {
+        if (source->n_layers == 0 || source->n_layers > 512 ||
+            source->n_experts <= 1 || source->n_experts > 65535 ||
+            source->n_parts != 3 || !source->base || !source->stride) return 0;
+        if (!siliangem_copy_source_path(g_scat.path, source->path)) return 0;
+        g_scat.n_layers = (int) source->n_layers;
+        g_scat.n_experts = (int) source->n_experts;
+        for (uint32_t layer = 0; layer < source->n_layers; ++layer) {
+            uint64_t expert_bytes = 0;
+            for (uint32_t part = 0; part < 3; ++part) {
+                const size_t index = (size_t) layer * 3 + part;
+                if (source->stride[index] == 0) return 0;
+                expert_bytes += source->stride[index];
+                g_scat.base[index] = source->base[index];
+                g_scat.stride[index] = source->stride[index];
+            }
+            if (expert_bytes > UINT32_MAX) return 0;
+        }
+        g_scat.set = 1;
+    } else if (source->kind != GGML_SILIANGEM_SOURCE_LEGACY_SLAB) {
+        return 0;
+    }
+
+    state->configured = 1;
+    state->init_attempted = 1;
+    siliangem_init();
+    return g_siliangem.ready;
+}
+
+int ggml_siliangem_cache_state_occupancy(
+        struct ggml_siliangem_cache_state * state,
+        uint32_t * capacity_slots, uint32_t * occupied_slots) {
+    if (!state || !capacity_slots || !occupied_slots) return 0;
+    siliangem_bind_state(state);
+    if (!g_siliangem.ready) return 0;
+    uint32_t occupied = 0;
+    for (uint32_t slot = 0; slot < g_siliangem.nslots; ++slot) {
+        occupied += g_siliangem.slots[slot].key != SILIANGEM_EMPTY;
+    }
+    *capacity_slots = g_siliangem.nslots;
+    *occupied_slots = occupied;
+    return 1;
+}
+
+int ggml_siliangem_cache_state_query(
+        struct ggml_siliangem_cache_state * state,
+        struct ggml_siliangem_cache_info * info) {
+    if (!state || !info || info->struct_size < sizeof(*info)) return 0;
+    const size_t struct_size = info->struct_size;
+    memset(info, 0, sizeof(*info));
+    info->struct_size = struct_size;
+    siliangem_bind_state(state);
+    info->configured = state->configured;
+    info->ready = g_siliangem.ready;
+    info->policy = (enum ggml_siliangem_cache_policy) state->policy;
+    info->capacity_slots = g_siliangem.nslots;
+    for (uint32_t slot = 0; slot < g_siliangem.nslots; ++slot) {
+        info->occupied_slots += g_siliangem.slots[slot].key != SILIANGEM_EMPTY;
+    }
+    info->pending_reads = (uint32_t) g_siliangem.n_pending;
+    info->n_layers = g_siliangem.n_layers;
+    info->n_experts = g_siliangem.n_experts;
+    info->expert_bytes = g_siliangem.expert_bytes;
+    info->policy_window_slots = g_siliangem.policy_window_slots;
+    info->policy_protected_slots = g_siliangem.policy_protected_slots;
+    info->hits = g_siliangem.hits;
+    info->misses = g_siliangem.misses;
+    info->bytes_read = g_siliangem.bytes_read;
+    info->wait_calls = g_siliangem.wait_calls;
+    info->wait_ns = g_siliangem.wait_ns;
+    info->policy_admissions = g_siliangem.policy_admissions;
+    info->policy_evictions = g_siliangem.policy_evictions;
+    info->policy_rejections = g_siliangem.policy_main_candidate_rejections;
+    return 1;
+}
+
+static int siliangem_build_request(
+        uint32_t layer, const int32_t * experts, uint32_t expert_count,
+        int64_t ** counts_out, char tensor_name[96]) {
+    if (!experts || !counts_out || expert_count == 0 || expert_count > SILIANGEM_MAX_BATCH ||
+        !g_siliangem.ready || layer >= g_siliangem.n_layers) return 0;
+    int64_t * counts = (int64_t *) calloc(g_siliangem.n_experts, sizeof(*counts));
+    if (!counts) return 0;
+    for (uint32_t i = 0; i < expert_count; ++i) {
+        const int32_t expert = experts[i];
+        if (expert < 0 || (uint32_t) expert >= g_siliangem.n_experts || counts[expert] != 0) {
+            free(counts);
+            return 0;
+        }
+        counts[expert] = 1;
+        if (g_siliangem.freq) {
+            uint32_t * frequency = &g_siliangem.freq[(size_t) layer * g_siliangem.n_experts + (uint32_t) expert];
+            if (*frequency != UINT32_MAX) ++*frequency;
+        }
+    }
+    snprintf(tensor_name, 96, "blk.%u.ffn_%s_exps.weight", layer, g_part_name[0]);
+    *counts_out = counts;
+    return 1;
+}
+
+int ggml_siliangem_cache_state_prepare_experts(
+        struct ggml_siliangem_cache_state * state, uint32_t layer,
+        const int32_t * experts, uint32_t expert_count) {
+    if (!state) return 0;
+    siliangem_bind_state(state);
+    int64_t * counts = NULL;
+    char tensor_name[96];
+    if (!siliangem_build_request(layer, experts, expert_count, &counts, tensor_name)) return 0;
+    const int result = siliangem_prepare(tensor_name, counts, (int) g_siliangem.n_experts);
+    free(counts);
+    return result;
+}
+
+int ggml_siliangem_cache_state_prepare_experts_async(
+        struct ggml_siliangem_cache_state * state, uint32_t layer,
+        const int32_t * experts, uint32_t expert_count,
+        int32_t * order, uint32_t order_capacity,
+        uint32_t * n_hits, uint32_t * n_misses, uint32_t * n_active) {
+    if (n_hits) *n_hits = 0;
+    if (n_misses) *n_misses = 0;
+    if (n_active) *n_active = 0;
+    if (!state || !order || !n_hits || !n_misses || !n_active || order_capacity < expert_count) return 0;
+    siliangem_bind_state(state);
+    int64_t * counts = NULL;
+    char tensor_name[96];
+    if (!siliangem_build_request(layer, experts, expert_count, &counts, tensor_name)) return 0;
+    int local_order[SILIANGEM_MAX_BATCH];
+    int local_hits = 0;
+    int local_active = 0;
+    const int result = siliangem_prepare_async(
+            tensor_name, counts, (int) g_siliangem.n_experts,
+            local_order, &local_hits, &local_active);
+    free(counts);
+    if (!result || local_hits < 0 || local_active < local_hits ||
+        (uint32_t) local_active != expert_count ||
+        (uint32_t) local_active > order_capacity) return 0;
+    for (int i = 0; i < local_active; ++i) order[i] = local_order[i];
+    *n_hits = (uint32_t) local_hits;
+    *n_misses = (uint32_t) (local_active - local_hits);
+    *n_active = (uint32_t) local_active;
+    return 1;
+}
+
+int ggml_siliangem_cache_state_wait_experts(struct ggml_siliangem_cache_state * state) {
+    if (!state) return 0;
+    siliangem_bind_state(state);
+    if (!g_siliangem.ready) return 0;
+    siliangem_wait();
+    return 1;
+}
+
+int ggml_siliangem_cache_state_copy_cached_part(
+        struct ggml_siliangem_cache_state * state, uint32_t layer, uint32_t expert, uint32_t part,
+        void * destination, size_t destination_size) {
+    if (!state || !destination || destination_size == 0) return 0;
+    siliangem_bind_state(state);
+    if (!g_siliangem.ready || layer >= g_siliangem.n_layers || expert >= g_siliangem.n_experts) return 0;
+    const uint32_t slot = siliangem_lookup((layer << 16) | expert);
+    if (slot == SILIANGEM_EMPTY) return 0;
+    uint32_t offset = 0;
+    uint32_t bytes = 0;
+    if (g_siliangem.em) {
+        if (part >= (uint32_t) g_siliangem.em_nparts) return 0;
+        const size_t index = (size_t) layer * (uint32_t) g_siliangem.em_nparts + part;
+        offset = g_siliangem.em_poff[index];
+        bytes = g_siliangem.em_pbytes[index];
+    } else {
+        if (part >= 3) return 0;
+        offset = g_siliangem.part_off[part];
+        bytes = g_siliangem.part_bytes[part];
+    }
+    if (bytes == 0 || destination_size != bytes) return 0;
+    memcpy(destination, g_siliangem.arena + (size_t) slot * g_siliangem.expert_bytes + offset, bytes);
+    return 1;
+}
+
+int ggml_siliangem_cache_state_release_cached_expert(
+        struct ggml_siliangem_cache_state * state, uint32_t layer, uint32_t expert,
+        uint32_t * released_slot) {
+    if (!state) return 0;
+    siliangem_bind_state(state);
+    if (!g_siliangem.ready || layer >= g_siliangem.n_layers || expert >= g_siliangem.n_experts) return 0;
+    const uint32_t key = (layer << 16) | expert;
+    const uint32_t slot = siliangem_lookup(key);
+    if (slot == SILIANGEM_EMPTY || g_siliangem.slots[slot].leases != 0) return 0;
+    for (int pending = 0; pending < g_siliangem.n_pending; ++pending) {
+        if (g_siliangem.pend_slot[pending] == slot) return 0;
+    }
+    g_siliangem.slots[slot].key = SILIANGEM_EMPTY;
+    g_siliangem.slots[slot].stamp = 0;
+    g_siliangem.slots[slot].frequency = 0;
+    g_siliangem.slots[slot].segment = SILIANGEM_SEGMENT_NONE;
+    siliangem_table_rebuild();
+    if (released_slot) *released_slot = slot;
+    return 1;
+}
+
 #define GGML_MOE_PREFETCH_MAX 64
 
-/* Expert ordering for the deferred-wait path, filled by ith==0 before a barrier
- * and read by every thread after it. File-scope statics are safe because ggml
- * executes ops sequentially - only one mul_mat_id is ever in flight. */
-static int siliangem_order[SILIANGEM_MAX_BATCH];
-static int siliangem_n_hits    = 0;   /* leading entries of siliangem_order already resident */
-static int siliangem_n_active  = 0;   /* total entries in siliangem_order */
-static int siliangem_reordered = 0;   /* 1 when siliangem_order governs iteration */
-
 static void ggml_moe_prefetch_experts(
+        struct ggml_siliangem_cache_state * cache_state,
         const struct ggml_tensor * src0,
         const int64_t * counts, int n_as, size_t stride) {
     typedef BOOL (WINAPI *pfn_pvm_t)(HANDLE, ULONG_PTR, PWIN32_MEMORY_RANGE_ENTRY, ULONG);
     static pfn_pvm_t pvm = NULL;
-    static int state = -1;                      // -1 uninit, 0 off, 1 on
-    if (state < 0) {                            // only ever reached from ith==0
+    static int resolved = 0;
+    if (!cache_state || !cache_state->mmap_prefetch) return;
+    if (!resolved) {
         // OPT-IN, not opt-out. This syscall can serialize worker threads and
         // regress decode when there are no useful pages to fault.
         //
@@ -1658,14 +1870,13 @@ static void ggml_moe_prefetch_experts(
         //
         // Whether it helps an mmap'd out-of-core model without the arena is a
         // target-specific measurement. Keep it opt-in.
-        const char * e = getenv("GGML_MOE_PREFETCH");
-        state = (e && e[0] != '0') ? 1 : 0;
         HMODULE h = GetModuleHandleW(L"kernel32.dll");
         if (h) {
             pvm = (pfn_pvm_t)(void *) GetProcAddress(h, "PrefetchVirtualMemory");
         }
+        resolved = 1;
     }
-    if (state == 0 || pvm == NULL || src0->data == NULL || stride == 0) {
+    if (pvm == NULL || src0->data == NULL || stride == 0) {
         return;
     }
     WIN32_MEMORY_RANGE_ENTRY ranges[GGML_MOE_PREFETCH_MAX];
@@ -1684,9 +1895,97 @@ static void ggml_moe_prefetch_experts(
 }
 #endif // _WIN32
 
+#if !defined(_WIN32)
+struct ggml_siliangem_cache_state {
+    int configured;
+};
+
+struct ggml_siliangem_cache_state * ggml_siliangem_cache_state_create(void) {
+    return (struct ggml_siliangem_cache_state *) calloc(1, sizeof(struct ggml_siliangem_cache_state));
+}
+
+void ggml_siliangem_cache_state_destroy(struct ggml_siliangem_cache_state * state) {
+    free(state);
+}
+
+void ggml_siliangem_cache_state_reset(struct ggml_siliangem_cache_state * state) {
+    if (state) state->configured = 0;
+}
+
+int ggml_siliangem_cache_state_configure(
+        struct ggml_siliangem_cache_state * state,
+        const struct ggml_siliangem_cache_config * config,
+        const struct ggml_siliangem_source_desc * source) {
+    if (!state || !config || !source || config->struct_size < sizeof(*config) ||
+        source->struct_size < sizeof(*source)) return 0;
+    state->configured = !config->enabled;
+    return state->configured;
+}
+
+int ggml_siliangem_cache_state_query(
+        struct ggml_siliangem_cache_state * state,
+        struct ggml_siliangem_cache_info * info) {
+    if (!state || !info || info->struct_size < sizeof(*info)) return 0;
+    const size_t struct_size = info->struct_size;
+    memset(info, 0, sizeof(*info));
+    info->struct_size = struct_size;
+    info->configured = state->configured;
+    return 1;
+}
+
+int ggml_siliangem_cache_state_prepare_experts(
+        struct ggml_siliangem_cache_state * state, uint32_t layer,
+        const int32_t * experts, uint32_t expert_count) {
+    GGML_UNUSED(state); GGML_UNUSED(layer); GGML_UNUSED(experts); GGML_UNUSED(expert_count);
+    return 0;
+}
+
+int ggml_siliangem_cache_state_prepare_experts_async(
+        struct ggml_siliangem_cache_state * state, uint32_t layer,
+        const int32_t * experts, uint32_t expert_count,
+        int32_t * order, uint32_t order_capacity,
+        uint32_t * n_hits, uint32_t * n_misses, uint32_t * n_active) {
+    GGML_UNUSED(state); GGML_UNUSED(layer); GGML_UNUSED(experts); GGML_UNUSED(expert_count);
+    GGML_UNUSED(order); GGML_UNUSED(order_capacity); GGML_UNUSED(n_hits); GGML_UNUSED(n_misses); GGML_UNUSED(n_active);
+    return 0;
+}
+
+int ggml_siliangem_cache_state_wait_experts(struct ggml_siliangem_cache_state * state) {
+    GGML_UNUSED(state);
+    return 0;
+}
+
+int ggml_siliangem_cache_state_copy_cached_part(
+        struct ggml_siliangem_cache_state * state, uint32_t layer, uint32_t expert, uint32_t part,
+        void * destination, size_t destination_size) {
+    GGML_UNUSED(state); GGML_UNUSED(layer); GGML_UNUSED(expert); GGML_UNUSED(part);
+    GGML_UNUSED(destination); GGML_UNUSED(destination_size);
+    return 0;
+}
+
+int ggml_siliangem_cache_state_release_cached_expert(
+        struct ggml_siliangem_cache_state * state, uint32_t layer, uint32_t expert,
+        uint32_t * released_slot) {
+    GGML_UNUSED(state); GGML_UNUSED(layer); GGML_UNUSED(expert); GGML_UNUSED(released_slot);
+    return 0;
+}
+
+int ggml_siliangem_cache_state_occupancy(
+        struct ggml_siliangem_cache_state * state,
+        uint32_t * capacity_slots, uint32_t * occupied_slots) {
+    GGML_UNUSED(state); GGML_UNUSED(capacity_slots); GGML_UNUSED(occupied_slots);
+    return 0;
+}
+#endif
+
 static void ggml_compute_forward_mul_mat_id(
         const struct ggml_compute_params * params,
               struct ggml_tensor * dst) {
+
+#if defined(_WIN32)
+    struct ggml_siliangem_cache_state * siliangem_state = params->siliangem_cache;
+    if (siliangem_state) siliangem_bind_state(siliangem_state);
+#endif
 
     const struct ggml_tensor * src0 = dst->src[0];
     const struct ggml_tensor * src1 = dst->src[1];
@@ -1814,12 +2113,17 @@ static void ggml_compute_forward_mul_mat_id(
         // ids->ne[1] is the token count for this batch: 1 during decode, the
         // chunk size during prefill. Passed explicitly so the phase split does
         // not have to be inferred from expert-collision luck.
-        siliangem_observe_layer(src0->name, matrix_row_counts, n_as, ids->ne[1]);
-        siliangem_reordered = siliangem_prepare_async(src0->name, matrix_row_counts, n_as,
-                                        siliangem_order, &siliangem_n_hits, &siliangem_n_active);
-        if (!siliangem_reordered) {
-            if (!siliangem_prepare(src0->name, matrix_row_counts, n_as)) {
-                ggml_moe_prefetch_experts(src0, matrix_row_counts, n_as, nb02);
+        if (siliangem_state) {
+            siliangem_observe_layer(src0->name, matrix_row_counts, n_as, ids->ne[1]);
+        }
+        if (siliangem_state) {
+            siliangem_state->reordered = siliangem_prepare_async(
+                    src0->name, matrix_row_counts, n_as, siliangem_state->order,
+                    &siliangem_state->n_hits, &siliangem_state->n_active);
+        }
+        if (!siliangem_state || !siliangem_state->reordered) {
+            if (!siliangem_state || !siliangem_prepare(src0->name, matrix_row_counts, n_as)) {
+                ggml_moe_prefetch_experts(siliangem_state, src0, matrix_row_counts, n_as, nb02);
             }
         }
     }
@@ -1827,7 +2131,8 @@ static void ggml_compute_forward_mul_mat_id(
 #endif
 
 #if defined(_WIN32)
-    const int siliangem_n_iter = siliangem_reordered ? siliangem_n_active : n_as;
+    const int siliangem_n_iter = siliangem_state && siliangem_state->reordered
+            ? siliangem_state->n_active : n_as;
 #else
     const int siliangem_n_iter = n_as;
 #endif
@@ -1835,22 +2140,22 @@ static void ggml_compute_forward_mul_mat_id(
     for (int siliangem_idx = 0; siliangem_idx < siliangem_n_iter; ++siliangem_idx) {
         int cur_a = siliangem_idx;
 #if defined(_WIN32)
-        if (siliangem_reordered) {
+        if (siliangem_state && siliangem_state->reordered) {
             // Boundary between resident and in-flight experts. Every thread
             // reaches it on the same iteration, so the barrier is well formed.
-            if (siliangem_idx == siliangem_n_hits) {
+            if (siliangem_idx == siliangem_state->n_hits) {
                 if (ith == 0) {
                     siliangem_wait();
                 }
                 ggml_barrier(params->threadpool);
             }
-            cur_a = siliangem_order[siliangem_idx];
+            cur_a = siliangem_state->order[siliangem_idx];
         }
 #endif
         const int64_t cne1 = matrix_row_counts[cur_a];
 
 #if defined(_WIN32)
-        if (ith == 0) {
+        if (siliangem_state && ith == 0) {
             siliangem_note_cne1((long long) cne1);
         }
 #endif
@@ -1866,7 +2171,8 @@ static void ggml_compute_forward_mul_mat_id(
         // NULL means "not ours" (no slab, not an expert tensor, layout
         // mismatch, or a read that failed) and the mmap pointer above stands.
         {
-            const char * cached = siliangem_ptr(src0->name, cur_a, (size_t) nb02, ith);
+            const char * cached = siliangem_state
+                    ? siliangem_ptr(src0->name, cur_a, (size_t) nb02, ith) : NULL;
             if (cached) src0_cur = cached;
         }
 #endif
@@ -3294,6 +3600,7 @@ static thread_ret_t ggml_graph_compute_thread(void * data) {
         /*.wsize      =*/ cplan->work_size,
         /*.wdata      =*/ cplan->work_data,
         /*.threadpool =*/ tp,
+        /*.siliangem_cache =*/ cplan->siliangem_cache,
         /*.use_ref    =*/ cplan->use_ref,
     };
 

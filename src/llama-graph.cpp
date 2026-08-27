@@ -229,6 +229,201 @@ bool llm_graph_input_out_ids::can_reuse(const llm_graph_params & params) {
     return res;
 }
 
+llm_graph_input_siliang_moe_arena::llm_graph_input_siliang_moe_arena(
+        const llama_siliang_moe_arena_state * state,
+        int32_t layer,
+        int64_t n_tokens) :
+    state(state),
+    layer(layer),
+    n_tokens_at_build(n_tokens),
+    generation_at_build(state ? state->generation : 0) {
+}
+
+bool llm_graph_input_siliang_moe_arena::can_reuse(const llm_graph_params & params) {
+    const int64_t n_tokens = params.ubatch.n_tokens;
+    const bool route_supported = n_tokens == 1 ||
+        (state && state->prefill_enabled && n_tokens > 1 &&
+         n_tokens <= static_cast<int64_t>(state->prefill_ubatch_cap));
+    return params.cparams.siliang_moe_arena_enabled &&
+           params.cparams.siliang_moe_arena_state == state && state != nullptr &&
+           state->generation == generation_at_build && route_supported &&
+           n_tokens == n_tokens_at_build;
+}
+
+static void siliang_moe_arena_map_slots_custom(
+        ggml_tensor * dst,
+        const ggml_tensor * logical_ids,
+        int ith,
+        int nth,
+        void * userdata) {
+    GGML_ASSERT(dst && logical_ids && userdata && ith == 0 && nth == 1);
+    auto * call = static_cast<llama_siliang_moe_arena_map_call *>(userdata);
+    auto * state = call->state;
+    GGML_ASSERT(state && call->layer >= 0 && call->generation == state->generation);
+
+    const int64_t count = ggml_nelements(logical_ids);
+    const int64_t n_tokens = logical_ids->ne[1];
+    const bool prefill = n_tokens > 1;
+    const bool route_shape_valid =
+        state && state->top_k > 0 && n_tokens > 0 &&
+        logical_ids->ne[0] == state->top_k && logical_ids->ne[2] == 1 && logical_ids->ne[3] == 1 &&
+        dst->ne[0] == logical_ids->ne[0] && dst->ne[1] == logical_ids->ne[1] &&
+        dst->ne[2] == logical_ids->ne[2] && dst->ne[3] == logical_ids->ne[3] &&
+        count == static_cast<int64_t>(state->top_k) * n_tokens &&
+        ggml_is_contiguous(logical_ids) && ggml_is_contiguous(dst);
+    const bool phase_supported = n_tokens == 1 ||
+        (state && state->prefill_enabled && prefill &&
+         n_tokens <= static_cast<int64_t>(state->prefill_ubatch_cap));
+    const bool layer_bounds_valid =
+        static_cast<size_t>(call->layer) < state->physical_slot_first_by_layer.size() &&
+        static_cast<size_t>(call->layer) < state->physical_slot_count_by_layer.size() &&
+        static_cast<size_t>(call->layer) < state->exchange_slot_first_by_layer.size() &&
+        static_cast<size_t>(call->layer) < state->exchange_slot_count_by_layer.size();
+    const bool route_contract_valid =
+        state->failure_code.load(std::memory_order_acquire) == 0 && state->mapper &&
+        logical_ids->type == GGML_TYPE_I32 && dst->type == GGML_TYPE_I32 &&
+        route_shape_valid && phase_supported && layer_bounds_valid &&
+        state->physical_slot_count_by_layer[call->layer] != 0 &&
+        state->exchange_slot_count_by_layer[call->layer] != 0;
+    if (!route_contract_valid) {
+        if (!state->contract_failure_logged.exchange(true, std::memory_order_acq_rel)) {
+            const uint32_t physical_count = layer_bounds_valid ?
+                state->physical_slot_count_by_layer[call->layer] : 0;
+            const uint32_t exchange_count = layer_bounds_valid ?
+                state->exchange_slot_count_by_layer[call->layer] : 0;
+            LLAMA_LOG_ERROR(
+                    "siliang_moe_arena: route contract reject code=-4301 layer=%d "
+                    "logical={type=%d ne=[%lld,%lld,%lld,%lld] elements=%lld contiguous=%d} "
+                    "dst={type=%d ne=[%lld,%lld,%lld,%lld] elements=%lld contiguous=%d} "
+                    "state={failure=%d mapper=%d top_k=%d experts=%d prefill=%d cap=%u phase_supported=%d "
+                    "shape_valid=%d layer_bounds=%d vectors=[%zu,%zu,%zu,%zu] K_count=%u R_count=%u}\n",
+                    call->layer,
+                    static_cast<int>(logical_ids->type),
+                    static_cast<long long>(logical_ids->ne[0]), static_cast<long long>(logical_ids->ne[1]),
+                    static_cast<long long>(logical_ids->ne[2]), static_cast<long long>(logical_ids->ne[3]),
+                    static_cast<long long>(count), ggml_is_contiguous(logical_ids) ? 1 : 0,
+                    static_cast<int>(dst->type),
+                    static_cast<long long>(dst->ne[0]), static_cast<long long>(dst->ne[1]),
+                    static_cast<long long>(dst->ne[2]), static_cast<long long>(dst->ne[3]),
+                    static_cast<long long>(ggml_nelements(dst)), ggml_is_contiguous(dst) ? 1 : 0,
+                    state->failure_code.load(std::memory_order_acquire), state->mapper ? 1 : 0,
+                    state->top_k, state->expert_count, state->prefill_enabled ? 1 : 0,
+                    state->prefill_ubatch_cap, phase_supported ? 1 : 0, route_shape_valid ? 1 : 0,
+                    layer_bounds_valid ? 1 : 0,
+                    state->physical_slot_first_by_layer.size(), state->physical_slot_count_by_layer.size(),
+                    state->exchange_slot_first_by_layer.size(), state->exchange_slot_count_by_layer.size(),
+                    physical_count, exchange_count);
+        }
+        state->failure_code.store(-4301, std::memory_order_release);
+        std::memset(dst->data, 0, ggml_nbytes(dst));
+        return;
+    }
+
+    const auto * logical = static_cast<const int32_t *>(logical_ids->data);
+    auto * physical = static_cast<int32_t *>(dst->data);
+    const int rc = state->mapper(
+            state->user_data, call->layer, logical, physical, static_cast<size_t>(count));
+    state->map_calls.fetch_add(1, std::memory_order_relaxed);
+
+    const uint32_t physical_first = state->physical_slot_first_by_layer[call->layer];
+    const uint32_t physical_count = state->physical_slot_count_by_layer[call->layer];
+    const uint64_t physical_last = static_cast<uint64_t>(physical_first) + physical_count;
+    const uint32_t exchange_first = state->exchange_slot_first_by_layer[call->layer];
+    const uint32_t exchange_count = state->exchange_slot_count_by_layer[call->layer];
+    const uint64_t exchange_last = static_cast<uint64_t>(exchange_first) + exchange_count;
+    std::vector<int32_t> physical_by_logical;
+    std::vector<int32_t> logical_by_persistent;
+    std::vector<int32_t> logical_by_exchange;
+    if (prefill) {
+        physical_by_logical.assign(static_cast<size_t>(state->expert_count), -1);
+        logical_by_persistent.assign(physical_count, -1);
+        logical_by_exchange.assign(exchange_count, -1);
+    }
+    for (int64_t index = 0; rc && index < count; ++index) {
+        const bool in_persistent = physical[index] >= 0 &&
+            static_cast<uint32_t>(physical[index]) >= physical_first &&
+            static_cast<uint64_t>(physical[index]) < physical_last;
+        const bool in_exchange = physical[index] >= 0 &&
+            static_cast<uint32_t>(physical[index]) >= exchange_first &&
+            static_cast<uint64_t>(physical[index]) < exchange_last;
+        if (logical[index] < 0 || logical[index] >= state->expert_count ||
+            (!in_persistent && !in_exchange) || (prefill && !in_persistent)) {
+            state->failure_code.store(-4302, std::memory_order_release);
+            std::memset(dst->data, 0, ggml_nbytes(dst));
+            return;
+        }
+        if (prefill) {
+            int32_t & mapped_physical = physical_by_logical[static_cast<size_t>(logical[index])];
+            int32_t & mapped_logical = in_persistent ?
+                logical_by_persistent[static_cast<size_t>(physical[index] - static_cast<int32_t>(physical_first))] :
+                logical_by_exchange[static_cast<size_t>(physical[index] - static_cast<int32_t>(exchange_first))];
+            if ((mapped_physical >= 0 && mapped_physical != physical[index]) ||
+                (mapped_logical >= 0 && mapped_logical != logical[index])) {
+                state->failure_code.store(-4303, std::memory_order_release);
+                std::memset(dst->data, 0, ggml_nbytes(dst));
+                return;
+            }
+            mapped_physical = physical[index];
+            mapped_logical = logical[index];
+        } else {
+            for (int64_t prior = 0; prior < index; ++prior) {
+                if (logical[prior] == logical[index] || physical[prior] == physical[index]) {
+                    state->failure_code.store(-4303, std::memory_order_release);
+                    std::memset(dst->data, 0, ggml_nbytes(dst));
+                    return;
+                }
+            }
+        }
+    }
+    if (!rc) {
+        state->failure_code.store(-4304, std::memory_order_release);
+        std::memset(dst->data, 0, ggml_nbytes(dst));
+    }
+}
+
+static ggml_tensor * siliang_moe_arena_map_slots(
+        ggml_context * ctx,
+        ggml_tensor * logical_ids,
+        llama_siliang_moe_arena_map_call * call) {
+    ggml_tensor * out = ggml_map_custom1(
+            ctx, logical_ids, siliang_moe_arena_map_slots_custom, 1, call);
+    ggml_set_name(out, "siliang_moe_arena_physical_slots");
+    return out;
+}
+
+static void siliang_moe_arena_compute_wait_custom(
+        ggml_tensor * dst,
+        const ggml_tensor * src,
+        int ith,
+        int nth,
+        void * userdata) {
+    GGML_ASSERT(dst && src && userdata && ith == 0 && nth == 1);
+    auto * call = static_cast<llama_siliang_moe_arena_wait_call *>(userdata);
+    auto * state = call->state;
+    GGML_ASSERT(state && call->layer >= 0 && call->generation == state->generation);
+    GGML_ASSERT(dst->type == GGML_TYPE_I32 && src->type == GGML_TYPE_I32);
+    GGML_ASSERT(ggml_nbytes(dst) == ggml_nbytes(src));
+    std::memcpy(dst->data, src->data, ggml_nbytes(src));
+    if (state->failure_code.load(std::memory_order_acquire) != 0) {
+        return;
+    }
+    if (!state->compute_wait_hook ||
+        state->compute_wait_hook(state->compute_wait_user_data, call->layer) != 0) {
+        state->failure_code.store(-4310, std::memory_order_release);
+        std::memset(dst->data, 0, ggml_nbytes(dst));
+    }
+}
+
+static ggml_tensor * siliang_moe_arena_compute_wait_slots(
+        ggml_context * ctx,
+        ggml_tensor * physical_ids,
+        llama_siliang_moe_arena_wait_call * call) {
+    ggml_tensor * out = ggml_map_custom1(
+            ctx, physical_ids, siliang_moe_arena_compute_wait_custom, 1, call);
+    ggml_set_name(out, "siliang_moe_arena_compute_wait_slots");
+    return out;
+}
+
 void llm_graph_input_mean::set_input(const llama_ubatch * ubatch) {
     if (cparams.embeddings   &&
        (cparams.pooling_type == LLAMA_POOLING_TYPE_MEAN ||
@@ -2072,6 +2267,69 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         cb(weights, "ffn_moe_weights_scaled", il);
     }
 
+    ggml_tensor * dispatch_experts = selected_experts;
+    auto * moe_arena = cparams.siliang_moe_arena_state;
+    const bool moe_arena_phase_supported = n_tokens == 1 ||
+        (cparams.siliang_moe_arena_enabled && moe_arena && moe_arena->prefill_enabled &&
+         n_tokens > 1 && n_tokens <= static_cast<int64_t>(moe_arena->prefill_ubatch_cap));
+    const bool moe_arena_managed = moe_arena_phase_supported && cparams.siliang_moe_arena_enabled &&
+        moe_arena && il >= 0 && static_cast<size_t>(il) < moe_arena->managed_layers.size() &&
+        moe_arena->managed_layers[il] != 0;
+    if (moe_arena_managed) {
+        if (!moe_arena->mapper || moe_arena->capacity == 0 ||
+            n_expert != moe_arena->expert_count || n_expert_used != moe_arena->top_k ||
+            static_cast<size_t>(il) >= moe_arena->map_calls_by_layer.size() ||
+            static_cast<size_t>(il) >= moe_arena->physical_slot_first_by_layer.size() ||
+            static_cast<size_t>(il) >= moe_arena->physical_slot_count_by_layer.size() ||
+            static_cast<size_t>(il) >= moe_arena->exchange_slot_first_by_layer.size() ||
+            static_cast<size_t>(il) >= moe_arena->exchange_slot_count_by_layer.size() ||
+            moe_arena->physical_slot_count_by_layer[il] == 0 ||
+            moe_arena->exchange_slot_count_by_layer[il] == 0) {
+            throw std::runtime_error("Siliang MoE arena graph contract mismatch");
+        }
+
+        auto require_part = [&](llama_siliang_moe_arena_part_role role, ggml_tensor * native) {
+            if (static_cast<size_t>(il) >= moe_arena->parts_by_layer.size()) {
+                throw std::runtime_error("Siliang MoE arena layer binding missing");
+            }
+            ggml_tensor * arena = moe_arena->parts_by_layer[il][role];
+            if ((native == nullptr) != (arena == nullptr)) {
+                throw std::runtime_error("Siliang MoE arena part-set mismatch");
+            }
+            return arena;
+        };
+
+        gate_exps      = require_part(LLAMA_SILIANG_MOE_ARENA_GATE_WEIGHT, gate_exps);
+        up_exps        = require_part(LLAMA_SILIANG_MOE_ARENA_UP_WEIGHT, up_exps);
+        down_exps      = require_part(LLAMA_SILIANG_MOE_ARENA_DOWN_WEIGHT, down_exps);
+        gate_up_exps   = require_part(LLAMA_SILIANG_MOE_ARENA_GATE_UP_WEIGHT, gate_up_exps);
+        gate_exps_b    = require_part(LLAMA_SILIANG_MOE_ARENA_GATE_BIAS, gate_exps_b);
+        up_exps_b      = require_part(LLAMA_SILIANG_MOE_ARENA_UP_BIAS, up_exps_b);
+        down_exps_b    = require_part(LLAMA_SILIANG_MOE_ARENA_DOWN_BIAS, down_exps_b);
+        gate_up_exps_b = require_part(LLAMA_SILIANG_MOE_ARENA_GATE_UP_BIAS, gate_up_exps_b);
+        gate_exps_s    = require_part(LLAMA_SILIANG_MOE_ARENA_GATE_SCALE, gate_exps_s);
+        up_exps_s      = require_part(LLAMA_SILIANG_MOE_ARENA_UP_SCALE, up_exps_s);
+        down_exps_s    = require_part(LLAMA_SILIANG_MOE_ARENA_DOWN_SCALE, down_exps_s);
+
+        res->add_input(std::make_unique<llm_graph_input_siliang_moe_arena>(moe_arena, il, n_tokens));
+        ggml_tensor * logical_dispatch_experts = ggml_cont(ctx0, selected_experts);
+        cb(logical_dispatch_experts, "siliang_moe_arena_logical_ids_contiguous", il);
+        dispatch_experts = siliang_moe_arena_map_slots(
+                ctx0, logical_dispatch_experts, &moe_arena->map_calls_by_layer[il]);
+        ggml_backend_sched_set_tensor_backend(sched, dispatch_experts, backend_cpu);
+        cb(dispatch_experts, "siliang_moe_arena_physical_slots", il);
+
+        if (moe_arena->compute_wait_hook) {
+            if (static_cast<size_t>(il) >= moe_arena->wait_calls_by_layer.size()) {
+                throw std::runtime_error("Siliang MoE arena wait contract mismatch");
+            }
+            dispatch_experts = siliang_moe_arena_compute_wait_slots(
+                    ctx0, dispatch_experts, &moe_arena->wait_calls_by_layer[il]);
+            ggml_backend_sched_set_tensor_backend(sched, dispatch_experts, backend_cpu);
+            cb(dispatch_experts, "siliang_moe_arena_compute_wait_slots", il);
+        }
+    }
+
     //call early so that topk-moe can be used
     ggml_build_forward_expand(gf, weights);
 
@@ -2089,7 +2347,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
 
     if (gate_up_exps) {
         // merged gate_up path: one mul_mat_id, then split into gate and up views
-        ggml_tensor * gate_up = build_lora_mm_id(gate_up_exps, cur, selected_experts, up_exps_s); // [n_ff*2, n_expert_used, n_tokens]
+        ggml_tensor * gate_up = build_lora_mm_id(gate_up_exps, cur, dispatch_experts, up_exps_s); // [n_ff*2, n_expert_used, n_tokens]
         cb(gate_up, "ffn_moe_gate_up", il);
 
         if (up_exps_s) {
@@ -2097,7 +2355,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         }
 
         if (gate_up_exps_b) {
-            gate_up = ggml_add_id(ctx0, gate_up, gate_up_exps_b, selected_experts);
+            gate_up = ggml_add_id(ctx0, gate_up, gate_up_exps_b, dispatch_experts);
             cb(gate_up, "ffn_moe_gate_up_biased", il);
         }
 
@@ -2108,7 +2366,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         cb(up, "ffn_moe_up", il);
     } else {
         // separate gate and up path
-        up = build_lora_mm_id(up_exps, cur, selected_experts, up_exps_s); // [n_ff, n_expert_used, n_tokens]
+        up = build_lora_mm_id(up_exps, cur, dispatch_experts, up_exps_s); // [n_ff, n_expert_used, n_tokens]
         cb(up, "ffn_moe_up", il);
 
         if (up_exps_s) {
@@ -2116,12 +2374,12 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         }
 
         if (up_exps_b) {
-            up = ggml_add_id(ctx0, up, up_exps_b, selected_experts);
+            up = ggml_add_id(ctx0, up, up_exps_b, dispatch_experts);
             cb(up, "ffn_moe_up_biased", il);
         }
 
         if (gate_exps) {
-            cur = build_lora_mm_id(gate_exps, cur, selected_experts, gate_exps_s); // [n_ff, n_expert_used, n_tokens]
+            cur = build_lora_mm_id(gate_exps, cur, dispatch_experts, gate_exps_s); // [n_ff, n_expert_used, n_tokens]
             cb(cur, "ffn_moe_gate", il);
         } else {
             cur = up;
@@ -2132,7 +2390,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         }
 
         if (gate_exps_b) {
-            cur = ggml_add_id(ctx0, cur, gate_exps_b, selected_experts);
+            cur = ggml_add_id(ctx0, cur, gate_exps_b, dispatch_experts);
             cb(cur, "ffn_moe_gate_biased", il);
         }
     }
@@ -2210,7 +2468,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
             GGML_ABORT("fatal error");
     }
 
-    experts = build_lora_mm_id(down_exps, cur, selected_experts, down_exps_s); // [n_embd, n_expert_used, n_tokens]
+    experts = build_lora_mm_id(down_exps, cur, dispatch_experts, down_exps_s); // [n_embd, n_expert_used, n_tokens]
     cb(experts, "ffn_moe_down", il);
 
     if (down_exps_s) {
@@ -2218,7 +2476,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
     }
 
     if (down_exps_b) {
-        experts = ggml_add_id(ctx0, experts, down_exps_b, selected_experts);
+        experts = ggml_add_id(ctx0, experts, down_exps_b, dispatch_experts);
         cb(experts, "ffn_moe_down_biased", il);
     }
 

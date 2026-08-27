@@ -19,11 +19,9 @@
 // matmuls that follow are then guaranteed hits. That is the entire reason the
 // repack is expert-major.
 //
-// Config (the loader publishes the normal model source; a sidecar is optional):
-//   SILIANGEM_SLAB       path to a legacy experts.slab sidecar
-//   SILIANGEM_CACHE_MIB  Positive RAM budget in MiB. Required to opt into the
-//                       arena; when absent or invalid, ordinary mmap is used.
-//   SILIANGEM_VERBOSE    1 to print cache statistics at teardown
+// Configuration and source geometry are supplied explicitly through the
+// backend-scoped API in ggml-cpu.h. The cache remains disabled unless that API
+// successfully configures a particular CPU backend.
 #pragma once
 
 #if defined(_WIN32)
@@ -58,9 +56,20 @@
  * truncate the reuse probe. */
 #define SILIANGEM_TOPK_MAX     8
 
+#define SILIANGEM_POLICY_LRU                         0
+#define SILIANGEM_POLICY_LFU                         1
+#define SILIANGEM_POLICY_WTINYLFU_W10_SLRU_P80      2
+#define SILIANGEM_SEGMENT_NONE                       0
+#define SILIANGEM_SEGMENT_WINDOW                     1
+#define SILIANGEM_SEGMENT_PROBATION                  2
+#define SILIANGEM_SEGMENT_PROTECTED                  3
+
 typedef struct {
     uint32_t key;          /* layer<<16 | expert, or SILIANGEM_EMPTY */
     uint64_t stamp;        /* LRU clock */
+    uint64_t frequency;    /* LFU count, with LRU stamp as the tie break */
+    uint32_t leases;       /* reserved for bounded asynchronous consumers */
+    uint8_t  segment;      /* W-TinyLFU window / SLRU main segment */
 } siliangem_slot;
 
 typedef struct {
@@ -104,7 +113,14 @@ typedef struct {
     uint32_t  mask;
 
     uint64_t clock, hits, misses, bytes_read;
+    uint64_t expert_requests, expert_hits;
     uint64_t last_report;        /* lookups at the last periodic stats emit */
+    int      placement_policy;
+    uint32_t policy_window_slots;
+    uint32_t policy_protected_slots;
+    uint64_t policy_admissions;
+    uint64_t policy_evictions;
+    uint64_t policy_main_candidate_rejections;
     int      verbose;
     int      mem_report;         /* emit the siliangem[mem] residency line */
 
@@ -124,7 +140,7 @@ typedef struct {
      * model-independent transition point. */
     uint64_t cne1_hist[8];   /* 1, 2, 3, 4, 5-8, 9-16, 17-32, 33+ */
 
-    /* Deferred wait on/off, SILIANGEM_DEFER=0 to disable (default on).
+    /* Deferred wait on/off, supplied by the context-owned typed config.
      *
      * Exists so the deferred wait can be A/B'd within ONE binary. Comparing
      * two builds would confound it with every other difference between them,
@@ -147,7 +163,7 @@ typedef struct {
 
     /* Sub-split of fetch_ns. Several mechanisms can contribute to submission
      * cost, so record them separately before optimizing:
-     *   evict_ns  siliangem_evict_lru() scans all slots and siliangem_table_rebuild() rebuilds
+     *   evict_ns  victim selection scans all slots and siliangem_table_rebuild() rebuilds
      *             the whole table on every eviction -- both O(nslots), fixable
      *             with an intrusive LRU list and a table that updates in place
      *   event_ns  CreateEventA per read is a kernel object creation per miss;
@@ -176,8 +192,9 @@ typedef struct {
      * router consumes L's output, so exact IDs do not exist yet. Predicting
      * L+1's set from L's only works if consecutive layers route similarly.
      *
-     * This measures that directly: how many of layer L+1's active experts also
-     * appeared in layer L's. No engine changes, pure observation.
+     * This measures that directly during one-token decode: how many of layer
+     * L+1's active experts also appeared in layer L's. Batched prefill unions
+     * are excluded because they do not represent a decode top-k route.
      *
      * A wrong prefetch can displace a needed read when the transfer path is
      * saturated. Compare observed overlap with the chance baseline derived from
@@ -191,6 +208,7 @@ typedef struct {
     uint64_t xlayer_hist[8];   /* overlap count 0..6, index 7 = 7+ */
     uint64_t xlayer_obs;
     uint64_t xlayer_sum;
+    uint64_t xlayer_chance_sum; /* sum of previous_count * current_count */
 
     /* ---- file-adjacent co-activation ------------------------------------
      * A bandwidth probe cannot tell whether extra bytes beyond one expert are
@@ -264,11 +282,9 @@ typedef struct {
     uint64_t  reuse_denom;     /* total experts examined, for a share        */
 } siliangem_cache;
 
-static siliangem_cache g_siliangem = {0};
-
-/* Source published by the model loader before the first mul_mat_id. Kept
- * separate from g_siliangem because siliangem_init() runs lazily and may never run. */
-static struct {
+/* Source geometry is copied into backend-owned state before the first
+ * mul_mat_id and remains separate from the live cache allocation. */
+typedef struct {
     int      set;
     char     path[1024];
     int      n_layers, n_experts, n_parts;
@@ -276,7 +292,7 @@ static struct {
     uint32_t stride[512];
     uint32_t poff[512*4];
     uint32_t pbytes[512*4];
-} g_em = {0};
+} siliangem_em_source;
 
 /* Scattered geometry from a STOCK GGUF, published the same way. An expert's
  * gate/up/down are three separate tensors, so there are three bases per layer
@@ -289,28 +305,13 @@ static struct {
  * A stock file's tensor directory already carries the required offsets and
  * shapes, and llama_model_loader already parses it. Publishing that geometry
  * directly avoids a separate offset sidecar that could drift from the model. */
-static struct {
+typedef struct {
     int      set;
     char     path[1024];
     int      n_layers, n_experts;
     uint32_t stride[512 * 3];  /* bytes between experts, per (layer, part) */
     uint64_t base[512 * 3];    /* file offsets,           per (layer, part) */
-} g_scat = {0};
-
-/* Where expert `a` of `layer` lives in the source file, and how many bytes it
- * occupies. The slab uses one global geometry; an expert-major GGUF has a
- * per-layer base and stride because quantisation varies by layer. */
-static uint64_t siliangem_expert_off(int layer, int a) {
-    if (g_siliangem.em) {
-        return g_siliangem.em_base[layer] + (uint64_t) a * (uint64_t) g_siliangem.em_stride[layer];
-    }
-    return (uint64_t) SILIANGEM_HEADER_BYTES +
-           ((uint64_t) layer * g_siliangem.n_experts + (uint64_t) a) * g_siliangem.expert_bytes;
-}
-
-static uint32_t siliangem_expert_len(int layer) {
-    return g_siliangem.em ? g_siliangem.em_stride[layer] : g_siliangem.expert_bytes;
-}
+} siliangem_scattered_source;
 
 /* Monotonic nanoseconds. ith==0 only, so no synchronisation needed.
  * Declared here because siliangem_report() below uses it before its definition. */
@@ -326,9 +327,8 @@ static int64_t siliangem_now_ns(void);
  *   GGUF-offset -> ON   isolates layout
  * Which decides whether this is a disk-streaming trick or a general one.
  *
- * Armed by the loader, which calls ggml_siliangem_set_scattered_source() with
- * geometry read from the model's own tensor directory. No environment
- * variables, no sidecar: pointing -m at a stock GGUF is the whole setup.
+ * Armed by the backend-scoped configure API with geometry read from the
+ * model's own tensor directory. No environment variables or sidecar are used.
  *
  * GGUF tensor offsets are 32-byte aligned, not sector aligned, so unbuffered
  * reads must start on a rounded-down 4096 boundary and land in a bounce buffer;
@@ -351,20 +351,9 @@ typedef struct {
     size_t    bounce_slot;
 } siliangem_src;
 
-static siliangem_src g_src = {0};
-
-/* How often the scattered path is CALLED versus how often it COMPLETES. These
- * counters distinguish declined or failed fetches from byte-accounting errors.
- * Declared here rather than beside siliangem_src_fetch because siliangem_report() reads them
- * and sits earlier in the file. */
-static uint64_t g_src_calls = 0, g_src_ok = 0, g_src_expected_bytes = 0;
-static uint32_t g_src_layers_seen = 0;
-static uint8_t  g_src_layer_seen[512] = {0};
-static uint32_t g_src_layers_substituted = 0;
-static uint8_t  g_src_layer_substituted[512] = {0};
-
 static void siliangem_src_finish(void);  /* shared tail: open file, size bounce, arm  */
 static void siliangem_scat_init(void);   /* loader-published stock-GGUF arm           */
+static void siliangem_wait(void);
 
 /* The model's expert part names, in the order the file packs them. Some models
  * fuse gate and up. Gemma 4, for example, stores
@@ -383,8 +372,84 @@ static void siliangem_scat_init(void);   /* loader-published stock-GGUF arm     
  * it reads a stock GGUF whose gate/up/down are separate tensors, so it has no
  * part_names key to consult. */
 #define SILIANGEM_MAX_PARTS 4
-static char g_part_name[SILIANGEM_MAX_PARTS][24] = { "gate", "up", "down" };
-static int  g_n_part_name = 3;
+
+struct ggml_siliangem_cache_state {
+    siliangem_cache cache;
+    siliangem_em_source expert_major;
+    siliangem_scattered_source scattered;
+    siliangem_src scattered_io;
+
+    uint64_t source_calls;
+    uint64_t source_ok;
+    uint64_t source_expected_bytes;
+    uint32_t source_layers_seen;
+    uint8_t source_layer_seen[512];
+    uint32_t source_layers_substituted;
+    uint8_t source_layer_substituted[512];
+
+    char part_name[SILIANGEM_MAX_PARTS][24];
+    int n_part_name;
+
+    int configured;
+    int init_attempted;
+    int enabled;
+    uint32_t capacity_mib;
+    int policy;
+    int deferred_io;
+    int verbose;
+    int memory_report;
+    int mmap_prefetch;
+    enum ggml_siliangem_source_kind source_kind;
+    char source_path[1024];
+
+    int order[SILIANGEM_MAX_BATCH];
+    int n_hits;
+    int n_active;
+    int reordered;
+};
+
+#if defined(_MSC_VER)
+#define SILIANGEM_THREAD_LOCAL __declspec(thread)
+#else
+#define SILIANGEM_THREAD_LOCAL _Thread_local
+#endif
+
+// Non-owning selector only. Ownership and configuration live in the CPU
+// backend context; each compute worker binds the state carried by its cplan.
+static SILIANGEM_THREAD_LOCAL struct ggml_siliangem_cache_state * siliangem_tls_state = NULL;
+
+static void siliangem_bind_state(struct ggml_siliangem_cache_state * state) {
+    siliangem_tls_state = state;
+}
+
+#define g_siliangem              (siliangem_tls_state->cache)
+#define g_em                      (siliangem_tls_state->expert_major)
+#define g_scat                    (siliangem_tls_state->scattered)
+#define g_src                     (siliangem_tls_state->scattered_io)
+#define g_src_calls               (siliangem_tls_state->source_calls)
+#define g_src_ok                  (siliangem_tls_state->source_ok)
+#define g_src_expected_bytes      (siliangem_tls_state->source_expected_bytes)
+#define g_src_layers_seen         (siliangem_tls_state->source_layers_seen)
+#define g_src_layer_seen          (siliangem_tls_state->source_layer_seen)
+#define g_src_layers_substituted  (siliangem_tls_state->source_layers_substituted)
+#define g_src_layer_substituted   (siliangem_tls_state->source_layer_substituted)
+#define g_part_name               (siliangem_tls_state->part_name)
+#define g_n_part_name             (siliangem_tls_state->n_part_name)
+
+/* Where expert `a` of `layer` lives in the source file, and how many bytes it
+ * occupies. The slab uses one global geometry; an expert-major GGUF has a
+ * per-layer base and stride because quantisation varies by layer. */
+static uint64_t siliangem_expert_off(int layer, int a) {
+    if (g_siliangem.em) {
+        return g_siliangem.em_base[layer] + (uint64_t) a * (uint64_t) g_siliangem.em_stride[layer];
+    }
+    return (uint64_t) SILIANGEM_HEADER_BYTES +
+           ((uint64_t) layer * g_siliangem.n_experts + (uint64_t) a) * g_siliangem.expert_bytes;
+}
+
+static uint32_t siliangem_expert_len(int layer) {
+    return g_siliangem.em ? g_siliangem.em_stride[layer] : g_siliangem.expert_bytes;
+}
 
 /* Comma-separated, as it appears in siliangem.part_names. Ignored if empty, so
  * a file without the key keeps the gate/up/down default. */
@@ -444,10 +509,9 @@ static uint32_t siliangem_hash(uint32_t k) {           /* fibonacci mix */
  * (TerminateProcess skips atexit). Periodic reporting also shows whether reuse
  * DEGRADES as context grows, which a single final figure cannot.
  *
- * `lookups` counts one entry per (expert, projection), and gate/up/down of the
- * same expert are three separate mul_mat_id calls, so expert-level selections
- * are lookups/3. Only the first of the three can miss: the whole expert is
- * fetched as one contiguous slab. */
+ * `lookups` counts one entry per (expert, projection). `expert_requests`
+ * counts only the first packed part, so periodic reports remain exact even
+ * when emitted between projection calls. */
 /* Physical residency, which is what actually bounds this cache.
  *
  * The arena is VirtualAlloc'd PRIVATE memory, so its pages are backed by the
@@ -488,16 +552,19 @@ static void siliangem_mem_status(siliangem_mem *out) {
 static void siliangem_report(const char *tag) {
     uint64_t tot = g_siliangem.hits + g_siliangem.misses;
     if (!tot) return;
-    uint64_t sel = tot / 3;                       /* expert selections */
-    double exp_hit = sel ? 100.0 * (double)(sel - g_siliangem.misses) / (double) sel : 0.0;
+    const double expert_hit = g_siliangem.expert_requests
+            ? 100.0 * (double) g_siliangem.expert_hits / (double) g_siliangem.expert_requests
+            : 0.0;
     fprintf(stderr,
             "siliangem[%s]: %llu lookups, %llu hits (%.1f%%), %llu misses, "
-            "expert-level hit %.1f%%, %.2f GiB read from slab\n",
+            "expert-request hit %.1f%% (%llu/%llu), %.2f GiB read from slab\n",
             tag,
             (unsigned long long) tot, (unsigned long long) g_siliangem.hits,
             100.0 * (double) g_siliangem.hits / (double) tot,
             (unsigned long long) g_siliangem.misses,
-            exp_hit,
+            expert_hit,
+            (unsigned long long) g_siliangem.expert_hits,
+            (unsigned long long) g_siliangem.expert_requests,
             (double) g_siliangem.bytes_read / (1024.0 * 1024.0 * 1024.0));
 
     if (g_siliangem.mem_report) {
@@ -559,9 +626,12 @@ static void siliangem_report(const char *tag) {
     if (g_siliangem.xlayer_obs) {
         double o = (double) g_siliangem.xlayer_obs;
         double mean = (double) g_siliangem.xlayer_sum / o;
+        double chance = g_siliangem.n_experts
+                ? (double) g_siliangem.xlayer_chance_sum / o / (double) g_siliangem.n_experts
+                : 0.0;
         fprintf(stderr,
-                "siliangem[xlayer]: mean overlap %.2f experts | "
-                "0=%.1f%% 1=%.1f%% 2=%.1f%% 3=%.1f%% 4=%.1f%% 5=%.1f%% 6=%.1f%% "
+                "siliangem[xlayer]: DECODE mean overlap %.2f experts | "
+                "0=%.1f%% 1=%.1f%% 2=%.1f%% 3=%.1f%% 4=%.1f%% 5=%.1f%% 6=%.1f%% 7+=%.1f%% "
                 "| chance would be %.2f -- prefetching L+1 from L is viable "
                 "only well above chance, since the bus is saturated and a wrong "
                 "prefetch displaces a needed read\n",
@@ -573,7 +643,8 @@ static void siliangem_report(const char *tag) {
                 100.0*(double)g_siliangem.xlayer_hist[4]/o,
                 100.0*(double)g_siliangem.xlayer_hist[5]/o,
                 100.0*(double)g_siliangem.xlayer_hist[6]/o,
-                g_siliangem.n_experts ? 36.0 / (double) g_siliangem.n_experts : 0.0);
+                100.0*(double)g_siliangem.xlayer_hist[7]/o,
+                chance);
     }
 
     /* Coverage of the top-N hottest experts per layer, averaged over layers.
@@ -761,7 +832,7 @@ static int64_t siliangem_now_ns(void) {
     return (int64_t) ((double) c.QuadPart * 1e9 / (double) g_siliangem.qpc_freq);
 }
 
-/* Arm C: record how much layer L's active set overlaps layer L-1's.
+/* Arm C: record how much a decode layer's active set overlaps layer L-1's.
  *
  * Called once per layer, from the first projection only (gate), so each layer
  * transition is counted once rather than three times. ith==0 only. */
@@ -832,7 +903,13 @@ static void siliangem_note_xlayer(int layer, const int64_t *counts, int n_as,
         g_siliangem.dec_prev_n[layer] = (uint8_t) keep;
     }
 
-    /* Only consecutive layers within the same forward pass are comparable. */
+    if (!is_decode) {
+        g_siliangem.prev_n = 0;
+        g_siliangem.prev_layer = -1;
+        return;
+    }
+
+    /* Only consecutive decode layers within the same forward pass are comparable. */
     if (g_siliangem.prev_n > 0 && layer == g_siliangem.prev_layer + 1) {
         int hit = 0;
         for (int i = 0; i < n; i++) {
@@ -843,6 +920,7 @@ static void siliangem_note_xlayer(int layer, const int64_t *counts, int n_as,
         g_siliangem.xlayer_hist[hit < 7 ? hit : 7]++;
         g_siliangem.xlayer_obs++;
         g_siliangem.xlayer_sum += (uint64_t) hit;
+        g_siliangem.xlayer_chance_sum += (uint64_t) n * (uint64_t) g_siliangem.prev_n;
     }
     for (int i = 0; i < n; i++) g_siliangem.prev_set[i] = cur[i];
     g_siliangem.prev_n     = n;
@@ -889,6 +967,13 @@ static void siliangem_shutdown(void) {
     if (g_siliangem.verbose && (g_siliangem.hits + g_siliangem.misses)) {
         siliangem_report("final");
     }
+    for (int i = 0; i < g_siliangem.n_pending; ++i) {
+        DWORD ignored = 0;
+        if (g_siliangem.file && g_siliangem.file != INVALID_HANDLE_VALUE) {
+            GetOverlappedResult(g_siliangem.file, &g_siliangem.pend_ov[i], &ignored, TRUE);
+        }
+        if (g_siliangem.pend_ev[i]) CloseHandle(g_siliangem.pend_ev[i]);
+    }
     if (g_siliangem.file && g_siliangem.file != INVALID_HANDLE_VALUE) CloseHandle(g_siliangem.file);
     if (g_siliangem.arena) VirtualFree(g_siliangem.arena, 0, MEM_RELEASE);
     if (g_src.bounce) VirtualFree(g_src.bounce, 0, MEM_RELEASE);
@@ -906,58 +991,15 @@ static void siliangem_shutdown(void) {
     memset(&g_siliangem, 0, sizeof(g_siliangem));
 }
 
-/* Parse the opt-in budget without atoll-style partial acceptance. A cache
- * budget controls a real committed allocation, so whitespace, signs, suffixes,
- * zero, and values that cannot be converted to bytes are all configuration
- * errors rather than requests to guess a default. */
-static int siliangem_parse_cache_mib(const char *text, uint64_t *value_out) {
-    if (!text || !text[0] || !value_out) return 0;
-
-    uint64_t value = 0;
-    for (const unsigned char *p = (const unsigned char *) text; *p; p++) {
-        if (*p < '0' || *p > '9') return 0;
-        const uint64_t digit = (uint64_t) (*p - '0');
-        if (value > (UINT64_MAX - digit) / 10u) return 0;
-        value = value * 10u + digit;
-    }
-    if (value == 0 || value > UINT64_MAX / (1024ull * 1024ull)) return 0;
-
-    *value_out = value;
-    return 1;
-}
-
 static void siliangem_init(void) {
     g_siliangem.ready = 0;                              /* disabled unless we finish */
-    /* Explicit off switch. With a slab, "cache off" meant leaving
-     * SILIANGEM_SLAB unset -- but an expert-major model publishes its own
-     * source, so the cache would arm itself with no way to prevent it. That
-     * would make the cache-OFF arm of every equivalence gate unreachable, and
-     * cache-off correctness is exactly the invariant this format has to hold:
-     * the model must be right without the arena, or the file is not valid on
-     * its own terms. */
-    if (getenv("SILIANGEM_DISABLE")) {
-        const char *d = getenv("SILIANGEM_DISABLE");
-        if (d[0] && d[0] != '0') {
-            fprintf(stderr, "siliangem: disabled by SILIANGEM_DISABLE - using mmap\n");
-            return;
-        }
-    }
-
-    uint64_t budget = 0;
-    const char *mib = getenv("SILIANGEM_CACHE_MIB");
-    if (!mib) {
-        fprintf(stderr,
-                "siliangem: SILIANGEM_CACHE_MIB is not set - arena is opt-in; using mmap\n");
-        return;
-    }
-    if (!siliangem_parse_cache_mib(mib, &budget)) {
-        fprintf(stderr,
-                "siliangem: invalid SILIANGEM_CACHE_MIB='%s' "
-                "(expected a positive integer MiB) - using mmap\n", mib);
+    if (!siliangem_tls_state->configured || !siliangem_tls_state->enabled ||
+        siliangem_tls_state->capacity_mib == 0) {
         return;
     }
 
-    const char *path = getenv("SILIANGEM_SLAB");
+    const uint64_t budget = siliangem_tls_state->capacity_mib;
+    const char * path = siliangem_tls_state->source_path;
 
     /* A STOCK GGUF published scattered geometry. Derive the arena's SLOT layout
      * from it and reuse the expert-major plumbing wholesale: a slot holds
@@ -965,9 +1007,9 @@ static void siliangem_init(void) {
      * sizes, so siliangem_ptr needs no new case. Only the FETCH differs -- three reads
      * at three offsets instead of one -- and g_src owns that.
      *
-     * Lowest priority. An explicit SILIANGEM_SLAB or an expert-major file both
-     * win, so nothing that worked before changes behaviour. */
-    if (!g_em.set && g_scat.set && !(path && path[0])) {
+     * Lowest priority. A legacy slab or an expert-major source both win, so
+     * nothing that worked before changes behaviour. */
+    if (!g_em.set && g_scat.set) {
         snprintf(g_em.path, sizeof(g_em.path), "%s", g_scat.path);
         g_em.n_layers  = g_scat.n_layers;
         g_em.n_experts = g_scat.n_experts;
@@ -988,23 +1030,13 @@ static void siliangem_init(void) {
     }
 
     /* An expert-major model publishes its own source, which supersedes the
-     * slab: the experts live in the model file itself, so there is nothing to
-     * point SILIANGEM_SLAB at. */
+     * slab because the experts live in the model file itself. */
     if (g_em.set) path = g_em.path;
     if (!path || !path[0]) return;
-    g_siliangem.verbose = getenv("SILIANGEM_VERBOSE") != NULL;
-    {   /* Residency reporting, resolved ONCE so the report path costs a load of
-         * an int and nothing else. On by default under SILIANGEM_VERBOSE because
-         * the whole point is to notice pressure without being asked;
-         * SILIANGEM_MEM_REPORT=0 turns it off, which is also how you A/B its cost
-         * on one binary instead of swapping DLLs. */
-        const char *m = getenv("SILIANGEM_MEM_REPORT");
-        g_siliangem.mem_report = (m && m[0] == '0') ? 0 : 1;
-    }
-    {
-        const char *d = getenv("SILIANGEM_DEFER");
-        g_siliangem.defer = (d && d[0] == '0') ? 0 : 1;
-    }
+    g_siliangem.verbose = siliangem_tls_state->verbose;
+    g_siliangem.mem_report = siliangem_tls_state->memory_report;
+    g_siliangem.defer = siliangem_tls_state->deferred_io;
+    g_siliangem.placement_policy = siliangem_tls_state->policy;
 
     /* Unbuffered so the page cache is bypassed entirely (we manage residency),
      * overlapped so several misses can be in flight at once. */
@@ -1096,7 +1128,7 @@ static void siliangem_init(void) {
 
 have_geometry:
     (void) 0;
-    /* SILIANGEM_CACHE_MIB is authoritative. There is deliberately no clamp here.
+    /* The typed capacity_mib value is authoritative. There is deliberately no clamp here.
      *
      * Two tempting clamps are deliberately not used:
      *
@@ -1154,8 +1186,13 @@ have_geometry:
         siliangem_shutdown();
         return;
     }
-    for (uint32_t i = 0; i < g_siliangem.nslots; i++) { g_siliangem.slots[i].key = SILIANGEM_EMPTY;
-                                                 g_siliangem.slots[i].stamp = 0; }
+    for (uint32_t i = 0; i < g_siliangem.nslots; i++) {
+        g_siliangem.slots[i].key = SILIANGEM_EMPTY;
+        g_siliangem.slots[i].stamp = 0;
+        g_siliangem.slots[i].frequency = 0;
+        g_siliangem.slots[i].leases = 0;
+        g_siliangem.slots[i].segment = SILIANGEM_SEGMENT_NONE;
+    }
     for (uint32_t i = 0; i <= g_siliangem.mask; i++)   g_siliangem.table[i] = SILIANGEM_EMPTY;
 
     if (g_siliangem.em_scattered) {
@@ -1169,6 +1206,12 @@ have_geometry:
 
     g_siliangem.ready = 1;
     g_siliangem.t0 = siliangem_now_ns();
+    if (g_siliangem.placement_policy == SILIANGEM_POLICY_WTINYLFU_W10_SLRU_P80) {
+        g_siliangem.policy_window_slots = (g_siliangem.nslots + 9u) / 10u;
+        if (g_siliangem.policy_window_slots == 0) g_siliangem.policy_window_slots = 1;
+        const uint32_t main_slots = g_siliangem.nslots - g_siliangem.policy_window_slots;
+        g_siliangem.policy_protected_slots = (main_slots * 80u) / 100u;
+    }
     /* All four are optional: every consumer checks for NULL, so a failed
      * allocation disables that probe rather than the cache. */
     {
@@ -1180,21 +1223,21 @@ have_geometry:
                                               sizeof(uint16_t));
         g_siliangem.dec_prev_n = (uint8_t  *) calloc((size_t) g_siliangem.n_layers, sizeof(uint8_t));
     }
-    atexit(siliangem_shutdown);
     fprintf(stderr,
-            "siliangem: slab %ux%u experts, %.3f MiB each, cache %u slots "
-            "(%.2f GiB), unbuffered+overlapped, deferred-wait %s\n",
+            "siliangem: source %ux%u experts, %.3f MiB each, cache %u slots "
+            "(%.2f GiB), policy %d, unbuffered+overlapped, deferred-wait %s\n",
             g_siliangem.n_layers, g_siliangem.n_experts, g_siliangem.expert_bytes / 1048576.0,
             g_siliangem.nslots,
             (double) g_siliangem.nslots * g_siliangem.expert_bytes / (1024.0*1024.0*1024.0),
+            g_siliangem.placement_policy,
             g_siliangem.defer ? "ON" : "OFF");
 }
 
 /* The GGUF is the source of truth for stock-model tensor geometry. A separate
  * offset sidecar would duplicate information, could drift from the model, and
  * could not independently verify that the pairing remained valid.
- * llama_model_loader publishes the geometry straight from the
- * tensor directory via ggml_siliangem_set_scattered_source(), so siliangem_scat_init()
+ * llama_model_loader publishes the geometry straight from the tensor
+ * directory via the typed source descriptor, so siliangem_scat_init()
  * below fills g_src from the GGUF itself. Same struct, same fetch path, no
  * sidecar, nothing to keep in sync. */
 
@@ -1353,8 +1396,11 @@ static int siliangem_src_fetch(int layer, int expert, uint8_t *dst) {
 }
 
 static void siliangem_ensure_init(void) {
-    static int done = 0;               /* only ever called from ith == 0 */
-    if (!done) { done = 1; siliangem_init(); }
+    if (!siliangem_tls_state) return;
+    if (!siliangem_tls_state->init_attempted) {
+        siliangem_tls_state->init_attempted = 1;
+        siliangem_init();
+    }
 }
 
 /* slot index for key, or SILIANGEM_EMPTY */
@@ -1383,14 +1429,145 @@ static void siliangem_table_rebuild(void) {
     }
 }
 
-static uint32_t siliangem_evict_lru(void) {
-    uint32_t best = 0;
+static int siliangem_policy_key_is_active(
+        uint32_t key, int layer, const int64_t * counts, int n_as) {
+    if ((int) (key >> 16) != layer) return 0;
+    const uint32_t expert = key & 0xffffu;
+    return expert < (uint32_t) n_as && counts[expert] != 0;
+}
+
+static uint64_t siliangem_policy_frequency(uint32_t key) {
+    const uint32_t layer = key >> 16;
+    const uint32_t expert = key & 0xffffu;
+    if (!g_siliangem.freq || layer >= g_siliangem.n_layers || expert >= g_siliangem.n_experts) return 0;
+    return g_siliangem.freq[(size_t) layer * g_siliangem.n_experts + expert];
+}
+
+static uint32_t siliangem_policy_oldest_segment(
+        uint8_t segment, int layer, const int64_t * counts, int n_as) {
+    uint32_t best = SILIANGEM_EMPTY;
     uint64_t oldest = ~0ull;
-    for (uint32_t i = 0; i < g_siliangem.nslots; i++) {
-        if (g_siliangem.slots[i].key == SILIANGEM_EMPTY) return i;      /* free slot */
-        if (g_siliangem.slots[i].stamp < oldest) { oldest = g_siliangem.slots[i].stamp; best = i; }
+    for (uint32_t i = 0; i < g_siliangem.nslots; ++i) {
+        const siliangem_slot * slot = &g_siliangem.slots[i];
+        if (slot->key == SILIANGEM_EMPTY || slot->leases != 0 || slot->segment != segment ||
+            siliangem_policy_key_is_active(slot->key, layer, counts, n_as)) continue;
+        if (slot->stamp < oldest) { oldest = slot->stamp; best = i; }
     }
     return best;
+}
+
+static uint32_t siliangem_policy_segment_count(uint8_t segment) {
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < g_siliangem.nslots; ++i) {
+        count += g_siliangem.slots[i].key != SILIANGEM_EMPTY &&
+                 g_siliangem.slots[i].segment == segment;
+    }
+    return count;
+}
+
+static void siliangem_wtinylfu_normalize(
+        int layer, const int64_t * counts, int n_as) {
+    uint32_t window_count = siliangem_policy_segment_count(SILIANGEM_SEGMENT_WINDOW);
+    while (window_count > g_siliangem.policy_window_slots) {
+        const uint32_t demote = siliangem_policy_oldest_segment(
+                SILIANGEM_SEGMENT_WINDOW, layer, counts, n_as);
+        if (demote == SILIANGEM_EMPTY) break;
+        g_siliangem.slots[demote].segment = SILIANGEM_SEGMENT_PROBATION;
+        g_siliangem.slots[demote].stamp = ++g_siliangem.clock;
+        --window_count;
+    }
+
+    uint32_t protected_count = siliangem_policy_segment_count(SILIANGEM_SEGMENT_PROTECTED);
+    while (protected_count > g_siliangem.policy_protected_slots) {
+        const uint32_t demote = siliangem_policy_oldest_segment(
+                SILIANGEM_SEGMENT_PROTECTED, layer, counts, n_as);
+        if (demote == SILIANGEM_EMPTY) break;
+        g_siliangem.slots[demote].segment = SILIANGEM_SEGMENT_PROBATION;
+        g_siliangem.slots[demote].stamp = ++g_siliangem.clock;
+        --protected_count;
+    }
+}
+
+static void siliangem_policy_record_hit(
+        uint32_t slot, int layer, const int64_t * counts, int n_as) {
+    ++g_siliangem.slots[slot].frequency;
+    if (g_siliangem.placement_policy != SILIANGEM_POLICY_WTINYLFU_W10_SLRU_P80) return;
+    if (g_siliangem.slots[slot].segment == SILIANGEM_SEGMENT_PROBATION) {
+        g_siliangem.slots[slot].segment = SILIANGEM_SEGMENT_PROTECTED;
+    }
+    siliangem_wtinylfu_normalize(layer, counts, n_as);
+}
+
+static uint32_t siliangem_policy_choose_basic_slot(
+        int layer, const int64_t * counts, int n_as) {
+    uint32_t best = SILIANGEM_EMPTY;
+    uint64_t best_frequency = UINT64_MAX;
+    uint64_t oldest = UINT64_MAX;
+    for (uint32_t i = 0; i < g_siliangem.nslots; ++i) {
+        const siliangem_slot * slot = &g_siliangem.slots[i];
+        if (slot->leases != 0 || siliangem_policy_key_is_active(slot->key, layer, counts, n_as)) continue;
+        if (slot->key == SILIANGEM_EMPTY) return i;
+        const uint64_t frequency = g_siliangem.placement_policy == SILIANGEM_POLICY_LFU
+                ? slot->frequency : 0;
+        if (best == SILIANGEM_EMPTY || frequency < best_frequency ||
+            (frequency == best_frequency && slot->stamp < oldest)) {
+            best = i;
+            best_frequency = frequency;
+            oldest = slot->stamp;
+        }
+    }
+    return best;
+}
+
+static uint32_t siliangem_policy_choose_slot(
+        int layer, const int64_t * counts, int n_as) {
+    if (g_siliangem.placement_policy != SILIANGEM_POLICY_WTINYLFU_W10_SLRU_P80) {
+        return siliangem_policy_choose_basic_slot(layer, counts, n_as);
+    }
+
+    siliangem_wtinylfu_normalize(layer, counts, n_as);
+
+    uint32_t vacant = SILIANGEM_EMPTY;
+    for (uint32_t i = 0; i < g_siliangem.nslots; ++i) {
+        if (g_siliangem.slots[i].key == SILIANGEM_EMPTY && g_siliangem.slots[i].leases == 0) {
+            vacant = i;
+            break;
+        }
+    }
+    const uint32_t window_count = siliangem_policy_segment_count(SILIANGEM_SEGMENT_WINDOW);
+    if (vacant != SILIANGEM_EMPTY && window_count < g_siliangem.policy_window_slots) return vacant;
+
+    uint32_t candidate = siliangem_policy_oldest_segment(
+            SILIANGEM_SEGMENT_WINDOW, layer, counts, n_as);
+    if (candidate == SILIANGEM_EMPTY) {
+        if (vacant != SILIANGEM_EMPTY) return vacant;
+        candidate = siliangem_policy_oldest_segment(
+                SILIANGEM_SEGMENT_PROBATION, layer, counts, n_as);
+        if (candidate == SILIANGEM_EMPTY) candidate = siliangem_policy_oldest_segment(
+                SILIANGEM_SEGMENT_PROTECTED, layer, counts, n_as);
+        return candidate;
+    }
+
+    if (vacant != SILIANGEM_EMPTY) {
+        g_siliangem.slots[candidate].segment = SILIANGEM_SEGMENT_PROBATION;
+        g_siliangem.slots[candidate].stamp = ++g_siliangem.clock;
+        return vacant;
+    }
+
+    uint32_t victim = siliangem_policy_oldest_segment(
+            SILIANGEM_SEGMENT_PROBATION, layer, counts, n_as);
+    if (victim == SILIANGEM_EMPTY) victim = siliangem_policy_oldest_segment(
+            SILIANGEM_SEGMENT_PROTECTED, layer, counts, n_as);
+    if (victim == SILIANGEM_EMPTY) return candidate;
+
+    if (siliangem_policy_frequency(g_siliangem.slots[candidate].key) >
+        siliangem_policy_frequency(g_siliangem.slots[victim].key)) {
+        g_siliangem.slots[candidate].segment = SILIANGEM_SEGMENT_PROBATION;
+        g_siliangem.slots[candidate].stamp = ++g_siliangem.clock;
+        return victim;
+    }
+    ++g_siliangem.policy_main_candidate_rejections;
+    return candidate;
 }
 
 /* Ensure every expert selected this call is resident. Misses are issued as one
@@ -1404,6 +1581,10 @@ static int siliangem_prepare(const char *name, const int64_t *counts, int n_as) 
     if (!siliangem_parse_name(name, &layer, &part)) return 0;
     if ((uint32_t) layer >= g_siliangem.n_layers) return 0;
 
+    uint32_t active = 0;
+    for (int a = 0; a < n_as; ++a) active += counts[a] != 0;
+    if (active > g_siliangem.nslots) return 0;
+
     OVERLAPPED ov[SILIANGEM_MAX_BATCH];
     HANDLE     ev[SILIANGEM_MAX_BATCH];
     uint32_t   slot_of[SILIANGEM_MAX_BATCH];
@@ -1412,18 +1593,27 @@ static int siliangem_prepare(const char *name, const int64_t *counts, int n_as) 
     for (int a = 0; a < n_as && nmiss < SILIANGEM_MAX_BATCH; a++) {
         if (counts[a] == 0) continue;
         if ((uint32_t) a >= g_siliangem.n_experts) continue;
+        if (part == 0) g_siliangem.expert_requests++;
         uint32_t key = ((uint32_t) layer << 16) | (uint32_t) a;
         uint32_t s = siliangem_lookup(key);
         if (s != SILIANGEM_EMPTY) {                       /* hit */
             g_siliangem.slots[s].stamp = ++g_siliangem.clock;
+            siliangem_policy_record_hit(s, layer, counts, n_as);
             g_siliangem.hits++;
+            if (part == 0) g_siliangem.expert_hits++;
             continue;
         }
         g_siliangem.misses++;
-        s = siliangem_evict_lru();
+        s = siliangem_policy_choose_slot(layer, counts, n_as);
+        if (s == SILIANGEM_EMPTY) return 0;
         int was_occupied = (g_siliangem.slots[s].key != SILIANGEM_EMPTY);
         g_siliangem.slots[s].key   = key;
         g_siliangem.slots[s].stamp = ++g_siliangem.clock;
+        g_siliangem.slots[s].frequency = 1;
+        g_siliangem.slots[s].segment = g_siliangem.placement_policy == SILIANGEM_POLICY_WTINYLFU_W10_SLRU_P80
+                ? SILIANGEM_SEGMENT_WINDOW : SILIANGEM_SEGMENT_NONE;
+        ++g_siliangem.policy_admissions;
+        if (was_occupied) ++g_siliangem.policy_evictions;
         if (was_occupied) siliangem_table_rebuild(); else siliangem_table_insert(key, s);
 
         /* Scattered-source arm: same arena and unbuffered path, but bytes come
@@ -1498,10 +1688,11 @@ static int siliangem_prepare(const char *name, const int64_t *counts, int n_as) 
 static int siliangem_prepare_async(const char *name, const int64_t *counts, int n_as,
                             int *order, int *n_hits, int *n_active) {
     siliangem_ensure_init();
-    *n_hits = 0; *n_active = 0; g_siliangem.n_pending = 0;
+    *n_hits = 0; *n_active = 0;
     if (!g_siliangem.ready) return 0;
     if (!g_siliangem.defer)  return 0;       /* A/B switch: fall back to blocking */
     if (g_src.enabled) return 0;      /* scattered arm stays synchronous */
+    if (g_siliangem.n_pending != 0) return 0;
 
     int layer, part;
     if (!siliangem_parse_name(name, &layer, &part)) return 0;
@@ -1519,17 +1710,20 @@ static int siliangem_prepare_async(const char *name, const int64_t *counts, int 
     for (int a = 0; a < n_as; a++) {
         if (counts[a] != 0 && (uint32_t) a < g_siliangem.n_experts) n_act++;
     }
-    if (n_act > SILIANGEM_MAX_BATCH) return 0;
+    if (n_act > SILIANGEM_MAX_BATCH || (uint32_t) n_act > g_siliangem.nslots) return 0;
 
     /* pass 1: hits go straight into order[], misses are collected */
     for (int a = 0; a < n_as; a++) {
         if (counts[a] == 0) continue;
         if ((uint32_t) a >= g_siliangem.n_experts) continue;
+        if (part == 0) g_siliangem.expert_requests++;
         uint32_t key = ((uint32_t) layer << 16) | (uint32_t) a;
         uint32_t s = siliangem_lookup(key);
         if (s != SILIANGEM_EMPTY) {
             g_siliangem.slots[s].stamp = ++g_siliangem.clock;
+            siliangem_policy_record_hit(s, layer, counts, n_as);
             g_siliangem.hits++;
+            if (part == 0) g_siliangem.expert_hits++;
             order[(*n_hits)++] = a;
         } else if (nmiss < SILIANGEM_MAX_BATCH) {
             miss_idx[nmiss++] = a;
@@ -1544,10 +1738,19 @@ static int siliangem_prepare_async(const char *name, const int64_t *counts, int 
         g_siliangem.misses++;
         uint32_t key = ((uint32_t) layer << 16) | (uint32_t) a;
         int64_t t_ev = siliangem_now_ns();
-        uint32_t s = siliangem_evict_lru();
+        uint32_t s = siliangem_policy_choose_slot(layer, counts, n_as);
+        if (s == SILIANGEM_EMPTY) {
+            siliangem_wait();
+            return 0;
+        }
         int was_occupied = (g_siliangem.slots[s].key != SILIANGEM_EMPTY);
         g_siliangem.slots[s].key = key;
         g_siliangem.slots[s].stamp = ++g_siliangem.clock;
+        g_siliangem.slots[s].frequency = 1;
+        g_siliangem.slots[s].segment = g_siliangem.placement_policy == SILIANGEM_POLICY_WTINYLFU_W10_SLRU_P80
+                ? SILIANGEM_SEGMENT_WINDOW : SILIANGEM_SEGMENT_NONE;
+        ++g_siliangem.policy_admissions;
+        if (was_occupied) ++g_siliangem.policy_evictions;
         if (was_occupied) siliangem_table_rebuild(); else siliangem_table_insert(key, s);
         int64_t t_after_evict = siliangem_now_ns();
         g_siliangem.evict_ns += (uint64_t)(t_after_evict - t_ev);

@@ -102,8 +102,6 @@ For the full list of features, please refer to [server's changelog](https://gith
 | `-dr, --docker-repo [<repo>/]<model>[:quant]` | Docker Hub model repository. repo is optional, default to ai/. quant is optional, default to :latest.<br/>example: gemma3<br/>(default: unused)<br/>(env: LLAMA_ARG_DOCKER_REPO) |
 | `-hf, -hfr, --hf-repo <user>/<model>[:quant]` | Hugging Face model repository; quant is optional, case-insensitive, default to Q4_K_M, or falls back to the first file in the repo if Q4_K_M doesn't exist.<br/>mmproj is also downloaded automatically if available. to disable, add --no-mmproj<br/>example: ggml-org/GLM-4.7-Flash-GGUF:Q4_K_M<br/>(default: unused)<br/>(env: LLAMA_ARG_HF_REPO) |
 | `-hff, --hf-file FILE` | Hugging Face model file. If specified, it will override the quant in --hf-repo (default: unused)<br/>(env: LLAMA_ARG_HF_FILE) |
-| `-hfv, -hfrv, --hf-repo-v <user>/<model>[:quant]` | Hugging Face model repository for the vocoder model (default: unused)<br/>(env: LLAMA_ARG_HF_REPO_V) |
-| `-hffv, --hf-file-v FILE` | Hugging Face model file for the vocoder model (default: unused)<br/>(env: LLAMA_ARG_HF_FILE_V) |
 | `-hft, --hf-token TOKEN` | Hugging Face access token (default: value from HF_TOKEN environment variable)<br/>(env: HF_TOKEN) |
 | `--log-disable` | Log disable |
 | `--log-file FNAME` | Log to file<br/>(env: LLAMA_ARG_LOG_FILE) |
@@ -183,6 +181,17 @@ For the full list of features, please refer to [server's changelog](https://gith
 | `--image-min-tokens N` | minimum number of tokens each image can take, only used by vision models with dynamic resolution (default: read from model)<br/>(env: LLAMA_ARG_IMAGE_MIN_TOKENS) |
 | `--image-max-tokens N` | maximum number of tokens each image can take, only used by vision models with dynamic resolution (default: read from model)<br/>(env: LLAMA_ARG_IMAGE_MAX_TOKENS) |
 | `--mtmd-batch-max-tokens N` | maximum number of image tokens per batch when encoding images (default: 1024)<br/>(env: LLAMA_ARG_MTMD_BATCH_MAX_TOKENS) |
+| `--expert-cache, --no-expert-cache` | enable the expert cache arena configuration (default: disabled) |
+| `--expert-cache-l2-mib N` | L2 expert cache capacity in MiB (default: 0) |
+| `--expert-cache-l2-policy {lru,lfu,wtinylfu,wtinylfu-w10-slru-p80}` | L2 eviction policy; wtinylfu is W-TinyLFU W10/SLRU-P80 (default: lru) |
+| `--expert-cache-l1-k N` | total persistent CUDA L1 policy budget K; heterogeneous models partition K across routed layers; incompatible with LoRA adapters (default: 0) |
+| `--expert-cache-exchange-r N` | exchange slots R per schema arena; requires K > 0 (default: 0) |
+| `--expert-cache-elevator-p N` | global pinned-host elevator slots P, sized to the largest expert schema; requires K > 0 (default: 0) |
+| `--expert-cache-l1-policy {lru,lfu,cumulative-lfu,wtinylfu,wtinylfu-w10-slru-p80}` | L1 policy; lfu is always-admit and resets its hit count on admission, cumulative-lfu uses lifetime-frequency admission/bypass, and wtinylfu is W-TinyLFU W10/SLRU-P80 (default: lru) |
+| `--expert-cache-roll {off,deepseek4}` | rolling cache mode; deepseek4 is architecture-specific (default: off) |
+| `--expert-cache-prefill, --no-expert-cache-prefill` | enable bounded DeepSeek-V4 batch-union prefill in the CUDA K arena; the ubatch route union must fit K (experimental, default: disabled) |
+| `--expert-cache-memory-report, --no-expert-cache-memory-report` | enable periodic expert-cache memory reporting (default: enabled) |
+| `--expert-cache-deferred-wait, --no-expert-cache-deferred-wait` | allow deferred L2 I/O waits (default: enabled) |
 | `-a, --alias STRING` | set model name aliases, comma-separated (to be used by API)<br/>(env: LLAMA_ARG_ALIAS) |
 | `--tags STRING` | set model tags, comma-separated (informational, not used for routing)<br/>(env: LLAMA_ARG_TAGS) |
 | `--embd-normalize N` | normalisation for embeddings (default: 2) (-1=none, 0=max absolute int16, 1=taxicab, 2=euclidean, >2=p-norm) |
@@ -279,8 +288,6 @@ For the full list of features, please refer to [server's changelog](https://gith
 | `--spec-ngram-size-n N` | the argument has been removed. use the respective --spec-ngram-*-size-n or --spec-ngram-mod-n-match |
 | `--spec-ngram-size-m N` | the argument has been removed. use the respective --spec-ngram-*-size-m |
 | `--spec-ngram-min-hits N` | the argument has been removed. use the respective --spec-ngram-*-min-hits |
-| `-mv, --model-vocoder FNAME` | vocoder model for audio generation (default: unused) |
-| `--tts-use-guide-tokens` | Use guide tokens to improve TTS word recall |
 | `--embd-gemma-default` | use default EmbeddingGemma model (note: can download weights from the internet) |
 | `--fim-qwen-1.5b-default` | use default Qwen 2.5 Coder 1.5B (note: can download weights from the internet) |
 | `--fim-qwen-3b-default` | use default Qwen 2.5 Coder 3B (note: can download weights from the internet) |

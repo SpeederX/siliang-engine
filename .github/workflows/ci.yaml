@@ -235,10 +235,11 @@ jobs:
           $artifactName = "siliang-engine-$tag-windows-x64-${{ matrix.slug }}"
           $packageRoot = Join-Path $env:RUNNER_TEMP $artifactName
           $binTarget = Join-Path $packageRoot 'bin'
+          $docsTarget = Join-Path $packageRoot 'docs'
+          $releaseDocsTarget = Join-Path $docsTarget 'releases'
           $licenseTarget = Join-Path $packageRoot 'licenses'
           $provenanceTarget = Join-Path $packageRoot 'provenance'
-          $scriptTarget = Join-Path $packageRoot 'scripts'
-          New-Item -ItemType Directory -Path $binTarget, $licenseTarget, $provenanceTarget, $scriptTarget | Out-Null
+          New-Item -ItemType Directory -Path $binTarget, $docsTarget, $releaseDocsTarget, $licenseTarget, $provenanceTarget | Out-Null
 
           $binSource = Join-Path $env:SILIANG_RELEASE_BUILD 'bin\Release'
           foreach ($fileName in @('llama-server.exe', 'llama-cli.exe')) {
@@ -495,7 +496,12 @@ jobs:
           Copy-Item -LiteralPath '.\vendor\cpp-httplib\LICENSE' -Destination (Join-Path $licenseTarget 'CPP-HTTPLIB-MIT.txt')
           Copy-Item -LiteralPath '.\docs\PROVENANCE.md', '.\docs\source-manifest.json', '.\patches\siliang-engine.patch' -Destination $provenanceTarget
           Copy-Item -LiteralPath $buildReceiptPath -Destination $provenanceTarget
-          Copy-Item -LiteralPath '.\scripts\siliang-env.ps1' -Destination $scriptTarget
+          Copy-Item -LiteralPath '.\docs\CONFIGURATION.md' -Destination $docsTarget
+          $releaseNotesPath = ".\docs\releases\$tag.md"
+          if (-not (Test-Path -LiteralPath $releaseNotesPath -PathType Leaf)) {
+              throw "Release notes were not found: $releaseNotesPath"
+          }
+          Copy-Item -LiteralPath $releaseNotesPath -Destination $releaseDocsTarget
 
           $cmakeVersion = (& cmake --version | Select-Object -First 1)
           $buildInfo = @(
@@ -531,10 +537,35 @@ jobs:
           Push-Location $binTarget
           try {
               $env:PATH = "$binTarget;$env:SystemRoot\System32;$env:SystemRoot"
+              $requiredExpertCacheOptions = @(
+                  '--expert-cache'
+                  '--no-expert-cache'
+                  '--expert-cache-l2-mib'
+                  '--expert-cache-l2-policy'
+                  '--expert-cache-l1-k'
+                  '--expert-cache-exchange-r'
+                  '--expert-cache-elevator-p'
+                  '--expert-cache-l1-policy'
+                  '--expert-cache-roll'
+                  '--expert-cache-memory-report'
+                  '--no-expert-cache-memory-report'
+                  '--expert-cache-deferred-wait'
+                  '--no-expert-cache-deferred-wait'
+              )
               foreach ($executableName in @('llama-server.exe', 'llama-cli.exe')) {
                   & (Join-Path $binTarget $executableName) --version
                   if ($LASTEXITCODE -ne 0) {
                       throw "$executableName --version failed from the assembled package with exit code $LASTEXITCODE."
+                  }
+                  $helpText = @(& (Join-Path $binTarget $executableName) --help 2>&1) -join "`n"
+                  if ($LASTEXITCODE -ne 0) {
+                      throw "$executableName --help failed from the assembled package with exit code $LASTEXITCODE."
+                  }
+                  foreach ($option in $requiredExpertCacheOptions) {
+                  $helpPattern = '(?m)(?<![A-Za-z0-9-])' + [regex]::Escape($option) + '(?![A-Za-z0-9-])'
+                  if (-not [regex]::IsMatch($helpText, $helpPattern)) {
+                      throw "$executableName --help does not contain $option."
+                  }
                   }
               }
           } finally {

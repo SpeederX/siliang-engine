@@ -9,6 +9,7 @@
 #include "sampling.h"
 #include "speculative.h"
 #include "unicode.h"
+#include "../src/siliang-moe-runtime.h"
 
 #include <algorithm>
 #include <cinttypes>
@@ -1216,6 +1217,65 @@ static void common_init_sampler_from_model(
     get_float(llama_model_meta_key_str(LLAMA_MODEL_META_KEY_SAMPLING_MIROSTAT_ETA),    sparams.mirostat_eta,    common_params_sampling_config::COMMON_PARAMS_SAMPLING_CONFIG_MIROSTAT_ETA);
 }
 
+namespace {
+
+struct siliang_moe_runtime_deleter {
+    void operator()(siliang_moe_runtime * runtime) const {
+        siliang_moe_runtime_free(runtime);
+    }
+};
+
+using siliang_moe_runtime_ptr = std::unique_ptr<siliang_moe_runtime, siliang_moe_runtime_deleter>;
+
+struct siliang_ds4_front_runtime_deleter {
+    void operator()(llama_siliang_ds4_front_slab_runtime * runtime) const {
+        if (!runtime) {
+            return;
+        }
+        llama_siliang_ds4_front_slab_metrics metrics = {};
+        if (llama_siliang_ds4_front_slab_runtime_metrics(runtime, &metrics)) {
+            COM_INF("DeepSeek-V4 FRONT slab: summary active=%d tokens=%" PRIu64
+                    " copies=%" PRIu64 " waits=%" PRIu64 " H2D=%" PRIu64 " bytes failure=%d\n",
+                    metrics.active, metrics.tokens, metrics.copies, metrics.waits,
+                    metrics.wire_h2d_bytes, llama_siliang_ds4_front_slab_runtime_failure(runtime));
+        }
+        llama_siliang_ds4_front_slab_runtime_deactivate(runtime);
+        llama_siliang_ds4_front_slab_runtime_free(runtime);
+    }
+};
+
+using siliang_ds4_front_runtime_ptr = std::unique_ptr<
+        llama_siliang_ds4_front_slab_runtime,
+        siliang_ds4_front_runtime_deleter>;
+
+static bool common_append_tensor_buft_override(
+        common_params & params,
+        const char * pattern,
+        ggml_backend_buffer_type_t buft,
+        const char * label) {
+    for (const auto & current : params.tensor_buft_overrides) {
+        if (!current.pattern) {
+            break;
+        }
+        if (std::strcmp(current.pattern, pattern) == 0) {
+            if (current.buft != buft) {
+                COM_WRN("expert cache: explicit %s tensor override takes precedence; runtime will validate placement\n", label);
+            }
+            return true;
+        }
+    }
+    for (size_t index = 0; index + 1 < params.tensor_buft_overrides.size(); ++index) {
+        if (!params.tensor_buft_overrides[index].pattern) {
+            params.tensor_buft_overrides[index] = { pattern, buft };
+            return true;
+        }
+    }
+    COM_ERR("expert cache: no free tensor override entry for %s placement\n", label);
+    return false;
+}
+
+} // namespace
+
 struct common_init_result::impl {
     impl() = default;
     ~impl() = default;
@@ -1224,6 +1284,8 @@ struct common_init_result::impl {
 
     llama_model_ptr   model;
     llama_context_ptr context;
+    siliang_moe_runtime_ptr moe_runtime;
+    siliang_ds4_front_runtime_ptr front_runtime;
 
     std::vector<llama_adapter_lora_ptr> lora;
 
@@ -1233,6 +1295,32 @@ struct common_init_result::impl {
 
 common_init_result::common_init_result(common_params & params, bool model_only) :
     pimpl(new impl{}) {
+    static const char * const ds4_front_regex =
+        "^blk\\.[0-9]+\\.(hc_attn_fn|hc_attn_scale|hc_attn_base|attn_norm|attn_q_a|attn_q_a_norm|attn_q_b|attn_kv|attn_kv_a_norm|attn_sinks|attn_compressor_ape|attn_compressor_gate|attn_compressor_kv|attn_compressor_norm|indexer\\.attn_q_b|indexer\\.proj|indexer_compressor_ape|indexer_compressor_gate|indexer_compressor_kv|indexer_compressor_norm)\\.weight$";
+    const bool l1_enabled = !model_only && params.expert_cache.enabled && params.expert_cache.l1_k > 0;
+    if (l1_enabled && !params.lora_adapters.empty()) {
+        COM_ERR("%s", "expert cache: L1 K/R/P does not support LoRA adapters\n");
+        return;
+    }
+    if (l1_enabled && params.fit_params) {
+        COM_WRN("%s", "expert cache: disabling automatic fit because the K+R arena is allocated after model load\n");
+        params.fit_params = false;
+    }
+    if (l1_enabled) {
+        if (!common_append_tensor_buft_override(
+                params, LLM_FFN_EXPS_REGEX, ggml_backend_cpu_buffer_type(), "routed-expert CPU")) {
+            return;
+        }
+        COM_INF("%s", "expert cache: routed-expert CPU placement rule prepared; runtime will validate effective placement\n");
+    }
+    if (l1_enabled && params.expert_cache.roll == COMMON_EXPERT_CACHE_ROLL_DEEPSEEK4) {
+        if (!common_append_tensor_buft_override(
+                params, ds4_front_regex, ggml_backend_cpu_buffer_type(), "DeepSeek-V4 FRONT CPU")) {
+            return;
+        }
+        COM_INF("%s", "expert cache: exact DeepSeek-V4 FRONT CPU placement rule prepared; runtime will validate effective placement\n");
+    }
+
     auto mparams = common_model_params_to_llama(params);
     auto cparams = common_context_params_to_llama(params);
 
@@ -1334,6 +1422,38 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
     }
 
     pimpl->context.reset(lctx);
+
+    if (l1_enabled) {
+        pimpl->moe_runtime.reset(siliang_moe_runtime_create(model, lctx, &cparams.expert_cache));
+        if (!pimpl->moe_runtime) {
+            COM_ERR("%s", "expert cache: failed to arm the K+R/P runtime; refusing an unmanaged fallback\n");
+            pimpl->context.reset();
+            return;
+        }
+    }
+    if (l1_enabled && params.expert_cache.roll == COMMON_EXPERT_CACHE_ROLL_DEEPSEEK4) {
+        pimpl->front_runtime.reset(llama_siliang_ds4_front_slab_runtime_create(model));
+        if (!pimpl->front_runtime ||
+            !llama_siliang_ds4_front_slab_runtime_bind(pimpl->front_runtime.get(), lctx) ||
+            !llama_siliang_ds4_front_slab_runtime_activate(pimpl->front_runtime.get())) {
+            const int32_t failure = pimpl->front_runtime ?
+                llama_siliang_ds4_front_slab_runtime_failure(pimpl->front_runtime.get()) : -1;
+            const char * reason = pimpl->front_runtime ?
+                llama_siliang_ds4_front_slab_runtime_failure_message(pimpl->front_runtime.get()) : "allocation failed";
+            COM_ERR("expert cache: DeepSeek-V4 FRONT slab failed code=%d reason=%s; refusing native fallback\n",
+                    failure, reason);
+            pimpl->front_runtime.reset();
+            pimpl->moe_runtime.reset();
+            pimpl->context.reset();
+            return;
+        }
+        llama_siliang_ds4_front_slab_metrics metrics = {};
+        if (llama_siliang_ds4_front_slab_runtime_metrics(pimpl->front_runtime.get(), &metrics)) {
+            COM_INF("expert cache: DeepSeek-V4 FRONT slab armed bank=%zu MiB host=%zu MiB resident_layer=%d\n",
+                    metrics.bank_bytes / (1024 * 1024), metrics.host_store_bytes / (1024 * 1024),
+                    metrics.resident_layer);
+        }
+    }
 }
 
 llama_model * common_init_result::model() {
@@ -1342,6 +1462,16 @@ llama_model * common_init_result::model() {
 
 llama_context * common_init_result::context() {
     return pimpl->context.get();
+}
+
+void common_init_result::reset_context() {
+    pimpl->front_runtime.reset();
+    pimpl->moe_runtime.reset();
+    pimpl->context.reset();
+}
+
+void common_init_result::reset_expert_cache_prefill_trace() {
+    siliang_moe_runtime_reset_prefill_trace(pimpl->moe_runtime.get());
 }
 
 common_sampler * common_init_result::sampler(llama_seq_id seq_id) {
@@ -1432,8 +1562,10 @@ common_init_result_ptr common_init_from_params(common_params & params, bool mode
         }
     }
 
-    if (!params.lora_init_without_apply) {
-        common_set_adapter_lora(lctx, params.lora_adapters);
+    if (!params.lora_init_without_apply && !common_set_adapter_lora(lctx, params.lora_adapters)) {
+        COM_ERR("%s", "failed to apply LoRA adapters; refusing to continue\n");
+        res->reset_context();
+        return res;
     }
 
     if (params.warmup) {
@@ -1473,6 +1605,10 @@ common_init_result_ptr common_init_from_params(common_params & params, bool mode
         // reset samplers to reset RNG state after warmup to the seeded state
         res->reset_samplers();
     }
+
+    // Graph reservation and the optional warmup can execute the route mapper.
+    // Start serving with a fresh prefill trace without changing cache residency.
+    res->reset_expert_cache_prefill_trace();
 
     return res;
 }
@@ -1593,7 +1729,7 @@ void common_memory::seq_add(llama_seq_id seq_id, llama_pos p0, llama_pos p1, lla
     }
 }
 
-void common_set_adapter_lora(struct llama_context * ctx, std::vector<common_adapter_lora_info> & lora) {
+bool common_set_adapter_lora(struct llama_context * ctx, std::vector<common_adapter_lora_info> & lora) {
     std::vector<llama_adapter_lora *> loras;
     std::vector<float> scales;
 
@@ -1602,7 +1738,7 @@ void common_set_adapter_lora(struct llama_context * ctx, std::vector<common_adap
         scales.push_back(la.scale);
     }
 
-    llama_set_adapters_lora(ctx, loras.data(), loras.size(), scales.data());
+    return llama_set_adapters_lora(ctx, loras.data(), loras.size(), scales.data()) == 0;
 }
 
 struct llama_model_params common_model_params_to_llama(common_params & params) {
@@ -1646,6 +1782,20 @@ struct llama_model_params common_model_params_to_llama(common_params & params) {
 struct llama_context_params common_context_params_to_llama(const common_params & params) {
     auto cparams = llama_context_default_params();
 
+    const auto cache_policy = [](common_expert_cache_policy policy) {
+        switch (policy) {
+            case COMMON_EXPERT_CACHE_POLICY_LRU:
+                return LLAMA_SILIANG_EXPERT_CACHE_POLICY_LRU;
+            case COMMON_EXPERT_CACHE_POLICY_LFU:
+                return LLAMA_SILIANG_EXPERT_CACHE_POLICY_LFU;
+            case COMMON_EXPERT_CACHE_POLICY_WTINYLFU_W10_SLRU_P80:
+                return LLAMA_SILIANG_EXPERT_CACHE_POLICY_WTINYLFU_W10_SLRU_P80;
+            case COMMON_EXPERT_CACHE_POLICY_CUMULATIVE_LFU_ADMISSION:
+                return LLAMA_SILIANG_EXPERT_CACHE_POLICY_CUMULATIVE_LFU_ADMISSION;
+        }
+        return LLAMA_SILIANG_EXPERT_CACHE_POLICY_LRU;
+    };
+
     cparams.n_ctx             = params.n_ctx;
     cparams.n_seq_max         = params.n_parallel;
     cparams.n_rs_seq          = params.speculative.need_n_rs_seq();
@@ -1674,6 +1824,19 @@ struct llama_context_params common_context_params_to_llama(const common_params &
     cparams.op_offload        = !params.no_op_offload;
     cparams.swa_full          = params.swa_full;
     cparams.kv_unified        = params.kv_unified;
+
+    cparams.expert_cache.enabled       = params.expert_cache.enabled;
+    cparams.expert_cache.l2_bytes      = params.expert_cache.l2_mib * 1024ULL * 1024ULL;
+    cparams.expert_cache.l2_policy     = cache_policy(params.expert_cache.l2_policy);
+    cparams.expert_cache.l1_k          = params.expert_cache.l1_k;
+    cparams.expert_cache.exchange_r    = params.expert_cache.exchange_r;
+    cparams.expert_cache.elevator_p    = params.expert_cache.elevator_p;
+    cparams.expert_cache.l1_policy     = cache_policy(params.expert_cache.l1_policy);
+    cparams.expert_cache.roll          = params.expert_cache.roll == COMMON_EXPERT_CACHE_ROLL_DEEPSEEK4 ?
+        LLAMA_SILIANG_EXPERT_CACHE_ROLL_DEEPSEEK4 : LLAMA_SILIANG_EXPERT_CACHE_ROLL_NONE;
+    cparams.expert_cache.prefill       = params.expert_cache.prefill;
+    cparams.expert_cache.memory_report = params.expert_cache.memory_report;
+    cparams.expert_cache.deferred_wait = params.expert_cache.deferred_wait;
 
     cparams.type_k = params.cache_type_k;
     cparams.type_v = params.cache_type_v;

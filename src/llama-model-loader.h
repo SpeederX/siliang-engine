@@ -1,5 +1,7 @@
 #pragma once
 
+#include "siliang-expert-source.h"
+
 #include "llama.h"
 
 #include "llama-impl.h"
@@ -109,6 +111,7 @@ struct llama_model_loader {
     // per layer; create_tensor() writes it into nb[2].
     bool expert_major = false;
     std::map<int, uint64_t> expert_stride;   // layer -> bytes between experts
+    llama_siliang_expert_source siliang_expert_source;
 
     // ---- expert-major on a DEVICE buffer ---------------------------------
     // The interleaving exists to make a DISK read contiguous, and only the

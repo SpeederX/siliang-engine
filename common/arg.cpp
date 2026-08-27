@@ -32,6 +32,7 @@
 #include <filesystem>
 #include <fstream>
 #include <list>
+#include <limits>
 #include <regex>
 #include <set>
 #include <string>
@@ -72,6 +73,59 @@ static std::string read_file(const std::string & fname) {
     std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
     file.close();
     return content;
+}
+
+static uint64_t parse_unsigned_decimal(const std::string & value, uint64_t max_value) {
+    if (value.empty()) {
+        throw std::invalid_argument("value must be an unsigned decimal integer");
+    }
+
+    uint64_t result = 0;
+    for (const char ch : value) {
+        if (ch < '0' || ch > '9') {
+            throw std::invalid_argument("value must be an unsigned decimal integer");
+        }
+
+        const uint64_t digit = static_cast<uint64_t>(ch - '0');
+        if (result > (max_value - digit) / 10) {
+            throw std::invalid_argument("value is out of range");
+        }
+        result = result * 10 + digit;
+    }
+
+    return result;
+}
+
+static enum common_expert_cache_policy parse_expert_cache_policy(
+        const std::string & value,
+        bool allow_cumulative_lfu) {
+    if (value == "lru") {
+        return COMMON_EXPERT_CACHE_POLICY_LRU;
+    }
+    if (value == "lfu") {
+        return COMMON_EXPERT_CACHE_POLICY_LFU;
+    }
+    if (value == "wtinylfu" || value == "wtinylfu-w10-slru-p80") {
+        return COMMON_EXPERT_CACHE_POLICY_WTINYLFU_W10_SLRU_P80;
+    }
+    if (value == "cumulative-lfu" && allow_cumulative_lfu) {
+        return COMMON_EXPERT_CACHE_POLICY_CUMULATIVE_LFU_ADMISSION;
+    }
+
+    throw std::invalid_argument(allow_cumulative_lfu ?
+        "expected lru, lfu, cumulative-lfu, wtinylfu, or wtinylfu-w10-slru-p80" :
+        "expected lru, lfu, wtinylfu, or wtinylfu-w10-slru-p80");
+}
+
+static enum common_expert_cache_roll parse_expert_cache_roll(const std::string & value) {
+    if (value == "off") {
+        return COMMON_EXPERT_CACHE_ROLL_OFF;
+    }
+    if (value == "deepseek4") {
+        return COMMON_EXPERT_CACHE_ROLL_DEEPSEEK4;
+    }
+
+    throw std::invalid_argument("expected off or deepseek4");
 }
 
 static const std::vector<common_arg> & get_common_arg_defs() {
@@ -829,6 +883,45 @@ static bool common_params_parse_ex(int argc, char ** argv, common_params_context
 
     // parse all CLI args now, so that -hf is available below for remote preset resolution
     parse_cli_args();
+
+    const common_params_expert_cache & expert_cache = params.expert_cache;
+    if (!expert_cache.enabled && expert_cache.tier_configured) {
+        throw std::invalid_argument("error: expert-cache tier options require --expert-cache\n");
+    }
+    if (expert_cache.l1_k > 0 && (expert_cache.exchange_r == 0 || expert_cache.elevator_p == 0)) {
+        throw std::invalid_argument(
+            "error: --expert-cache-l1-k > 0 requires --expert-cache-exchange-r > 0 and --expert-cache-elevator-p > 0\n");
+    }
+    if (expert_cache.l1_k == 0 &&
+        (expert_cache.exchange_r != 0 || expert_cache.elevator_p != 0 ||
+         expert_cache.roll != COMMON_EXPERT_CACHE_ROLL_OFF || expert_cache.prefill)) {
+        throw std::invalid_argument(
+            "error: expert-cache R, P, roll, and prefill require --expert-cache-l1-k > 0\n");
+    }
+    if (static_cast<uint64_t>(expert_cache.l1_k) + expert_cache.exchange_r >
+        std::numeric_limits<uint32_t>::max()) {
+        throw std::invalid_argument("error: expert-cache K plus one R bank exceeds the supported range\n");
+    }
+    if (expert_cache.enabled && expert_cache.l2_mib == 0 && expert_cache.l1_k == 0) {
+        throw std::invalid_argument(
+            "error: --expert-cache requires --expert-cache-l2-mib > 0 or --expert-cache-l1-k > 0\n");
+    }
+    if (expert_cache.l1_k > 0 && !spec_types_is_default(params)) {
+        throw std::invalid_argument(
+            "error: expert-cache L1 K/R/P does not support speculative decoding\n");
+    }
+    if (expert_cache.l1_k > 0 && !params.lora_adapters.empty()) {
+        throw std::invalid_argument(
+            "error: expert-cache L1 K/R/P does not support LoRA adapters\n");
+    }
+    if (ctx_arg.ex == LLAMA_EXAMPLE_SERVER && expert_cache.l1_k > 0 && params.n_parallel != 1) {
+        throw std::invalid_argument(
+            "error: llama-server expert-cache L1 K/R/P requires explicit --parallel 1\n");
+    }
+    if (expert_cache.prefill && params.n_ubatch <= 1) {
+        throw std::invalid_argument(
+            "error: --expert-cache-prefill requires --ubatch-size > 1\n");
+    }
 
     postprocess_cpu_params(params.cpuparams,       nullptr);
     postprocess_cpu_params(params.cpuparams_batch, &params.cpuparams);
@@ -2620,6 +2713,104 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             else { throw std::invalid_argument("invalid value"); }
         }
     ).set_env("LLAMA_ARG_LOAD_MODE"));
+    add_opt(common_arg(
+        {"--expert-cache"},
+        {"--no-expert-cache"},
+        "enable the expert cache arena configuration (default: disabled)",
+        [](common_params & params, bool value) {
+            params.expert_cache.enabled = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--expert-cache-l2-mib"}, "N",
+        "L2 expert cache capacity in MiB (default: 0)",
+        [](common_params & params, const std::string & value) {
+            constexpr uint64_t bytes_per_mib = 1024ULL * 1024ULL;
+            params.expert_cache.l2_mib = parse_unsigned_decimal(
+                value, std::numeric_limits<uint64_t>::max() / bytes_per_mib);
+            params.expert_cache.tier_configured = true;
+        }
+    ).set_examples({LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--expert-cache-l2-policy"}, "{lru,lfu,wtinylfu,wtinylfu-w10-slru-p80}",
+        "L2 eviction policy; wtinylfu is W-TinyLFU W10/SLRU-P80 (default: lru)",
+        [](common_params & params, const std::string & value) {
+            params.expert_cache.l2_policy = parse_expert_cache_policy(value, false);
+            params.expert_cache.tier_configured = true;
+        }
+    ).set_examples({LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--expert-cache-l1-k"}, "N",
+        "total persistent CUDA L1 policy budget K; heterogeneous models partition K across routed layers; incompatible with LoRA adapters (default: 0)",
+        [](common_params & params, const std::string & value) {
+            params.expert_cache.l1_k = static_cast<uint32_t>(parse_unsigned_decimal(
+                value, std::numeric_limits<uint32_t>::max()));
+            params.expert_cache.tier_configured = true;
+        }
+    ).set_examples({LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--expert-cache-exchange-r"}, "N",
+        "exchange slots R per schema arena; requires K > 0 (default: 0)",
+        [](common_params & params, const std::string & value) {
+            params.expert_cache.exchange_r = static_cast<uint32_t>(parse_unsigned_decimal(
+                value, std::numeric_limits<uint32_t>::max()));
+            params.expert_cache.tier_configured = true;
+        }
+    ).set_examples({LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--expert-cache-elevator-p"}, "N",
+        "global pinned-host elevator slots P, sized to the largest expert schema; requires K > 0 (default: 0)",
+        [](common_params & params, const std::string & value) {
+            params.expert_cache.elevator_p = static_cast<uint32_t>(parse_unsigned_decimal(
+                value, std::numeric_limits<uint32_t>::max()));
+            params.expert_cache.tier_configured = true;
+        }
+    ).set_examples({LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--expert-cache-l1-policy"}, "{lru,lfu,cumulative-lfu,wtinylfu,wtinylfu-w10-slru-p80}",
+        "L1 policy; lfu is always-admit and resets its hit count on admission, cumulative-lfu uses "
+        "lifetime-frequency admission/bypass, and wtinylfu is W-TinyLFU W10/SLRU-P80 (default: lru)",
+        [](common_params & params, const std::string & value) {
+            params.expert_cache.l1_policy = parse_expert_cache_policy(value, true);
+            params.expert_cache.tier_configured = true;
+        }
+    ).set_examples({LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--expert-cache-roll"}, "{off,deepseek4}",
+        "rolling cache mode; deepseek4 is architecture-specific (default: off)",
+        [](common_params & params, const std::string & value) {
+            params.expert_cache.roll = parse_expert_cache_roll(value);
+            params.expert_cache.tier_configured = true;
+        }
+    ).set_examples({LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--expert-cache-prefill"},
+        {"--no-expert-cache-prefill"},
+        "enable bounded DeepSeek-V4 batch-union prefill in the CUDA K arena; "
+        "the --ubatch-size route union must fit K (experimental, default: disabled)",
+        [](common_params & params, bool value) {
+            params.expert_cache.prefill = value;
+            params.expert_cache.tier_configured = true;
+        }
+    ).set_examples({LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--expert-cache-memory-report"},
+        {"--no-expert-cache-memory-report"},
+        "enable periodic expert-cache memory reporting (default: enabled)",
+        [](common_params & params, bool value) {
+            params.expert_cache.memory_report = value;
+            params.expert_cache.tier_configured = true;
+        }
+    ).set_examples({LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--expert-cache-deferred-wait"},
+        {"--no-expert-cache-deferred-wait"},
+        "allow deferred L2 I/O waits (default: enabled)",
+        [](common_params & params, bool value) {
+            params.expert_cache.deferred_wait = value;
+            params.expert_cache.tier_configured = true;
+        }
+    ).set_examples({LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
         {"--numa"}, "TYPE",
         "attempt optimizations that help on some NUMA systems\n"

@@ -2,10 +2,51 @@
 
 #include "llama.h"
 
+#include <array>
+#include <atomic>
 #include <cstdint>
 #include <vector>
 
 #define LLAMA_MAX_SEQ 256
+
+struct llama_siliang_moe_arena_state;
+
+struct llama_siliang_moe_arena_map_call {
+    llama_siliang_moe_arena_state * state = nullptr;
+    int32_t layer = -1;
+    uint64_t generation = 0;
+};
+
+struct llama_siliang_moe_arena_wait_call {
+    llama_siliang_moe_arena_state * state = nullptr;
+    int32_t layer = -1;
+    uint64_t generation = 0;
+};
+
+struct llama_siliang_moe_arena_state {
+    uint64_t generation = 0;
+    std::vector<std::array<ggml_tensor *, LLAMA_SILIANG_MOE_ARENA_PART_ROLE_COUNT>> parts_by_layer;
+    std::vector<uint8_t> managed_layers;
+    std::vector<uint32_t> physical_slot_first_by_layer;
+    std::vector<uint32_t> physical_slot_count_by_layer;
+    std::vector<uint32_t> exchange_slot_first_by_layer;
+    std::vector<uint32_t> exchange_slot_count_by_layer;
+    uint32_t capacity = 0;
+    int32_t expert_count = 0;
+    int32_t top_k = 0;
+    uint32_t prefill_ubatch_cap = 1;
+    bool prefill_enabled = false;
+    llama_siliang_moe_arena_slot_mapper mapper = nullptr;
+    llama_siliang_moe_arena_failure_query failure_query = nullptr;
+    llama_siliang_moe_arena_compute_wait_hook compute_wait_hook = nullptr;
+    void * user_data = nullptr;
+    void * compute_wait_user_data = nullptr;
+    std::atomic<int32_t> failure_code {0};
+    std::atomic<uint64_t> map_calls {0};
+    std::atomic<bool> contract_failure_logged {false};
+    std::vector<llama_siliang_moe_arena_map_call> map_calls_by_layer;
+    std::vector<llama_siliang_moe_arena_wait_call> wait_calls_by_layer;
+};
 
 struct llama_cparams {
     uint32_t n_ctx;           // context size used during inference
@@ -60,6 +101,16 @@ struct llama_cparams {
 
     ggml_backend_sched_eval_callback cb_eval;
     void * cb_eval_user_data;
+
+    llama_siliang_expert_cache_params expert_cache;
+
+    llama_siliang_moe_arena_state * siliang_moe_arena_state;
+    uint64_t siliang_moe_arena_generation;
+    bool siliang_moe_arena_enabled;
+
+    std::array<const void *, 43> siliang_ds4_front_slab_layers;
+    uint64_t siliang_ds4_front_slab_generation;
+    bool siliang_ds4_front_slab_enabled;
 
     llama_context * ctx_other;
 };

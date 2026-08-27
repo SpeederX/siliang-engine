@@ -15,6 +15,7 @@
 #include <vector>
 #include <map>
 #include <algorithm>
+#include <cstdint>
 #include <fstream>
 
 #if defined(_WIN32) && !defined(_WIN32_WINNT)
@@ -437,6 +438,43 @@ struct lr_opt {
 
 struct ggml_opt_optimizer_params common_opt_lr_pars(void * userdata);
 
+enum common_expert_cache_policy {
+    COMMON_EXPERT_CACHE_POLICY_LRU = 0,
+    COMMON_EXPERT_CACHE_POLICY_LFU,
+    COMMON_EXPERT_CACHE_POLICY_WTINYLFU_W10_SLRU_P80,
+    COMMON_EXPERT_CACHE_POLICY_CUMULATIVE_LFU_ADMISSION,
+};
+
+enum common_expert_cache_roll {
+    COMMON_EXPERT_CACHE_ROLL_OFF = 0,
+    COMMON_EXPERT_CACHE_ROLL_DEEPSEEK4,
+};
+
+struct common_params_expert_cache {
+    bool enabled = false;
+
+    uint64_t l2_mib = 0;
+    enum common_expert_cache_policy l2_policy = COMMON_EXPERT_CACHE_POLICY_LRU;
+
+    uint32_t l1_k       = 0;
+    uint32_t exchange_r = 0;
+    uint32_t elevator_p = 0;
+    enum common_expert_cache_policy l1_policy = COMMON_EXPERT_CACHE_POLICY_LRU;
+
+    enum common_expert_cache_roll roll = COMMON_EXPERT_CACHE_ROLL_OFF;
+
+    // Explicit experimental path: use the persistent CUDA K arena as a
+    // transient per-layer union during batched prompt processing. The
+    // ordinary --ubatch-size value is the authoritative token bound.
+    bool prefill = false;
+
+    bool memory_report = true;
+    bool deferred_wait = true;
+
+    // Parser-only presence marker: explicit tier options require --expert-cache.
+    bool tier_configured = false;
+};
+
 struct common_params {
     int32_t n_predict             =    -1; // max. number of new tokens to predict, -1 == no limit
     int32_t n_ctx                 =     0; // context size, 0 == context the model was trained with
@@ -473,6 +511,8 @@ struct common_params {
 
     enum llama_split_mode split_mode = LLAMA_SPLIT_MODE_LAYER; // how to split the model across GPUs
     enum llama_load_mode  load_mode  = LLAMA_LOAD_MODE_MMAP; // how to load the model
+
+    common_params_expert_cache expert_cache;
 
     common_cpu_params cpuparams;
     common_cpu_params cpuparams_batch;
@@ -911,6 +951,8 @@ struct common_init_result {
 
     llama_model * model();
     llama_context * context();
+    void reset_context();
+    void reset_expert_cache_prefill_trace();
 
     common_sampler * sampler(llama_seq_id seq_id);
     void reset_samplers();
@@ -931,7 +973,7 @@ struct llama_context_params   common_context_params_to_llama(const common_params
 struct ggml_threadpool_params ggml_threadpool_params_from_cpu_params(const common_cpu_params & params);
 
 // clear LoRA adapters from context, then apply new list of adapters
-void common_set_adapter_lora(struct llama_context * ctx, std::vector<common_adapter_lora_info> & lora);
+bool common_set_adapter_lora(struct llama_context * ctx, std::vector<common_adapter_lora_info> & lora);
 
 // model endpoint from env
 std::string common_get_model_endpoint();

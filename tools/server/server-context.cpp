@@ -1421,6 +1421,10 @@ private:
         model_aliases = params_base.model_alias;
         model_tags    = params_base.model_tags;
 
+        // Server capability and slot setup can execute small route probes after
+        // common initialization. Establish the final serving telemetry scope.
+        llama_init->reset_expert_cache_prefill_trace();
+
         // propagate new defaults back to caller
         params = params_base;
 
@@ -2835,7 +2839,12 @@ private:
 
             // TODO @ngxson : alora handling is too messy, need to refactor it to be more clear and maintainable
             // apply lora, only need to do it once per batch
-            common_set_adapter_lora(ctx_tgt, slot_batched->lora);
+            if (!common_set_adapter_lora(ctx_tgt, slot_batched->lora)) {
+                const std::string reason = "LoRA adapter application was rejected by the active runtime";
+                SRV_ERR("%s\n", reason.c_str());
+                abort_all_slots(reason);
+                return;
+            }
 
             // if the lora is temporarily disabled for an alora, re-enable it
             // for next time

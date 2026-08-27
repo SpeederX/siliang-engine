@@ -15,6 +15,20 @@ static float dsv4_rope_attn_factor(float freq_scale, float ext_factor) {
     return 1.0f / (1.0f + 0.1f*logf(1.0f/freq_scale));
 }
 
+static const llama_layer & ds4_front_slab_layer(
+        const llama_model & model,
+        const llama_cparams & cparams,
+        int il,
+        bool managed_graph) {
+    if (!cparams.siliang_ds4_front_slab_enabled || !managed_graph) {
+        return model.layers[il];
+    }
+    if (il < 0 || il >= 43 || cparams.siliang_ds4_front_slab_layers[il] == nullptr) {
+        throw std::runtime_error("DeepSeek-V4 FRONT slab layer is unavailable");
+    }
+    return *static_cast<const llama_layer *>(cparams.siliang_ds4_front_slab_layers[il]);
+}
+
 void llama_model_deepseek4::load_arch_hparams(llama_model_loader & ml) {
     ml.get_key(LLM_KV_NEXTN_PREDICT_LAYERS, hparams.n_layer_nextn, false);
     if (hparams.n_layer_nextn > 0 && hparams.n_layer_nextn < hparams.n_layer_all) {
@@ -612,7 +626,8 @@ ggml_tensor * llama_model_deepseek4::graph::build_lid_top_k(
         ggml_tensor * cur,
         ggml_tensor * inp_pos,
         int il) const {
-    const auto & layer = model.layers[il];
+    const auto & layer = ds4_front_slab_layer(
+            model, cparams, il, n_tokens == 1 || cparams.expert_cache.prefill);
     const auto & inp_lid = inp_dsv4->get_lid();
     const int64_t n_embd_indexer_head      = hparams.indexer_head_size;
     const int64_t n_embd_indexer_head_rope = hparams.n_rot();
@@ -910,7 +925,8 @@ ggml_tensor * llama_model_deepseek4::graph::build_attention_impl(
         int il) const {
     GGML_ASSERT((inp_dsv4 == nullptr) != (inp_mtp == nullptr));
 
-    const auto & layer = model.layers[il];
+    const auto & layer = ds4_front_slab_layer(
+            model, cparams, il, n_tokens == 1 || cparams.expert_cache.prefill);
     llm_graph_input_dsv4_raw * inp_attn = inp_dsv4 ? inp_dsv4->get_raw() : nullptr;
 
     const int64_t n_embd_head      = hparams.n_embd_head_k();
@@ -1288,6 +1304,9 @@ llama_model_deepseek4::graph::graph(const llama_model & model, const llm_graph_p
     cb(inpL, "hc_init", -1);
 
     for (int il = 0; il < n_layer; ++il) {
+        const auto & front_layer = ds4_front_slab_layer(
+                model, cparams, il, n_tokens == 1 || cparams.expert_cache.prefill);
+
         if ((size_t) il < cparams.embeddings_layer_inp.size() && cparams.embeddings_layer_inp[il]) {
             res->t_layer_inp[il] = dsv4_hc_mean(ctx0, inpL);
             cb(res->t_layer_inp[il], "layer_inp", il);
@@ -1299,13 +1318,13 @@ llama_model_deepseek4::graph::graph(const llama_model & model, const llm_graph_p
         ggml_tensor * comb = nullptr;
 
         cur = build_hc_pre(inpL,
-                model.layers[il].hc_attn_fn,
-                model.layers[il].hc_attn_scale,
-                model.layers[il].hc_attn_base,
+                front_layer.hc_attn_fn,
+                front_layer.hc_attn_scale,
+                front_layer.hc_attn_base,
                 &post, &comb, il);
         cb(cur, "hc_attn_pre", il);
 
-        cur = build_norm(cur, model.layers[il].attn_norm, nullptr, LLM_NORM_RMS, il);
+        cur = build_norm(cur, front_layer.attn_norm, nullptr, LLM_NORM_RMS, il);
         cb(cur, "attn_norm", il);
 
         cur = build_attention(model, inp_dsv4, cur, inp_pos, il);

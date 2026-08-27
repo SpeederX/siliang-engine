@@ -85,8 +85,6 @@
 | `-dr, --docker-repo [<repo>/]<model>[:quant]` | Docker Hub model repository. repo is optional, default to ai/. quant is optional, default to :latest.<br/>example: gemma3<br/>(default: unused)<br/>(env: LLAMA_ARG_DOCKER_REPO) |
 | `-hf, -hfr, --hf-repo <user>/<model>[:quant]` | Hugging Face model repository; quant is optional, case-insensitive, default to Q4_K_M, or falls back to the first file in the repo if Q4_K_M doesn't exist.<br/>mmproj is also downloaded automatically if available. to disable, add --no-mmproj<br/>example: ggml-org/GLM-4.7-Flash-GGUF:Q4_K_M<br/>(default: unused)<br/>(env: LLAMA_ARG_HF_REPO) |
 | `-hff, --hf-file FILE` | Hugging Face model file. If specified, it will override the quant in --hf-repo (default: unused)<br/>(env: LLAMA_ARG_HF_FILE) |
-| `-hfv, -hfrv, --hf-repo-v <user>/<model>[:quant]` | Hugging Face model repository for the vocoder model (default: unused)<br/>(env: LLAMA_ARG_HF_REPO_V) |
-| `-hffv, --hf-file-v FILE` | Hugging Face model file for the vocoder model (default: unused)<br/>(env: LLAMA_ARG_HF_FILE_V) |
 | `-hft, --hf-token TOKEN` | Hugging Face access token (default: value from HF_TOKEN environment variable)<br/>(env: HF_TOKEN) |
 | `--log-disable` | Log disable |
 | `--log-file FNAME` | Log to file<br/>(env: LLAMA_ARG_LOG_FILE) |
@@ -167,6 +165,17 @@
 | `--image, --audio, --video FILE` | path to an image, audio, or video file. use with multimodal models, use comma-separated values for multiple files |
 | `--image-min-tokens N` | minimum number of tokens each image can take, only used by vision models with dynamic resolution (default: read from model)<br/>(env: LLAMA_ARG_IMAGE_MIN_TOKENS) |
 | `--image-max-tokens N` | maximum number of tokens each image can take, only used by vision models with dynamic resolution (default: read from model)<br/>(env: LLAMA_ARG_IMAGE_MAX_TOKENS) |
+| `--expert-cache, --no-expert-cache` | enable the expert cache arena configuration (default: disabled) |
+| `--expert-cache-l2-mib N` | L2 expert cache capacity in MiB (default: 0) |
+| `--expert-cache-l2-policy {lru,lfu,wtinylfu,wtinylfu-w10-slru-p80}` | L2 eviction policy; wtinylfu is W-TinyLFU W10/SLRU-P80 (default: lru) |
+| `--expert-cache-l1-k N` | total persistent CUDA L1 policy budget K; heterogeneous models partition K across routed layers; incompatible with LoRA adapters (default: 0) |
+| `--expert-cache-exchange-r N` | exchange slots R per schema arena; requires K > 0 (default: 0) |
+| `--expert-cache-elevator-p N` | global pinned-host elevator slots P, sized to the largest expert schema; requires K > 0 (default: 0) |
+| `--expert-cache-l1-policy {lru,lfu,cumulative-lfu,wtinylfu,wtinylfu-w10-slru-p80}` | L1 policy; lfu is always-admit and resets its hit count on admission, cumulative-lfu uses lifetime-frequency admission/bypass, and wtinylfu is W-TinyLFU W10/SLRU-P80 (default: lru) |
+| `--expert-cache-roll {off,deepseek4}` | rolling cache mode; deepseek4 is architecture-specific (default: off) |
+| `--expert-cache-prefill, --no-expert-cache-prefill` | enable bounded DeepSeek-V4 batch-union prefill in the CUDA K arena; the ubatch route union must fit K (experimental, default: disabled) |
+| `--expert-cache-memory-report, --no-expert-cache-memory-report` | enable periodic expert-cache memory reporting (default: enabled) |
+| `--expert-cache-deferred-wait, --no-expert-cache-deferred-wait` | allow deferred L2 I/O waits (default: enabled) |
 | `-o, --output, --output-file FNAME` | output file (default: '') |
 | `--chat-template-kwargs STRING` | sets additional params for the json template parser, must be a valid json object string, e.g. '{"key1":"value1","key2":"value2"}'<br/>(env: LLAMA_ARG_CHAT_TEMPLATE_KWARGS) |
 | `--jinja, --no-jinja` | whether to use jinja template engine for chat (default: enabled)<br/>(env: LLAMA_ARG_JINJA) |

@@ -1,6 +1,7 @@
 #include "llama-context.h"
 
 #include "ggml.h"
+#include "ggml-cpu.h"
 #include "llama-arch.h"
 #include "llama-graph.h"
 #include "llama-impl.h"
@@ -95,6 +96,72 @@ llama_context::llama_context(
 
     const auto & hparams = model.hparams;
 
+    const auto & expert_cache = params.expert_cache;
+    const auto valid_l2_policy = [](llama_siliang_expert_cache_policy policy) {
+        return policy == LLAMA_SILIANG_EXPERT_CACHE_POLICY_LRU ||
+               policy == LLAMA_SILIANG_EXPERT_CACHE_POLICY_LFU ||
+               policy == LLAMA_SILIANG_EXPERT_CACHE_POLICY_WTINYLFU_W10_SLRU_P80;
+    };
+    const bool valid_l1_policy = valid_l2_policy(expert_cache.l1_policy) ||
+        expert_cache.l1_policy == LLAMA_SILIANG_EXPERT_CACHE_POLICY_CUMULATIVE_LFU_ADMISSION;
+    if (!valid_l1_policy || !valid_l2_policy(expert_cache.l2_policy)) {
+        throw std::runtime_error("invalid Siliang expert-cache policy");
+    }
+    if (expert_cache.prefill && (!expert_cache.enabled || expert_cache.l1_k == 0)) {
+        throw std::runtime_error("Siliang expert-cache prefill requires an enabled L1 K arena");
+    }
+    if (expert_cache.enabled) {
+        const uint32_t top_k = hparams.n_expert_used;
+        if ((expert_cache.l2_bytes == 0 && expert_cache.l1_k == 0) || top_k == 0) {
+            throw std::runtime_error("Siliang expert cache requires a routed MoE model and a nonzero tier");
+        }
+        if (expert_cache.l2_bytes % (1024 * 1024) != 0 ||
+            expert_cache.l2_bytes / (1024 * 1024) > std::numeric_limits<uint32_t>::max()) {
+            throw std::runtime_error("Siliang L2 capacity must be an exact 32-bit MiB value");
+        }
+        if (expert_cache.l1_k == 0) {
+            if (expert_cache.exchange_r != 0 || expert_cache.elevator_p != 0 ||
+                expert_cache.roll != LLAMA_SILIANG_EXPERT_CACHE_ROLL_NONE) {
+                throw std::runtime_error("Siliang L1 exchange/elevator/roll requires a nonzero L1 K");
+            }
+        } else {
+            if (expert_cache.l1_k < top_k || expert_cache.exchange_r < 2 * top_k ||
+                expert_cache.elevator_p < 2 * top_k || expert_cache.exchange_r % top_k != 0 ||
+                expert_cache.elevator_p % top_k != 0) {
+                throw std::runtime_error("Siliang L1 K/R/P is incompatible with the model top-k");
+            }
+            if (params.n_seq_max > 1 || params.ctx_type != LLAMA_CONTEXT_TYPE_DEFAULT ||
+                params.ctx_other != nullptr || params.n_rs_seq > 0) {
+                throw std::runtime_error("Siliang L1 K/R/P requires a serial, non-speculative context");
+            }
+        }
+        if (expert_cache.roll == LLAMA_SILIANG_EXPERT_CACHE_ROLL_DEEPSEEK4 &&
+            (model.arch != LLM_ARCH_DEEPSEEK4 || hparams.n_layer() != 43 ||
+             hparams.n_expert != 256 || top_k != 6)) {
+            throw std::runtime_error("Siliang DeepSeek4 rolling requires the validated 43-layer, 256-expert, top-k-6 architecture");
+        }
+        if (expert_cache.prefill) {
+            const uint32_t configured_ubatch = std::min(
+                    params.n_batch, params.n_ubatch == 0 ? params.n_batch : params.n_ubatch);
+            const uint64_t maximum_route_union = std::min<uint64_t>(
+                    static_cast<uint64_t>(configured_ubatch) * static_cast<uint64_t>(top_k),
+                    hparams.n_expert);
+            if (model.arch != LLM_ARCH_DEEPSEEK4 || hparams.n_layer() != 43 ||
+                hparams.n_layer_nextn != 0 || hparams.n_expert != 256 || top_k != 6) {
+                throw std::runtime_error(
+                        "Siliang expert-cache prefill requires the exact 43-layer, 256-expert, top-k-6 DeepSeek4 architecture");
+            }
+            if (configured_ubatch == 0 || maximum_route_union > expert_cache.l1_k) {
+                throw std::runtime_error(
+                        "Siliang expert-cache prefill requires min(n_ubatch * top-k, expert-count) <= L1 K");
+            }
+        }
+        LLAMA_LOG_INFO("%s: Siliang expert cache enabled: L2=%" PRIu64 " MiB K=%u R=%u P=%u roll=%d prefill=%d\n",
+                __func__, expert_cache.l2_bytes / (1024 * 1024), expert_cache.l1_k,
+                expert_cache.exchange_r, expert_cache.elevator_p, static_cast<int>(expert_cache.roll),
+                expert_cache.prefill ? 1 : 0);
+    }
+
     cparams.n_seq_max = std::max(1u, params.n_seq_max);
     if (cparams.n_seq_max > LLAMA_MAX_SEQ) {
         throw std::runtime_error("n_seq_max must be <= " + std::to_string(LLAMA_MAX_SEQ));
@@ -137,6 +204,14 @@ llama_context::llama_context(
 
     cparams.cb_eval           = params.cb_eval;
     cparams.cb_eval_user_data = params.cb_eval_user_data;
+
+    cparams.expert_cache = params.expert_cache;
+    cparams.siliang_moe_arena_state = &siliang_moe_arena_state;
+    cparams.siliang_moe_arena_generation = 0;
+    cparams.siliang_moe_arena_enabled = false;
+    cparams.siliang_ds4_front_slab_layers.fill(nullptr);
+    cparams.siliang_ds4_front_slab_generation = 0;
+    cparams.siliang_ds4_front_slab_enabled = false;
 
     cparams.ctx_other = nullptr;
 
@@ -351,6 +426,56 @@ llama_context::llama_context(
             throw std::runtime_error("failed to initialize CPU backend");
         }
         backends.emplace_back(backend_cpu);
+
+        if (cparams.expert_cache.enabled && cparams.expert_cache.l2_bytes > 0) {
+            const auto & source = model.siliang_expert_source;
+            if (!source.valid() || source.kind == llama_siliang_expert_source_kind::none) {
+                throw std::runtime_error("Siliang L2 requires a supported model-owned expert source");
+            }
+
+            ggml_siliangem_cache_config config = {};
+            config.struct_size = sizeof(config);
+            config.enabled = 1;
+            config.capacity_mib = static_cast<uint32_t>(cparams.expert_cache.l2_bytes / (1024 * 1024));
+            switch (cparams.expert_cache.l2_policy) {
+                case LLAMA_SILIANG_EXPERT_CACHE_POLICY_LRU:
+                    config.policy = GGML_SILIANGEM_CACHE_POLICY_LRU;
+                    break;
+                case LLAMA_SILIANG_EXPERT_CACHE_POLICY_LFU:
+                    config.policy = GGML_SILIANGEM_CACHE_POLICY_LFU;
+                    break;
+                case LLAMA_SILIANG_EXPERT_CACHE_POLICY_WTINYLFU_W10_SLRU_P80:
+                    config.policy = GGML_SILIANGEM_CACHE_POLICY_WTINYLFU_W10_SLRU_P80;
+                    break;
+                case LLAMA_SILIANG_EXPERT_CACHE_POLICY_CUMULATIVE_LFU_ADMISSION:
+                    throw std::runtime_error("Siliang cumulative LFU admission is valid only for L1");
+            }
+            config.deferred_io = cparams.expert_cache.deferred_wait ? 1 : 0;
+            config.verbose = cparams.expert_cache.memory_report ? 1 : 0;
+            config.memory_report = cparams.expert_cache.memory_report ? 1 : 0;
+            config.mmap_prefetch = 0;
+
+            ggml_siliangem_source_desc source_desc = {};
+            source_desc.struct_size = sizeof(source_desc);
+            source_desc.kind = source.kind == llama_siliang_expert_source_kind::expert_major ?
+                GGML_SILIANGEM_SOURCE_EXPERT_MAJOR : GGML_SILIANGEM_SOURCE_SCATTERED;
+            source_desc.path = source.path.c_str();
+            source_desc.n_layers = source.n_layers;
+            source_desc.n_experts = source.n_experts;
+            source_desc.n_parts = source.n_parts;
+            source_desc.base = source.base.data();
+            source_desc.stride = source.stride.data();
+            source_desc.part_offset = source.part_offset.empty() ? nullptr : source.part_offset.data();
+            source_desc.part_bytes = source.part_bytes.empty() ? nullptr : source.part_bytes.data();
+            source_desc.part_names = source.part_names.c_str();
+
+            ggml_backend_reg_t cpu_reg = ggml_backend_dev_backend_reg(ggml_backend_get_device(backend_cpu));
+            auto configure = reinterpret_cast<decltype(&ggml_backend_cpu_siliangem_configure)>(
+                    ggml_backend_reg_get_proc_address(cpu_reg, "ggml_backend_cpu_siliangem_configure"));
+            if (!configure || !configure(backend_cpu, &config, &source_desc)) {
+                throw std::runtime_error("failed to configure the context-owned Siliang L2 expert cache");
+            }
+        }
 
         // create a list of the set_n_threads functions in the backends
         for (auto & backend : backends) {
@@ -667,6 +792,11 @@ void llama_context::sched_reserve() {
         }
     }
 
+    if (siliang_ds4_front_slab_observer) {
+        ggml_backend_sched_set_split_observer(
+                sched.get(), siliang_ds4_front_slab_observer, siliang_ds4_front_slab_observer_user_data);
+    }
+
     for (size_t i = 0; i < backend_ptrs.size(); ++i) {
         ggml_backend_t             backend = backend_ptrs[i];
         ggml_backend_buffer_type_t buft    = backend_buft[i];
@@ -840,6 +970,505 @@ float * llama_context::get_logits() {
     output_reorder();
 
     return logits.data;
+}
+
+static bool siliang_moe_route_shape(
+        const llama_model & model,
+        int32_t & layer_count,
+        int32_t & routed_layer_count,
+        int32_t & expert_count,
+        int32_t & top_k,
+        std::vector<int32_t> * routed_layers) {
+    if (model.layers.size() > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
+        return false;
+    }
+
+    layer_count = static_cast<int32_t>(model.layers.size());
+    routed_layer_count = 0;
+    expert_count = 0;
+    top_k = static_cast<int32_t>(model.hparams.n_expert_used);
+    if (top_k <= 0) {
+        return false;
+    }
+
+    if (routed_layers) {
+        routed_layers->clear();
+    }
+    for (int32_t layer = 0; layer < layer_count; ++layer) {
+        const ggml_tensor * gate = model.layers[layer].ffn_gate_inp;
+        if (!gate) {
+            continue;
+        }
+        if (gate->ne[1] <= 0 || gate->ne[1] > std::numeric_limits<int32_t>::max()) {
+            return false;
+        }
+        const int32_t layer_expert_count = static_cast<int32_t>(gate->ne[1]);
+        if (expert_count == 0) {
+            expert_count = layer_expert_count;
+        } else if (expert_count != layer_expert_count) {
+            return false;
+        }
+        ++routed_layer_count;
+        if (routed_layers) {
+            routed_layers->push_back(layer);
+        }
+    }
+
+    return routed_layer_count > 0 && expert_count >= top_k;
+}
+
+static bool siliang_moe_arena_fill_layer_info(
+        const llama_model & model,
+        int32_t layer_index,
+        llama_siliang_moe_arena_layer_info & info) {
+    if (layer_index < 0 || static_cast<size_t>(layer_index) >= model.layers.size()) {
+        return false;
+    }
+    const llama_layer & layer = model.layers[static_cast<size_t>(layer_index)];
+    if (!layer.ffn_gate_inp || layer.ffn_gate_inp->ne[1] <= 0 ||
+        layer.ffn_gate_inp->ne[1] > std::numeric_limits<int32_t>::max()) {
+        return false;
+    }
+
+    std::memset(&info, 0, sizeof(info));
+    info.layer = layer_index;
+    info.expert_count = static_cast<int32_t>(layer.ffn_gate_inp->ne[1]);
+
+    auto add = [&](llama_siliang_moe_arena_part_role role, const ggml_tensor * tensor, int32_t expert_axis) {
+        if (!tensor) {
+            return true;
+        }
+        if (info.part_count >= LLAMA_SILIANG_MOE_ARENA_PART_ROLE_COUNT || expert_axis < 0 || expert_axis > 2 ||
+            tensor->ne[expert_axis] != info.expert_count || tensor->nb[expert_axis] == 0) {
+            return false;
+        }
+
+        size_t bytes = 0;
+        if (expert_axis == 2) {
+            if (tensor->ne[1] <= 0 || tensor->nb[1] >
+                    std::numeric_limits<size_t>::max() / static_cast<size_t>(tensor->ne[1])) {
+                return false;
+            }
+            bytes = tensor->nb[1] * static_cast<size_t>(tensor->ne[1]);
+        } else if (expert_axis == 1) {
+            bytes = tensor->nb[1];
+        } else {
+            bytes = tensor->nb[0];
+        }
+        if (bytes == 0 || bytes > tensor->nb[expert_axis] ||
+            static_cast<size_t>(info.expert_count - 1) >
+                (std::numeric_limits<size_t>::max() - bytes) / tensor->nb[expert_axis] ||
+            static_cast<size_t>(info.expert_count - 1) * tensor->nb[expert_axis] + bytes > ggml_nbytes(tensor)) {
+            return false;
+        }
+
+        auto & part = info.parts[info.part_count++];
+        part.role = role;
+        part.source = tensor;
+        part.type = tensor->type;
+        part.expert_axis = expert_axis;
+        for (int dim = 0; dim < 4; ++dim) {
+            part.ne[dim] = tensor->ne[dim];
+            part.nb[dim] = tensor->nb[dim];
+        }
+        part.bytes_per_expert = bytes;
+        part.source_expert_stride = tensor->nb[expert_axis];
+        return true;
+    };
+
+    return add(LLAMA_SILIANG_MOE_ARENA_GATE_WEIGHT, layer.ffn_gate_exps, 2) &&
+           add(LLAMA_SILIANG_MOE_ARENA_UP_WEIGHT, layer.ffn_up_exps, 2) &&
+           add(LLAMA_SILIANG_MOE_ARENA_DOWN_WEIGHT, layer.ffn_down_exps, 2) &&
+           add(LLAMA_SILIANG_MOE_ARENA_GATE_UP_WEIGHT, layer.ffn_gate_up_exps, 2) &&
+           add(LLAMA_SILIANG_MOE_ARENA_GATE_BIAS, layer.ffn_gate_exps_b, 1) &&
+           add(LLAMA_SILIANG_MOE_ARENA_UP_BIAS, layer.ffn_up_exps_b, 1) &&
+           add(LLAMA_SILIANG_MOE_ARENA_DOWN_BIAS, layer.ffn_down_exps_b, 1) &&
+           add(LLAMA_SILIANG_MOE_ARENA_GATE_UP_BIAS, layer.ffn_gate_up_exps_b, 1) &&
+           add(LLAMA_SILIANG_MOE_ARENA_GATE_SCALE, layer.ffn_gate_exps_s, 0) &&
+           add(LLAMA_SILIANG_MOE_ARENA_UP_SCALE, layer.ffn_up_exps_s, 0) &&
+           add(LLAMA_SILIANG_MOE_ARENA_DOWN_SCALE, layer.ffn_down_exps_s, 0) &&
+           info.part_count > 0;
+}
+
+static bool siliang_moe_arena_schema_equal(
+        const llama_siliang_moe_arena_layer_info & lhs,
+        const llama_siliang_moe_arena_layer_info & rhs) {
+    if (lhs.expert_count != rhs.expert_count || lhs.part_count != rhs.part_count) {
+        return false;
+    }
+    for (size_t index = 0; index < lhs.part_count; ++index) {
+        const auto & a = lhs.parts[index];
+        const auto & b = rhs.parts[index];
+        if (a.role != b.role || a.type != b.type || a.expert_axis != b.expert_axis ||
+            a.bytes_per_expert != b.bytes_per_expert) {
+            return false;
+        }
+        for (int dim = 0; dim < 4; ++dim) {
+            if (dim != a.expert_axis && a.ne[dim] != b.ne[dim]) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+static bool siliang_moe_arena_get_model_info_impl(
+        const llama_model & model,
+        llama_siliang_moe_arena_model_info & info) {
+    int32_t layer_count = 0;
+    int32_t routed_layer_count = 0;
+    int32_t expert_count = 0;
+    int32_t top_k = 0;
+    std::vector<int32_t> routed_layers;
+    if (!siliang_moe_route_shape(
+            model, layer_count, routed_layer_count, expert_count, top_k, &routed_layers)) {
+        return false;
+    }
+
+    bool homogeneous = true;
+    llama_siliang_moe_arena_layer_info first = {};
+    if (!siliang_moe_arena_fill_layer_info(model, routed_layers.front(), first)) {
+        return false;
+    }
+    for (size_t index = 1; index < routed_layers.size(); ++index) {
+        llama_siliang_moe_arena_layer_info current = {};
+        if (!siliang_moe_arena_fill_layer_info(model, routed_layers[index], current)) {
+            return false;
+        }
+        homogeneous = homogeneous && siliang_moe_arena_schema_equal(first, current);
+    }
+
+    info.layer_count = layer_count;
+    info.routed_layer_count = routed_layer_count;
+    info.expert_count = expert_count;
+    info.top_k = top_k;
+    info.homogeneous_schema = homogeneous ? 1 : 0;
+    return true;
+}
+
+ggml_backend_t llama_context::siliang_cuda_backend() {
+    for (ggml_backend_t backend : backend_ptrs) {
+        ggml_backend_dev_t device = backend ? ggml_backend_get_device(backend) : nullptr;
+        ggml_backend_reg_t reg = device ? ggml_backend_dev_backend_reg(device) : nullptr;
+        if (reg && ggml_backend_reg_get_proc_address(reg, "ggml_backend_cuda_siliang_h2d_async")) {
+            return backend;
+        }
+    }
+    return nullptr;
+}
+
+bool llama_context::siliang_moe_arena_lora_compatible() const {
+    return cparams.expert_cache.l1_k == 0 && !cparams.siliang_moe_arena_enabled;
+}
+
+bool llama_context::siliang_moe_arena_bind(
+        const int32_t * managed_layers,
+        size_t managed_layer_count,
+        const llama_siliang_moe_arena_part_binding * parts,
+        size_t part_count,
+        uint32_t capacity,
+        llama_siliang_moe_arena_slot_mapper mapper,
+        llama_siliang_moe_arena_failure_query failure_query,
+        void * user_data) {
+    llama_siliang_moe_arena_model_info model_info = {};
+    if (!managed_layers || managed_layer_count == 0 || !parts || part_count == 0 ||
+        managed_layer_count > std::numeric_limits<size_t>::max() / LLAMA_SILIANG_MOE_ARENA_PART_ROLE_COUNT ||
+        part_count > managed_layer_count * LLAMA_SILIANG_MOE_ARENA_PART_ROLE_COUNT ||
+        capacity == 0 || !mapper || !siliang_moe_arena_get_model_info_impl(model, model_info) ||
+        capacity < static_cast<uint32_t>(model_info.top_k) ||
+        cparams.siliang_moe_arena_state != &siliang_moe_arena_state || !siliang_cuda_backend() ||
+        !loras || !loras->empty()) {
+        return false;
+    }
+    const uint64_t prefill_route_capacity = std::min<uint64_t>(
+            static_cast<uint64_t>(cparams.n_ubatch) * static_cast<uint64_t>(model_info.top_k),
+            static_cast<uint64_t>(model_info.expert_count));
+    if (cparams.expert_cache.prefill &&
+        (model.arch != LLM_ARCH_DEEPSEEK4 || model_info.layer_count != 43 ||
+         model_info.routed_layer_count != 43 || model_info.expert_count != 256 ||
+         model_info.top_k != 6 || !model_info.homogeneous_schema || cparams.n_ubatch == 0 ||
+         prefill_route_capacity > cparams.expert_cache.l1_k)) {
+        return false;
+    }
+
+    ggml_backend_t cuda = siliang_cuda_backend();
+    ggml_backend_buffer_type_t cuda_buft = ggml_backend_get_default_buffer_type(cuda);
+    std::vector<uint8_t> managed(model.layers.size(), 0);
+    std::vector<uint32_t> physical_slot_first(model.layers.size(), 0);
+    std::vector<uint32_t> physical_slot_count(model.layers.size(), 0);
+    std::vector<uint32_t> exchange_slot_first(model.layers.size(), 0);
+    std::vector<uint32_t> exchange_slot_count(model.layers.size(), 0);
+    std::vector<uint32_t> arena_slot_capacity(model.layers.size(), 0);
+
+    for (size_t index = 0; index < managed_layer_count; ++index) {
+        const int32_t layer = managed_layers[index];
+        llama_siliang_moe_arena_layer_info current = {};
+        if (layer < 0 || static_cast<size_t>(layer) >= managed.size() || managed[layer] ||
+            !siliang_moe_arena_fill_layer_info(model, layer, current) ||
+            current.expert_count != model_info.expert_count) {
+            return false;
+        }
+        managed[layer] = 1;
+    }
+
+    std::vector<std::array<ggml_tensor *, LLAMA_SILIANG_MOE_ARENA_PART_ROLE_COUNT>> bound(model.layers.size());
+    for (size_t index = 0; index < part_count; ++index) {
+        const int32_t layer = parts[index].layer;
+        const int role = static_cast<int>(parts[index].role);
+        ggml_tensor * arena = parts[index].arena;
+        const uint32_t physical_capacity = parts[index].arena_slot_capacity ?
+            parts[index].arena_slot_capacity : capacity;
+        const uint32_t physical_count = parts[index].layer_slot_count ?
+            parts[index].layer_slot_count : capacity;
+        const uint32_t physical_first = parts[index].layer_slot_count ?
+            parts[index].layer_slot_first : 0;
+        const uint32_t exchange_first = parts[index].exchange_slot_first;
+        const uint32_t exchange_count = parts[index].exchange_slot_count;
+        const uint64_t physical_last = static_cast<uint64_t>(physical_first) + physical_count;
+        const uint64_t exchange_last = static_cast<uint64_t>(exchange_first) + exchange_count;
+        if (layer < 0 || static_cast<size_t>(layer) >= bound.size() || !managed[layer] ||
+            role < 0 || role >= LLAMA_SILIANG_MOE_ARENA_PART_ROLE_COUNT || bound[layer][role] ||
+            !arena || !arena->buffer || ggml_backend_buffer_is_host(arena->buffer) ||
+            ggml_backend_buffer_get_type(arena->buffer) != cuda_buft || !physical_capacity || !physical_count ||
+            !exchange_count || physical_first > physical_capacity ||
+            physical_count > physical_capacity - physical_first || exchange_first > physical_capacity ||
+            exchange_count > physical_capacity - exchange_first ||
+            !(physical_last <= exchange_first || exchange_last <= physical_first)) {
+            return false;
+        }
+        if (arena_slot_capacity[layer] == 0) {
+            arena_slot_capacity[layer] = physical_capacity;
+            physical_slot_first[layer] = physical_first;
+            physical_slot_count[layer] = physical_count;
+            exchange_slot_first[layer] = exchange_first;
+            exchange_slot_count[layer] = exchange_count;
+        } else if (arena_slot_capacity[layer] != physical_capacity ||
+                   physical_slot_first[layer] != physical_first ||
+                   physical_slot_count[layer] != physical_count ||
+                   exchange_slot_first[layer] != exchange_first ||
+                   exchange_slot_count[layer] != exchange_count) {
+            return false;
+        }
+        bound[layer][role] = arena;
+    }
+
+    for (size_t layer = 0; layer < managed.size(); ++layer) {
+        if (!managed[layer]) {
+            continue;
+        }
+        llama_siliang_moe_arena_layer_info current = {};
+        if (!arena_slot_capacity[layer] || !physical_slot_count[layer] || !exchange_slot_count[layer] ||
+            (cparams.expert_cache.prefill && prefill_route_capacity > physical_slot_count[layer]) ||
+            !siliang_moe_arena_fill_layer_info(model, static_cast<int32_t>(layer), current)) {
+            return false;
+        }
+        std::array<uint8_t, LLAMA_SILIANG_MOE_ARENA_PART_ROLE_COUNT> expected_roles = {};
+        for (size_t index = 0; index < current.part_count; ++index) {
+            const auto & expected = current.parts[index];
+            const int role = static_cast<int>(expected.role);
+            if (role < 0 || role >= LLAMA_SILIANG_MOE_ARENA_PART_ROLE_COUNT || expected_roles[role]) {
+                return false;
+            }
+            ggml_tensor * arena = bound[layer][role];
+            if (!arena || arena->type != expected.type || arena->nb[0] != expected.nb[0]) {
+                return false;
+            }
+            expected_roles[role] = 1;
+            if (expected.expert_axis == 2) {
+                if (arena->ne[0] != expected.ne[0] || arena->ne[1] != expected.ne[1] ||
+                    arena->ne[2] != arena_slot_capacity[layer] || arena->ne[3] != 1 ||
+                    arena->nb[1] != expected.nb[1] || arena->nb[2] != expected.bytes_per_expert ||
+                    arena->nb[3] != static_cast<size_t>(arena_slot_capacity[layer]) * arena->nb[2]) {
+                    return false;
+                }
+            } else if (expected.expert_axis == 1) {
+                if (arena->ne[0] != expected.ne[0] || arena->ne[1] != arena_slot_capacity[layer] ||
+                    arena->ne[2] != 1 || arena->ne[3] != 1 || arena->nb[1] != expected.bytes_per_expert ||
+                    arena->nb[2] != static_cast<size_t>(arena_slot_capacity[layer]) * arena->nb[1]) {
+                    return false;
+                }
+            } else if (expected.expert_axis == 0) {
+                if (arena->ne[0] != arena_slot_capacity[layer] || arena->ne[1] != 1 ||
+                    arena->ne[2] != 1 || arena->ne[3] != 1 || arena->nb[0] != expected.bytes_per_expert ||
+                    arena->nb[1] != static_cast<size_t>(arena_slot_capacity[layer]) * arena->nb[0]) {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+            const ggml_tensor * source = expected.source;
+            if (!source || !source->data || !source->buffer || !ggml_backend_buffer_is_host(source->buffer)) {
+                return false;
+            }
+        }
+        for (int role = 0; role < LLAMA_SILIANG_MOE_ARENA_PART_ROLE_COUNT; ++role) {
+            if ((bound[layer][role] != nullptr) != (expected_roles[role] != 0)) {
+                return false;
+            }
+        }
+    }
+
+    synchronize();
+    auto & state = siliang_moe_arena_state;
+    state.parts_by_layer = std::move(bound);
+    state.managed_layers = std::move(managed);
+    state.physical_slot_first_by_layer = std::move(physical_slot_first);
+    state.physical_slot_count_by_layer = std::move(physical_slot_count);
+    state.exchange_slot_first_by_layer = std::move(exchange_slot_first);
+    state.exchange_slot_count_by_layer = std::move(exchange_slot_count);
+    state.capacity = capacity;
+    state.expert_count = model_info.expert_count;
+    state.top_k = model_info.top_k;
+    state.prefill_enabled = cparams.expert_cache.prefill;
+    state.prefill_ubatch_cap = cparams.expert_cache.prefill ? cparams.n_ubatch : 1;
+    state.mapper = mapper;
+    state.failure_query = failure_query;
+    state.compute_wait_hook = nullptr;
+    state.user_data = user_data;
+    state.compute_wait_user_data = nullptr;
+    state.failure_code.store(0, std::memory_order_release);
+    state.map_calls.store(0, std::memory_order_release);
+    state.contract_failure_logged.store(false, std::memory_order_release);
+    ++state.generation;
+    ++cparams.siliang_moe_arena_generation;
+    state.map_calls_by_layer.resize(model.layers.size());
+    state.wait_calls_by_layer.clear();
+    for (size_t layer = 0; layer < model.layers.size(); ++layer) {
+        state.map_calls_by_layer[layer] = { &state, static_cast<int32_t>(layer), state.generation };
+    }
+    cparams.siliang_moe_arena_enabled = true;
+    return true;
+}
+
+bool llama_context::siliang_moe_arena_set_compute_wait(
+        llama_siliang_moe_arena_compute_wait_hook hook,
+        void * user_data) {
+    auto & state = siliang_moe_arena_state;
+    if (!cparams.siliang_moe_arena_enabled || cparams.siliang_moe_arena_state != &state ||
+        !state.mapper || ((hook == nullptr) != (user_data == nullptr))) {
+        return false;
+    }
+    synchronize();
+    ++state.generation;
+    ++cparams.siliang_moe_arena_generation;
+    state.compute_wait_hook = hook;
+    state.compute_wait_user_data = user_data;
+    state.map_calls_by_layer.resize(model.layers.size());
+    state.wait_calls_by_layer.resize(hook ? model.layers.size() : 0);
+    for (size_t layer = 0; layer < model.layers.size(); ++layer) {
+        state.map_calls_by_layer[layer] = { &state, static_cast<int32_t>(layer), state.generation };
+        if (hook) {
+            state.wait_calls_by_layer[layer] = { &state, static_cast<int32_t>(layer), state.generation };
+        }
+    }
+    return true;
+}
+
+void llama_context::siliang_moe_arena_clear() {
+    synchronize();
+    auto & state = siliang_moe_arena_state;
+    cparams.siliang_moe_arena_enabled = false;
+    ++cparams.siliang_moe_arena_generation;
+    ++state.generation;
+    state.parts_by_layer.clear();
+    state.managed_layers.clear();
+    state.physical_slot_first_by_layer.clear();
+    state.physical_slot_count_by_layer.clear();
+    state.exchange_slot_first_by_layer.clear();
+    state.exchange_slot_count_by_layer.clear();
+    state.map_calls_by_layer.clear();
+    state.wait_calls_by_layer.clear();
+    state.capacity = 0;
+    state.expert_count = 0;
+    state.top_k = 0;
+    state.prefill_ubatch_cap = 1;
+    state.prefill_enabled = false;
+    state.mapper = nullptr;
+    state.failure_query = nullptr;
+    state.compute_wait_hook = nullptr;
+    state.user_data = nullptr;
+    state.compute_wait_user_data = nullptr;
+    state.failure_code.store(0, std::memory_order_release);
+    state.map_calls.store(0, std::memory_order_release);
+    state.contract_failure_logged.store(false, std::memory_order_release);
+}
+
+int32_t llama_context::siliang_moe_arena_failure() const {
+    const auto & state = siliang_moe_arena_state;
+    const int32_t local = state.failure_code.load(std::memory_order_acquire);
+    if (local) {
+        return local;
+    }
+    return state.failure_query ? state.failure_query(state.user_data) : 0;
+}
+
+bool llama_context::siliang_moe_arena_metrics(uint64_t * generation, uint64_t * map_calls) const {
+    if (!generation || !map_calls || cparams.siliang_moe_arena_state != &siliang_moe_arena_state) {
+        return false;
+    }
+    *generation = siliang_moe_arena_state.generation;
+    *map_calls = siliang_moe_arena_state.map_calls.load(std::memory_order_acquire);
+    return true;
+}
+
+bool llama_context::siliang_ds4_front_slab_bind(
+        const void * const * alternate_layers,
+        size_t layer_count) {
+    if (model.arch != LLM_ARCH_DEEPSEEK4 || model.hparams.n_layer() != 43 ||
+        model.hparams.n_layer_nextn != 0 || model.hparams.n_expert != 256 ||
+        model.hparams.n_expert_used != 6 || cparams.pipeline_parallel ||
+        cparams.n_seq_max != 1 || cparams.siliang_ds4_front_slab_enabled ||
+        siliang_ds4_front_slab_observer != nullptr || alternate_layers == nullptr || layer_count != 43) {
+        return false;
+    }
+    for (size_t index = 0; index < layer_count; ++index) {
+        if (alternate_layers[index] == nullptr) {
+            return false;
+        }
+    }
+
+    synchronize();
+    for (size_t index = 0; index < layer_count; ++index) {
+        cparams.siliang_ds4_front_slab_layers[index] = alternate_layers[index];
+    }
+    ++cparams.siliang_ds4_front_slab_generation;
+    cparams.siliang_ds4_front_slab_enabled = true;
+
+    // Rebuild the scheduler and its cached graphs while every alternate descriptor is live.
+    sched_need_reserve = true;
+    sched_reserve();
+    return true;
+}
+
+bool llama_context::siliang_ds4_front_slab_set_observer(
+        ggml_backend_sched_split_observer_callback callback,
+        void * user_data) {
+    if ((callback == nullptr) != (user_data == nullptr) || sched == nullptr ||
+        (callback != nullptr && !cparams.siliang_ds4_front_slab_enabled)) {
+        return false;
+    }
+    siliang_ds4_front_slab_observer = callback;
+    siliang_ds4_front_slab_observer_user_data = user_data;
+    ggml_backend_sched_set_split_observer(sched.get(), callback, user_data);
+    return true;
+}
+
+void llama_context::siliang_ds4_front_slab_clear() {
+    if (!cparams.siliang_ds4_front_slab_enabled) {
+        return;
+    }
+
+    synchronize();
+    siliang_ds4_front_slab_observer = nullptr;
+    siliang_ds4_front_slab_observer_user_data = nullptr;
+    ggml_backend_sched_set_split_observer(sched.get(), nullptr, nullptr);
+    cparams.siliang_ds4_front_slab_enabled = false;
+    ++cparams.siliang_ds4_front_slab_generation;
+    cparams.siliang_ds4_front_slab_layers.fill(nullptr);
+
+    // Discard graphs that hold pointers into the caller-owned alternate descriptors.
+    sched_need_reserve = true;
+    sched_reserve();
 }
 
 int64_t llama_context::output_resolve_row(int32_t i) const {
@@ -2472,9 +3101,28 @@ ggml_status llama_context::graph_compute(
         set_n_threads_fn.second(set_n_threads_fn.first, n_threads);
     }
 
+    if (cparams.siliang_moe_arena_enabled) {
+        const int32_t failure = siliang_moe_arena_failure();
+        if (failure != 0) {
+            LLAMA_LOG_ERROR("%s: Siliang MoE arena failed before graph submission, code = %d\n", __func__, failure);
+            return GGML_STATUS_FAILED;
+        }
+    }
+
+    const bool siliang_custom_active = cparams.siliang_moe_arena_enabled || cparams.siliang_ds4_front_slab_enabled;
     auto status = ggml_backend_sched_graph_compute_async(sched.get(), gf);
     if (status != GGML_STATUS_SUCCESS) {
+        if (siliang_custom_active) {
+            ggml_backend_sched_synchronize(sched.get());
+        }
         LLAMA_LOG_ERROR("%s: ggml_backend_sched_graph_compute_async failed with error %d\n", __func__, status);
+    } else if (cparams.siliang_moe_arena_enabled) {
+        ggml_backend_sched_synchronize(sched.get());
+        const int32_t failure = siliang_moe_arena_failure();
+        if (failure != 0) {
+            LLAMA_LOG_ERROR("%s: Siliang MoE arena failed during graph execution, code = %d\n", __func__, failure);
+            status = GGML_STATUS_FAILED;
+        }
     }
 
     // fprintf(stderr, "splits: %d\n", ggml_backend_sched_get_n_splits(sched));
@@ -3480,6 +4128,79 @@ void llama_context::opt_epoch(
 // interface implementation
 //
 
+int llama_siliang_moe_arena_get_model_info(
+        const llama_model * model,
+        llama_siliang_moe_arena_model_info * info) {
+    return model && info && siliang_moe_arena_get_model_info_impl(*model, *info) ? 1 : 0;
+}
+
+int llama_siliang_moe_arena_get_layer_info(
+        const llama_model * model,
+        int32_t layer,
+        llama_siliang_moe_arena_layer_info * info) {
+    return model && info && siliang_moe_arena_fill_layer_info(*model, layer, *info) ? 1 : 0;
+}
+
+int llama_siliang_moe_arena_bind(
+        llama_context * ctx,
+        const int32_t * managed_layers,
+        size_t managed_layer_count,
+        const llama_siliang_moe_arena_part_binding * parts,
+        size_t part_count,
+        uint32_t capacity,
+        llama_siliang_moe_arena_slot_mapper mapper,
+        llama_siliang_moe_arena_failure_query failure_query,
+        void * user_data) {
+    return ctx && ctx->siliang_moe_arena_bind(
+            managed_layers, managed_layer_count, parts, part_count, capacity,
+            mapper, failure_query, user_data) ? 1 : 0;
+}
+
+int llama_siliang_moe_arena_set_compute_wait(
+        llama_context * ctx,
+        llama_siliang_moe_arena_compute_wait_hook hook,
+        void * user_data) {
+    return ctx && ctx->siliang_moe_arena_set_compute_wait(hook, user_data) ? 1 : 0;
+}
+
+void llama_siliang_moe_arena_clear(llama_context * ctx) {
+    if (ctx) {
+        ctx->siliang_moe_arena_clear();
+    }
+}
+
+int32_t llama_siliang_moe_arena_failure(const llama_context * ctx) {
+    return ctx ? ctx->siliang_moe_arena_failure() : -1;
+}
+
+int llama_siliang_moe_arena_metrics(
+        const llama_context * ctx,
+        uint64_t * generation,
+        uint64_t * map_calls) {
+    return ctx && ctx->siliang_moe_arena_metrics(generation, map_calls) ? 1 : 0;
+}
+
+ggml_backend_t llama_siliang_cuda_backend(llama_context * ctx) {
+    return ctx ? ctx->siliang_cuda_backend() : nullptr;
+}
+
+ggml_backend_t llama_siliang_cpu_backend(llama_context * ctx) {
+    return ctx ? ctx->siliang_cpu_backend() : nullptr;
+}
+
+int llama_siliang_ds4_front_slab_bind(
+        llama_context * ctx,
+        const void * const * alternate_layers,
+        size_t layer_count) {
+    return ctx && ctx->siliang_ds4_front_slab_bind(alternate_layers, layer_count) ? 1 : 0;
+}
+
+void llama_siliang_ds4_front_slab_clear(llama_context * ctx) {
+    if (ctx) {
+        ctx->siliang_ds4_front_slab_clear();
+    }
+}
+
 llama_context_params llama_context_default_params() {
     llama_context_params result = {
         /*.n_ctx                       =*/ 512,
@@ -3518,6 +4239,19 @@ llama_context_params llama_context_default_params() {
         /*.sampler                     =*/ nullptr,
         /*.n_sampler                   =*/ 0,
         /*.ctx_other                   =*/ nullptr,
+        /*.expert_cache                =*/ {
+            /*.l2_bytes      =*/ 0,
+            /*.l1_k          =*/ 0,
+            /*.exchange_r    =*/ 0,
+            /*.elevator_p    =*/ 0,
+            /*.l2_policy     =*/ LLAMA_SILIANG_EXPERT_CACHE_POLICY_LRU,
+            /*.l1_policy     =*/ LLAMA_SILIANG_EXPERT_CACHE_POLICY_LRU,
+            /*.roll          =*/ LLAMA_SILIANG_EXPERT_CACHE_ROLL_NONE,
+            /*.enabled       =*/ false,
+            /*.prefill       =*/ false,
+            /*.memory_report =*/ false,
+            /*.deferred_wait =*/ true,
+        },
     };
 
     return result;
@@ -3848,6 +4582,15 @@ int32_t llama_set_adapters_lora(
             float * scales) {
     if (adapters == nullptr || scales == nullptr) {
         GGML_ASSERT(n_adapters == 0 && "invalid llama_set_adapters_lora call");
+    }
+
+    bool has_nonzero_adapter = false;
+    for (size_t index = 0; index < n_adapters; ++index) {
+        has_nonzero_adapter = has_nonzero_adapter || scales[index] != 0.0f;
+    }
+    if (has_nonzero_adapter && !ctx->siliang_moe_arena_lora_compatible()) {
+        LLAMA_LOG_ERROR("%s: Siliang expert-cache L1 K/R/P does not support LoRA adapters\n", __func__);
+        return -1;
     }
 
     ctx->set_adapters_lora(adapters, n_adapters, scales);

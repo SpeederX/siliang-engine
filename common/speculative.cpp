@@ -2293,6 +2293,10 @@ common_params common_base_params_to_speculative(const common_params & params) {
     result.cache_type_v  = params_spec.cache_type_v;
     result.n_outputs_max = params.n_parallel;
 
+    // The target context owns the Siliang hierarchy. A draft or MTP context
+    // must not allocate a second L2 cache or K/R/P arena from copied params.
+    result.expert_cache = common_params_expert_cache {};
+
     return result;
 }
 

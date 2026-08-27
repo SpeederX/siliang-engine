@@ -22,6 +22,11 @@ extern "C" {
 
         // use only reference implementations
         bool use_ref;
+
+        // Opaque per-backend Siliang expert-cache state. The CPU backend sets
+        // this on plans it creates; direct ggml_graph_plan() callers leave it
+        // NULL and retain the stock, cache-disabled behavior.
+        struct ggml_siliangem_cache_state * siliangem_cache;
     };
 
     // numa strategies
@@ -80,42 +85,104 @@ extern "C" {
     // x86
     GGML_BACKEND_API int ggml_cpu_has_sse3       (void);
     GGML_BACKEND_API int ggml_cpu_has_ssse3      (void);
-    // Siliang Engine: publish an expert-major model as the expert source.
-    //
-    // An expert-major GGUF stores each layer's experts interleaved
-    // ([e0: gate|up|down|pad][e1: ...]) so one expert is one contiguous read.
-    // The model loader knows the per-layer file offsets and strides; passing
-    // them here lets the out-of-core expert cache read from the MODEL FILE
-    // itself rather than a separate repacked slab.
-    //
-    // Call before the first graph evaluation. Passing path == NULL disables it.
-    //   base    [n_layers]            absolute file offset of each packed region
-    //   stride  [n_layers]            bytes between consecutive experts
-    //   poff    [n_layers * n_parts]  byte offset of a part inside one expert
-    //   pbytes  [n_layers * n_parts]  logical size of that part
-    //   part_names  comma-separated, exactly as the file's siliangem.part_names
-    //               key spells them ("gate,up,down" or "gate_up,down"). The
-    //               cache matches tensor names against these; passing NULL or
-    //               "" keeps the gate/up/down default. Without it a fused
-    //               gate_up model parses as "not an expert" and silently falls
-    //               back to mmap.
-    GGML_BACKEND_API void ggml_siliangem_set_expert_source(
-            const char * path, int n_layers, int n_experts, int n_parts,
-            const uint64_t * base, const uint32_t * stride,
-            const uint32_t * poff, const uint32_t * pbytes,
-            const char * part_names);
+    // Siliang Engine managed host expert cache. All state belongs to one CPU
+    // backend. Configuration is explicit and default-disabled; no operator
+    // environment variables are read by this subsystem.
+    enum ggml_siliangem_cache_policy {
+        GGML_SILIANGEM_CACHE_POLICY_LRU = 0,
+        GGML_SILIANGEM_CACHE_POLICY_LFU = 1,
+        GGML_SILIANGEM_CACHE_POLICY_WTINYLFU_W10_SLRU_P80 = 2,
+    };
 
-    // Scattered variant: a STOCK GGUF, where an expert's gate/up/down live in
-    // three separate tensors rather than one packed region. `base` and
-    // `stride` are both n_layers*3 entries in (layer, part) order. A per-layer
-    // stride is required because quantization can change projection sizes.
-    //
-    // Lets the expert cache run on a model somebody downloaded, with no repack
-    // and no slab. The geometry is read straight out of the GGUF's own tensor
-    // directory by llama_model_loader, which already parses it.
-    GGML_BACKEND_API void ggml_siliangem_set_scattered_source(
-            const char * path, int n_layers, int n_experts,
-            const uint64_t * base, const uint32_t * stride);
+    enum ggml_siliangem_source_kind {
+        GGML_SILIANGEM_SOURCE_NONE = 0,
+        GGML_SILIANGEM_SOURCE_LEGACY_SLAB = 1,
+        GGML_SILIANGEM_SOURCE_EXPERT_MAJOR = 2,
+        GGML_SILIANGEM_SOURCE_SCATTERED = 3,
+    };
+
+    struct ggml_siliangem_cache_config {
+        size_t struct_size;
+        uint32_t enabled;
+        uint32_t capacity_mib;
+        enum ggml_siliangem_cache_policy policy;
+        uint32_t deferred_io;
+        uint32_t verbose;
+        uint32_t memory_report;
+        uint32_t mmap_prefetch;
+    };
+
+    // The configure call deep-copies this descriptor and every referenced
+    // array. For EXPERT_MAJOR, base/stride have n_layers elements and
+    // part_offset/part_bytes have n_layers*n_parts elements. For SCATTERED,
+    // base/stride have n_layers*n_parts elements. LEGACY_SLAB uses only path.
+    struct ggml_siliangem_source_desc {
+        size_t struct_size;
+        enum ggml_siliangem_source_kind kind;
+        const char * path;
+        uint32_t n_layers;
+        uint32_t n_experts;
+        uint32_t n_parts;
+        const uint64_t * base;
+        const uint32_t * stride;
+        const uint32_t * part_offset;
+        const uint32_t * part_bytes;
+        const char * part_names;
+    };
+
+    struct ggml_siliangem_cache_info {
+        size_t struct_size;
+        uint32_t configured;
+        uint32_t ready;
+        enum ggml_siliangem_cache_policy policy;
+        uint32_t capacity_slots;
+        uint32_t occupied_slots;
+        uint32_t pending_reads;
+        uint32_t n_layers;
+        uint32_t n_experts;
+        uint32_t expert_bytes;
+        uint32_t policy_window_slots;
+        uint32_t policy_protected_slots;
+        uint64_t hits;
+        uint64_t misses;
+        uint64_t bytes_read;
+        uint64_t wait_calls;
+        uint64_t wait_ns;
+        uint64_t policy_admissions;
+        uint64_t policy_evictions;
+        uint64_t policy_rejections;
+    };
+
+    // Configure/reset only while the backend is idle. Graph plans retain the
+    // backend-owned state object; cache state is never stored in a threadpool.
+    GGML_BACKEND_API int ggml_backend_cpu_siliangem_configure(
+            ggml_backend_t backend_cpu,
+            const struct ggml_siliangem_cache_config * config,
+            const struct ggml_siliangem_source_desc * source);
+    GGML_BACKEND_API void ggml_backend_cpu_siliangem_reset(ggml_backend_t backend_cpu);
+    GGML_BACKEND_API int ggml_backend_cpu_siliangem_query(
+            ggml_backend_t backend_cpu, struct ggml_siliangem_cache_info * info);
+
+    // K/P support. prepare_async returns expert ids ordered as resident hits
+    // first, followed by submitted misses. wait_experts must complete before
+    // copying a miss into a bounded pinned staging buffer.
+    GGML_BACKEND_API int ggml_backend_cpu_siliangem_prepare_experts(
+            ggml_backend_t backend_cpu, uint32_t layer,
+            const int32_t * experts, uint32_t expert_count);
+    GGML_BACKEND_API int ggml_backend_cpu_siliangem_prepare_experts_async(
+            ggml_backend_t backend_cpu, uint32_t layer,
+            const int32_t * experts, uint32_t expert_count,
+            int32_t * order, uint32_t order_capacity,
+            uint32_t * n_hits, uint32_t * n_misses, uint32_t * n_active);
+    GGML_BACKEND_API int ggml_backend_cpu_siliangem_wait_experts(ggml_backend_t backend_cpu);
+    GGML_BACKEND_API int ggml_backend_cpu_siliangem_copy_cached_part(
+            ggml_backend_t backend_cpu, uint32_t layer, uint32_t expert, uint32_t part,
+            void * destination, size_t destination_size);
+    GGML_BACKEND_API int ggml_backend_cpu_siliangem_release_cached_expert(
+            ggml_backend_t backend_cpu, uint32_t layer, uint32_t expert,
+            uint32_t * released_slot);
+    GGML_BACKEND_API int ggml_backend_cpu_siliangem_cache_occupancy(
+            ggml_backend_t backend_cpu, uint32_t * capacity_slots, uint32_t * occupied_slots);
 
     GGML_BACKEND_API int ggml_cpu_has_avx        (void);
     GGML_BACKEND_API int ggml_cpu_has_avx_vnni   (void);

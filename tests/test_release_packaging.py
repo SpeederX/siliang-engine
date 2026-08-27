@@ -6,12 +6,34 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "ci.yaml"
+PUBLISH_WORKFLOW = ROOT / ".github" / "workflows" / "release.yml"
 BUILD_SCRIPT = ROOT / "scripts" / "build.ps1"
 README = ROOT / "README.md"
 SCRIPTS_README = ROOT / "scripts" / "README.md"
 
 
 class ReleasePackagingContractTests(unittest.TestCase):
+    def test_v013_packages_ship_cli_configuration_without_environment_helper(self) -> None:
+        ci_text = WORKFLOW.read_text(encoding="utf-8")
+        publish_text = PUBLISH_WORKFLOW.read_text(encoding="utf-8")
+
+        self.assertIn('default: "v0.1.3"', publish_text)
+        for text in (ci_text, publish_text):
+            self.assertIn("'.\\docs\\CONFIGURATION.md'", text)
+            self.assertIn('$releaseNotesPath = ".\\docs\\releases\\$tag.md"', text)
+            self.assertIn("$releaseDocsTarget = Join-Path $docsTarget 'releases'", text)
+            self.assertIn("$releaseNotesPath -Destination $releaseDocsTarget", text)
+            self.assertNotIn("siliang-" + "env.ps1", text)
+            self.assertIn("llama-cli.exe", text)
+            self.assertIn("llama-server.exe", text)
+            self.assertIn("$requiredExpertCacheOptions", text)
+            self.assertIn("--expert-cache-l2-mib", text)
+            self.assertIn("--expert-cache-exchange-r", text)
+            self.assertIn("--expert-cache-roll", text)
+            self.assertIn("--expert-cache-memory-report", text)
+            self.assertIn("--expert-cache-deferred-wait", text)
+            self.assertIn("[regex]::IsMatch($helpText, $helpPattern)", text)
+
     def test_build_uses_portable_runtime_selected_cpu_variants(self) -> None:
         text = BUILD_SCRIPT.read_text(encoding="utf-8")
 

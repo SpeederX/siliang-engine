@@ -38,6 +38,10 @@ add_library(llama
             llama-quant.cpp
             llama-sampler.cpp
             llama-vocab.cpp
+            siliang-ds4-front-slab.cpp
+            siliang-ds4-front-slab.h
+            siliang-moe-runtime.cpp
+            siliang-moe-runtime.h
             unicode-data.cpp
             unicode.cpp
             unicode.h

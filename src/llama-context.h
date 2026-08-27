@@ -102,6 +102,33 @@ struct llama_context {
     const llama_token * get_sampled_candidates_ith(int32_t idx);
     size_t get_sampled_candidates_count(int32_t idx);
 
+    bool siliang_moe_arena_bind(
+            const int32_t * managed_layers,
+            size_t managed_layer_count,
+            const llama_siliang_moe_arena_part_binding * parts,
+            size_t part_count,
+            uint32_t capacity,
+            llama_siliang_moe_arena_slot_mapper mapper,
+            llama_siliang_moe_arena_failure_query failure_query,
+            void * user_data);
+    bool siliang_moe_arena_set_compute_wait(
+            llama_siliang_moe_arena_compute_wait_hook hook,
+            void * user_data);
+    void siliang_moe_arena_clear();
+    int32_t siliang_moe_arena_failure() const;
+    bool siliang_moe_arena_metrics(uint64_t * generation, uint64_t * map_calls) const;
+    bool siliang_moe_arena_lora_compatible() const;
+    ggml_backend_t siliang_cuda_backend();
+    ggml_backend_t siliang_cpu_backend() const { return backend_cpu; }
+
+    bool siliang_ds4_front_slab_bind(
+            const void * const * alternate_layers,
+            size_t layer_count);
+    bool siliang_ds4_front_slab_set_observer(
+            ggml_backend_sched_split_observer_callback callback,
+            void * user_data);
+    void siliang_ds4_front_slab_clear();
+
     void attach_threadpool(
             ggml_threadpool_t threadpool,
             ggml_threadpool_t threadpool_batch);
@@ -281,6 +308,8 @@ private:
 
     llama_cparams cparams;
 
+    llama_siliang_moe_arena_state siliang_moe_arena_state = {};
+
     llama_adapter_cvec_ptr  cvec;
     llama_adapter_loras_ptr loras;
 
@@ -344,6 +373,9 @@ private:
     ggml_backend_sched_ptr sched;
 
     bool sched_need_reserve = true;
+
+    ggml_backend_sched_split_observer_callback siliang_ds4_front_slab_observer = nullptr;
+    void * siliang_ds4_front_slab_observer_user_data = nullptr;
 
     ggml_backend_t backend_cpu = nullptr;
     std::vector<ggml_backend_ptr> backends;

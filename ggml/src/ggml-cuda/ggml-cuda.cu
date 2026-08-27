@@ -83,6 +83,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -743,6 +744,274 @@ static void ggml_backend_cuda_buffer_free_buffer(ggml_backend_buffer_t buffer) {
 
 static bool ggml_backend_buffer_is_cuda(ggml_backend_buffer_t buffer) {
     return buffer->iface.free_buffer == ggml_backend_cuda_buffer_free_buffer;
+}
+
+struct ggml_backend_cuda_siliang_stream {
+    cudaStream_t stream = nullptr;
+    int device = -1;
+};
+
+struct ggml_backend_cuda_siliang_event {
+    cudaEvent_t event = nullptr;
+    int device = -1;
+};
+
+static enum ggml_backend_cuda_siliang_status ggml_backend_cuda_siliang_get_context(
+        ggml_backend_t backend,
+        ggml_backend_cuda_context ** out_context) {
+    if (backend == nullptr || out_context == nullptr) {
+        return GGML_BACKEND_CUDA_SILIANG_STATUS_INVALID_ARGUMENT;
+    }
+    if (!ggml_backend_is_cuda(backend)) {
+        return GGML_BACKEND_CUDA_SILIANG_STATUS_WRONG_BACKEND;
+    }
+    *out_context = static_cast<ggml_backend_cuda_context *>(backend->context);
+    return *out_context == nullptr
+        ? GGML_BACKEND_CUDA_SILIANG_STATUS_WRONG_BACKEND
+        : GGML_BACKEND_CUDA_SILIANG_STATUS_SUCCESS;
+}
+
+enum ggml_backend_cuda_siliang_status ggml_backend_cuda_siliang_stream_create(
+        ggml_backend_t backend,
+        ggml_backend_cuda_siliang_stream_t * out_stream) {
+    if (out_stream == nullptr) {
+        return GGML_BACKEND_CUDA_SILIANG_STATUS_INVALID_ARGUMENT;
+    }
+    *out_stream = nullptr;
+
+    ggml_backend_cuda_context * context = nullptr;
+    const enum ggml_backend_cuda_siliang_status status =
+        ggml_backend_cuda_siliang_get_context(backend, &context);
+    if (status != GGML_BACKEND_CUDA_SILIANG_STATUS_SUCCESS) {
+        return status;
+    }
+
+    auto * result = new (std::nothrow) ggml_backend_cuda_siliang_stream;
+    if (result == nullptr) {
+        return GGML_BACKEND_CUDA_SILIANG_STATUS_CUDA_ERROR;
+    }
+    result->device = context->device;
+    ggml_cuda_set_device(result->device);
+    if (cudaStreamCreateWithFlags(&result->stream, cudaStreamNonBlocking) != cudaSuccess) {
+        delete result;
+        return GGML_BACKEND_CUDA_SILIANG_STATUS_CUDA_ERROR;
+    }
+
+    *out_stream = result;
+    return GGML_BACKEND_CUDA_SILIANG_STATUS_SUCCESS;
+}
+
+enum ggml_backend_cuda_siliang_status ggml_backend_cuda_siliang_stream_destroy(
+        ggml_backend_cuda_siliang_stream_t stream) {
+    auto * value = static_cast<ggml_backend_cuda_siliang_stream *>(stream);
+    if (value == nullptr) {
+        return GGML_BACKEND_CUDA_SILIANG_STATUS_INVALID_ARGUMENT;
+    }
+
+    ggml_cuda_set_device(value->device);
+    const cudaError_t error = cudaStreamDestroy(value->stream);
+    delete value;
+    return error == cudaSuccess
+        ? GGML_BACKEND_CUDA_SILIANG_STATUS_SUCCESS
+        : GGML_BACKEND_CUDA_SILIANG_STATUS_CUDA_ERROR;
+}
+
+enum ggml_backend_cuda_siliang_status ggml_backend_cuda_siliang_stream_synchronize(
+        ggml_backend_cuda_siliang_stream_t stream) {
+    auto * value = static_cast<ggml_backend_cuda_siliang_stream *>(stream);
+    if (value == nullptr) {
+        return GGML_BACKEND_CUDA_SILIANG_STATUS_INVALID_ARGUMENT;
+    }
+
+    ggml_cuda_set_device(value->device);
+    return cudaStreamSynchronize(value->stream) == cudaSuccess
+        ? GGML_BACKEND_CUDA_SILIANG_STATUS_SUCCESS
+        : GGML_BACKEND_CUDA_SILIANG_STATUS_CUDA_ERROR;
+}
+
+enum ggml_backend_cuda_siliang_status ggml_backend_cuda_siliang_event_create(
+        ggml_backend_t backend,
+        ggml_backend_cuda_siliang_event_t * out_event) {
+    if (out_event == nullptr) {
+        return GGML_BACKEND_CUDA_SILIANG_STATUS_INVALID_ARGUMENT;
+    }
+    *out_event = nullptr;
+
+    ggml_backend_cuda_context * context = nullptr;
+    const enum ggml_backend_cuda_siliang_status status =
+        ggml_backend_cuda_siliang_get_context(backend, &context);
+    if (status != GGML_BACKEND_CUDA_SILIANG_STATUS_SUCCESS) {
+        return status;
+    }
+
+    auto * result = new (std::nothrow) ggml_backend_cuda_siliang_event;
+    if (result == nullptr) {
+        return GGML_BACKEND_CUDA_SILIANG_STATUS_CUDA_ERROR;
+    }
+    result->device = context->device;
+    ggml_cuda_set_device(result->device);
+    if (cudaEventCreateWithFlags(&result->event, cudaEventDisableTiming) != cudaSuccess) {
+        delete result;
+        return GGML_BACKEND_CUDA_SILIANG_STATUS_CUDA_ERROR;
+    }
+
+    *out_event = result;
+    return GGML_BACKEND_CUDA_SILIANG_STATUS_SUCCESS;
+}
+
+enum ggml_backend_cuda_siliang_status ggml_backend_cuda_siliang_event_destroy(
+        ggml_backend_cuda_siliang_event_t event) {
+    auto * value = static_cast<ggml_backend_cuda_siliang_event *>(event);
+    if (value == nullptr) {
+        return GGML_BACKEND_CUDA_SILIANG_STATUS_INVALID_ARGUMENT;
+    }
+
+    ggml_cuda_set_device(value->device);
+    const cudaError_t error = cudaEventDestroy(value->event);
+    delete value;
+    return error == cudaSuccess
+        ? GGML_BACKEND_CUDA_SILIANG_STATUS_SUCCESS
+        : GGML_BACKEND_CUDA_SILIANG_STATUS_CUDA_ERROR;
+}
+
+enum ggml_backend_cuda_siliang_status ggml_backend_cuda_siliang_event_synchronize(
+        ggml_backend_cuda_siliang_event_t event) {
+    auto * value = static_cast<ggml_backend_cuda_siliang_event *>(event);
+    if (value == nullptr) {
+        return GGML_BACKEND_CUDA_SILIANG_STATUS_INVALID_ARGUMENT;
+    }
+
+    ggml_cuda_set_device(value->device);
+    return cudaEventSynchronize(value->event) == cudaSuccess
+        ? GGML_BACKEND_CUDA_SILIANG_STATUS_SUCCESS
+        : GGML_BACKEND_CUDA_SILIANG_STATUS_CUDA_ERROR;
+}
+
+enum ggml_backend_cuda_siliang_status ggml_backend_cuda_siliang_event_record(
+        ggml_backend_cuda_siliang_stream_t stream,
+        ggml_backend_cuda_siliang_event_t event) {
+    auto * stream_value = static_cast<ggml_backend_cuda_siliang_stream *>(stream);
+    auto * event_value = static_cast<ggml_backend_cuda_siliang_event *>(event);
+    if (stream_value == nullptr || event_value == nullptr) {
+        return GGML_BACKEND_CUDA_SILIANG_STATUS_INVALID_ARGUMENT;
+    }
+    if (stream_value->device != event_value->device) {
+        return GGML_BACKEND_CUDA_SILIANG_STATUS_WRONG_DEVICE;
+    }
+
+    ggml_cuda_set_device(stream_value->device);
+    return cudaEventRecord(event_value->event, stream_value->stream) == cudaSuccess
+        ? GGML_BACKEND_CUDA_SILIANG_STATUS_SUCCESS
+        : GGML_BACKEND_CUDA_SILIANG_STATUS_CUDA_ERROR;
+}
+
+enum ggml_backend_cuda_siliang_status ggml_backend_cuda_siliang_main_stream_event_record(
+        ggml_backend_t backend,
+        ggml_backend_cuda_siliang_event_t event) {
+    ggml_backend_cuda_context * context = nullptr;
+    auto * event_value = static_cast<ggml_backend_cuda_siliang_event *>(event);
+    const enum ggml_backend_cuda_siliang_status status =
+        ggml_backend_cuda_siliang_get_context(backend, &context);
+    if (event_value == nullptr) {
+        return GGML_BACKEND_CUDA_SILIANG_STATUS_INVALID_ARGUMENT;
+    }
+    if (status != GGML_BACKEND_CUDA_SILIANG_STATUS_SUCCESS) {
+        return status;
+    }
+    if (context->device != event_value->device) {
+        return GGML_BACKEND_CUDA_SILIANG_STATUS_WRONG_DEVICE;
+    }
+
+    ggml_cuda_set_device(context->device);
+    return cudaEventRecord(event_value->event, context->stream(context->device, 0)) == cudaSuccess
+        ? GGML_BACKEND_CUDA_SILIANG_STATUS_SUCCESS
+        : GGML_BACKEND_CUDA_SILIANG_STATUS_CUDA_ERROR;
+}
+
+enum ggml_backend_cuda_siliang_status ggml_backend_cuda_siliang_stream_wait_event(
+        ggml_backend_cuda_siliang_stream_t stream,
+        ggml_backend_cuda_siliang_event_t event) {
+    auto * stream_value = static_cast<ggml_backend_cuda_siliang_stream *>(stream);
+    auto * event_value = static_cast<ggml_backend_cuda_siliang_event *>(event);
+    if (stream_value == nullptr || event_value == nullptr) {
+        return GGML_BACKEND_CUDA_SILIANG_STATUS_INVALID_ARGUMENT;
+    }
+    if (stream_value->device != event_value->device) {
+        return GGML_BACKEND_CUDA_SILIANG_STATUS_WRONG_DEVICE;
+    }
+
+    ggml_cuda_set_device(stream_value->device);
+    return cudaStreamWaitEvent(stream_value->stream, event_value->event, 0) == cudaSuccess
+        ? GGML_BACKEND_CUDA_SILIANG_STATUS_SUCCESS
+        : GGML_BACKEND_CUDA_SILIANG_STATUS_CUDA_ERROR;
+}
+
+enum ggml_backend_cuda_siliang_status ggml_backend_cuda_siliang_main_stream_wait_event(
+        ggml_backend_t backend,
+        ggml_backend_cuda_siliang_event_t event) {
+    ggml_backend_cuda_context * context = nullptr;
+    auto * event_value = static_cast<ggml_backend_cuda_siliang_event *>(event);
+    const enum ggml_backend_cuda_siliang_status status =
+        ggml_backend_cuda_siliang_get_context(backend, &context);
+    if (event_value == nullptr) {
+        return GGML_BACKEND_CUDA_SILIANG_STATUS_INVALID_ARGUMENT;
+    }
+    if (status != GGML_BACKEND_CUDA_SILIANG_STATUS_SUCCESS) {
+        return status;
+    }
+    if (context->device != event_value->device) {
+        return GGML_BACKEND_CUDA_SILIANG_STATUS_WRONG_DEVICE;
+    }
+
+    ggml_cuda_set_device(context->device);
+    return cudaStreamWaitEvent(context->stream(context->device, 0), event_value->event, 0) == cudaSuccess
+        ? GGML_BACKEND_CUDA_SILIANG_STATUS_SUCCESS
+        : GGML_BACKEND_CUDA_SILIANG_STATUS_CUDA_ERROR;
+}
+
+enum ggml_backend_cuda_siliang_status ggml_backend_cuda_siliang_h2d_async(
+        ggml_backend_cuda_siliang_stream_t stream,
+        ggml_tensor * tensor,
+        const void * source,
+        size_t offset,
+        size_t size) {
+    auto * stream_value = static_cast<ggml_backend_cuda_siliang_stream *>(stream);
+    if (stream_value == nullptr || tensor == nullptr || source == nullptr || tensor->buffer == nullptr) {
+        return GGML_BACKEND_CUDA_SILIANG_STATUS_INVALID_ARGUMENT;
+    }
+    if (!ggml_backend_buffer_is_cuda(tensor->buffer)) {
+        return GGML_BACKEND_CUDA_SILIANG_STATUS_WRONG_BUFFER;
+    }
+
+    auto * buffer_context = static_cast<ggml_backend_cuda_buffer_context *>(tensor->buffer->context);
+    if (buffer_context == nullptr || buffer_context->device != stream_value->device) {
+        return GGML_BACKEND_CUDA_SILIANG_STATUS_WRONG_DEVICE;
+    }
+
+    const size_t tensor_size = ggml_nbytes(tensor);
+    if (offset > tensor_size || size > tensor_size - offset) {
+        return GGML_BACKEND_CUDA_SILIANG_STATUS_RANGE;
+    }
+    if (tensor->buffer->iface.get_base == nullptr) {
+        return GGML_BACKEND_CUDA_SILIANG_STATUS_WRONG_BUFFER;
+    }
+
+    const uintptr_t base = reinterpret_cast<uintptr_t>(tensor->buffer->iface.get_base(tensor->buffer));
+    const uintptr_t data = reinterpret_cast<uintptr_t>(tensor->data);
+    const size_t buffer_size = ggml_backend_buffer_get_size(tensor->buffer);
+    if (base == 0 || data < base || data - base > buffer_size || tensor_size > buffer_size - (data - base)) {
+        return GGML_BACKEND_CUDA_SILIANG_STATUS_RANGE;
+    }
+
+    ggml_cuda_set_device(stream_value->device);
+    return cudaMemcpyAsync(
+        static_cast<char *>(tensor->data) + offset,
+        source,
+        size,
+        cudaMemcpyHostToDevice,
+        stream_value->stream) == cudaSuccess
+            ? GGML_BACKEND_CUDA_SILIANG_STATUS_SUCCESS
+            : GGML_BACKEND_CUDA_SILIANG_STATUS_CUDA_ERROR;
 }
 
 static void * ggml_backend_cuda_buffer_get_base(ggml_backend_buffer_t buffer) {
@@ -5346,6 +5615,39 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
     }
     if (strcmp(name, "ggml_backend_unregister_host_buffer") == 0) {
         return (void *)ggml_backend_cuda_unregister_host_buffer;
+    }
+    if (strcmp(name, "ggml_backend_cuda_siliang_stream_create") == 0) {
+        return (void *)ggml_backend_cuda_siliang_stream_create;
+    }
+    if (strcmp(name, "ggml_backend_cuda_siliang_stream_destroy") == 0) {
+        return (void *)ggml_backend_cuda_siliang_stream_destroy;
+    }
+    if (strcmp(name, "ggml_backend_cuda_siliang_stream_synchronize") == 0) {
+        return (void *)ggml_backend_cuda_siliang_stream_synchronize;
+    }
+    if (strcmp(name, "ggml_backend_cuda_siliang_event_create") == 0) {
+        return (void *)ggml_backend_cuda_siliang_event_create;
+    }
+    if (strcmp(name, "ggml_backend_cuda_siliang_event_destroy") == 0) {
+        return (void *)ggml_backend_cuda_siliang_event_destroy;
+    }
+    if (strcmp(name, "ggml_backend_cuda_siliang_event_synchronize") == 0) {
+        return (void *)ggml_backend_cuda_siliang_event_synchronize;
+    }
+    if (strcmp(name, "ggml_backend_cuda_siliang_event_record") == 0) {
+        return (void *)ggml_backend_cuda_siliang_event_record;
+    }
+    if (strcmp(name, "ggml_backend_cuda_siliang_main_stream_event_record") == 0) {
+        return (void *)ggml_backend_cuda_siliang_main_stream_event_record;
+    }
+    if (strcmp(name, "ggml_backend_cuda_siliang_stream_wait_event") == 0) {
+        return (void *)ggml_backend_cuda_siliang_stream_wait_event;
+    }
+    if (strcmp(name, "ggml_backend_cuda_siliang_main_stream_wait_event") == 0) {
+        return (void *)ggml_backend_cuda_siliang_main_stream_wait_event;
+    }
+    if (strcmp(name, "ggml_backend_cuda_siliang_h2d_async") == 0) {
+        return (void *)ggml_backend_cuda_siliang_h2d_async;
     }
     if (strcmp(name, "ggml_backend_get_features") == 0) {
         return (void *)ggml_backend_cuda_get_features;

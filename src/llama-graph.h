@@ -18,6 +18,7 @@ struct ggml_tensor;
 
 struct llama_cparams;
 struct llama_layer;
+struct llama_siliang_moe_arena_state;
 
 struct llama_memory_context_i;
 
@@ -229,6 +230,22 @@ public:
     const llama_cparams cparams;
 
     const uint32_t n_outputs;
+};
+
+class llm_graph_input_siliang_moe_arena : public llm_graph_input_i {
+public:
+    llm_graph_input_siliang_moe_arena(
+            const llama_siliang_moe_arena_state * state,
+            int32_t layer,
+            int64_t n_tokens);
+
+    bool can_reuse(const llm_graph_params & params) override;
+    void set_input(const llama_ubatch * ubatch) override { GGML_UNUSED(ubatch); }
+
+    const llama_siliang_moe_arena_state * state = nullptr;
+    int32_t layer = -1;
+    int64_t n_tokens_at_build = 0;
+    uint64_t generation_at_build = 0;
 };
 
 class llm_graph_input_mean : public llm_graph_input_i {
@@ -841,6 +858,9 @@ struct llm_graph_params {
             cparams.embeddings_nextn        == other.cparams.embeddings_nextn        &&
             cparams.embeddings_nextn_masked == other.cparams.embeddings_nextn_masked &&
             cparams.causal_attn             == other.cparams.causal_attn             &&
+            cparams.siliang_moe_arena_enabled == other.cparams.siliang_moe_arena_enabled &&
+            cparams.siliang_moe_arena_state == other.cparams.siliang_moe_arena_state &&
+            cparams.siliang_moe_arena_generation == other.cparams.siliang_moe_arena_generation &&
             arch  == other.arch  &&
             gtype == other.gtype &&
             cvec  == other.cvec  &&

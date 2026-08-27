@@ -35,8 +35,10 @@ discard work that is outside the assigned change.
   environment variables, or GGUF metadata semantics.
 - A fallback must be explicit in logs, represented in tests, and disclosed in
   results. It must not be counted as the requested path.
-- Preserve every `SILIANGEM_*` environment variable and `siliangem.*` GGUF key
-  unless an explicit interface migration is part of the task.
+- v0.1.3 uses the typed `--expert-cache...` CLI and context configuration. Do
+  not restore expert-cache environment aliases or hidden process-state setup.
+  Preserve `siliangem.*` GGUF keys unless an explicit metadata migration is
+  part of the task.
 - Do not rename public interfaces or add legacy aliases without explicit
   authorization.
 - Keep the expert-major mmap refusal. Loading its strided tensors without mmap
@@ -131,7 +133,7 @@ which outputs are incomplete.
 
 Before committing, run the repository hygiene and provenance checks and inspect
 the staged diff. Scope whitespace checking to the public-authored files plus the
-six engine-delta paths listed in `docs/PROVENANCE.md`; the pinned
+engine-delta paths listed in `docs/PROVENANCE.md`; the pinned
 upstream tree contains preexisting whitespace that is not part of this patch.
 Do not normalize or reformat unrelated upstream files to make a whole-tree
 check clean. Do not add a remote, push, publish, or rewrite history unless the

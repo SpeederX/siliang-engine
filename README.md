@@ -9,21 +9,26 @@ Siliang Engine is an experimental inference engine maintained as a fork of
 high-leverage changes to the Windows Mixture-of-Experts (MoE) data path so very
 large models can make better use of limited workstation memory.
 
-Its core and recommended workflow combines an expert-major GGUF with a dedicated
-RAM arena and direct, overlapped storage reads. Repacking places each routed
-expert where the engine can fetch it efficiently; the runtime then serves those
-experts without depending only on ordinary Windows mmap paging. The arena can
-also accelerate compatible monolithic stock GGUFs. In validated workloads, the
-recommended expert-major path has approached twice the decode throughput of the
-standard mmap baseline.
+Its core workflow combines model-owned expert sources with a typed L2/L1 memory
+hierarchy. A bounded system-RAM L2 can serve out-of-core experts, while a CUDA
+L1 keeps K persistent experts plus R exchange slots and a bounded pinned P
+  elevator. The v0.1.3 DeepSeek4 path can also roll its architecture-specific
+  FRONT set and, as an explicit experiment, reuse K for bounded prompt
+  microbatches. The GPU retains router weights; only selected expert IDs enter
+  the CPU cache-control path. Per-sweep route bitmaps measure reuse without
+  enabling speculative admission. Expert-major GGUF remains the recommended source layout for DS4 and
+GPT-OSS; compatible stock MoE models can promote experts from their existing
+resident host tensors without allocating a redundant L2.
 
 The Siliang expert arena is supported on Windows today. The fork preserves the
 upstream backend architecture, and release CI also builds Linux CPU and macOS
 Metal configurations so Siliang changes cannot silently make the fork
 Windows-only. Porting the Siliang arena itself beyond Windows remains planned.
 
-The arena is opt-in: without an explicit positive `SILIANGEM_CACHE_MIB`, the
-engine keeps the ordinary mmap path and allocates no arena memory.
+The expert cache is opt-in. Without `--expert-cache`, the engine keeps the
+ordinary path and allocates no Siliang L2 or L1 arena. Configuration is carried
+on the `llama-cli` or `llama-server` command line; there is no environment setup
+helper.
 
 ## Quickstart
 
@@ -31,32 +36,29 @@ engine keeps the ordinary mmap path and allocates no arena memory.
 2. For the recommended path, prepare the source model as an expert-major GGUF
    by following [`tools/README.md`](tools/README.md). A compatible monolithic
    stock GGUF can also use the arena without repacking.
-3. In the same PowerShell session, explicitly enable the Siliang path with an
-   arena size measured for your machine and workload:
-
-   ```powershell
-   .\scripts\siliang-env.ps1 -CacheMiB <measured-MiB>
-   ```
-
-   Add `-Verbose` for cache statistics or `-NoMemoryReport` to suppress the
-   periodic system-memory report. Use `-Show` to inspect the active settings.
-4. Start the built `llama-cli` or `llama-server` with the expert-major model, or
-   with a compatible monolithic stock GGUF.
+3. Start `llama-cli` or `llama-server` with an explicit measured configuration.
+   The options are shared by both binaries and are listed in `--help`.
 
 ```powershell
 & "<build-directory>\bin\Release\llama-cli.exe" `
     -m "<expert-major-model.gguf>" `
+    -ngl 99 -ncmoe <all-routed-layers> `
+    --expert-cache `
+    --expert-cache-l2-mib <measured-MiB> `
+    --expert-cache-l2-policy lfu `
     -p "<prompt>" `
     -n 32
-
-.\scripts\siliang-env.ps1 -Reset
 ```
 
-Use a cache budget that leaves room for Windows, the model's non-expert
+Managed L2 is consumed only by CPU-backed routed experts, so the placement
+flags must keep every intended routed layer on CPU; verify nonzero lookup
+telemetry rather than assuming the allocation is active. Use a cache budget
+that leaves room for Windows, the model's non-expert
 weights, KV cache, and GPU shared-memory pressure. Larger is not automatically
-better. To run a deliberate mmap control instead, use
-`.\scripts\siliang-env.ps1 -Disable`. See
-[`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) for all helper modes.
+better. Use `--no-expert-cache` for a deliberate control. The full DS4
+K216/R12/P12 server command, Pi endpoint, policy options, and conservative
+  DS4 prefill-microbatch experiment, Gemma4/Qwen3/Qwen3.6/GPT-OSS trial recipes are in
+[`docs/CONFIGURATION.md`](docs/CONFIGURATION.md).
 
 ## Performance
 
@@ -65,6 +67,16 @@ control; the current layout comparison keeps the arena enabled in both arms,
 while the arena comparisons use an explicit mmap control. Raw measurements,
 settings, calculations, and evidence limitations are in
 [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md).
+
+These rows describe the earlier host-arena implementation and remain historical
+evidence. They do not qualify the new v0.1.3 K/R/P or DeepSeek4 FRONT paths.
+The transferred DS4 2,000-token observations and their single-start limitation
+are recorded in [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md#deepseek4-requalification-prototype).
+  One current two-token v0.1.3 smoke verified the typed DS4 L2/K/R/P/FRONT wiring
+  and OpenAI-compatible server route; it is not throughput evidence. Before the
+  opt-in prefill path existed, separate interactive prompts measured 1.87 tok/s
+  with two batch threads and 4.57 tok/s with twelve. They are observational
+  controls with different prompts, not a matched A/B result.
 
 | Model | Baseline path | Siliang path | Speedup | Evidence |
 | --- | --- | --- | ---: | --- |
@@ -104,8 +116,10 @@ is consistent with the [PCI-SIG bandwidth table](https://pcisig.com/how-does-pci
 
 ## What is included
 
-- A Windows MoE runtime that streams routed experts through a configurable RAM
-  arena using direct, overlapped I/O.
+- A typed, opt-in MoE hierarchy with managed host L2, a CUDA K policy budget,
+  per-schema R exchange banks, and bounded global P staging.
+- An architecture-guarded DeepSeek4 FRONT rolling path for serial decode and
+  opt-in bounded prompt microbatches.
 - The expert-major GGUF preparation workflow for the core and recommended
   Siliang path, plus validated arena support for compatible monolithic stock
   GGUFs.
@@ -215,7 +229,7 @@ builds the release packages on Windows. The downloadable artifacts are:
 
 Actions retains the verified packages for 30 days. Maintainers review them before
 attaching them to the corresponding [GitHub Release](https://github.com/SpeederX/siliang-engine/releases).
-For v0.1.2, see the [release notes](docs/releases/v0.1.2.md).
+For v0.1.3, see the [release notes](docs/releases/v0.1.3.md).
 
 ## License
 

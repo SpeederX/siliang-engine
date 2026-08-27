@@ -313,6 +313,14 @@ extern "C" {
     //
     typedef bool (*ggml_backend_sched_eval_callback)(struct ggml_tensor * t, bool ask, void * user_data);
 
+    // Called immediately before the first asynchronous submission for each scheduler split. False cancels submission.
+    // The graph pointer remains owned by the scheduler and is only valid for the duration of the callback.
+    typedef bool (*ggml_backend_sched_split_observer_callback)(
+            int split_index,
+            ggml_backend_t backend,
+            const struct ggml_cgraph * graph,
+            void * user_data);
+
     // Initialize a backend scheduler, backends with low index are given priority over backends with high index
     GGML_API ggml_backend_sched_t ggml_backend_sched_new(ggml_backend_t * backends, ggml_backend_buffer_type_t * bufts, int n_backends, size_t graph_size, bool parallel, bool op_offload);
     GGML_API void                 ggml_backend_sched_free(ggml_backend_sched_t sched);
@@ -350,6 +358,9 @@ extern "C" {
 
     // Set a callback to be called for each resulting node during graph compute
     GGML_API void                 ggml_backend_sched_set_eval_callback(ggml_backend_sched_t sched, ggml_backend_sched_eval_callback callback, void * user_data);
+
+    // Set a callback to observe scheduler split submissions. A NULL callback disables observation.
+    GGML_API void                 ggml_backend_sched_set_split_observer(ggml_backend_sched_t sched, ggml_backend_sched_split_observer_callback callback, void * user_data);
 
     //
     // Meta backend

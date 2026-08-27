@@ -26,52 +26,49 @@ def function_body(source: str, signature: str) -> str:
 
 
 class StockArenaSourceContractTests(unittest.TestCase):
-    def test_selected_cpu_variant_exposes_and_receives_siliang_sources(self) -> None:
+    def test_selected_cpu_variant_exposes_backend_scoped_cache_api(self) -> None:
         for proc_name in (
-            "ggml_siliangem_set_expert_source",
-            "ggml_siliangem_set_scattered_source",
+            "ggml_backend_cpu_siliangem_configure",
+            "ggml_backend_cpu_siliangem_reset",
+            "ggml_backend_cpu_siliangem_query",
+            "ggml_backend_cpu_siliangem_prepare_experts",
+            "ggml_backend_cpu_siliangem_prepare_experts_async",
+            "ggml_backend_cpu_siliangem_wait_experts",
+            "ggml_backend_cpu_siliangem_copy_cached_part",
+            "ggml_backend_cpu_siliangem_release_cached_expert",
+            "ggml_backend_cpu_siliangem_cache_occupancy",
         ):
             self.assertIn(f'if (strcmp(name, "{proc_name}") == 0)', CPU_REGISTRY_SOURCE)
-            self.assertIn(f'llama_siliangem_get_cpu_proc("{proc_name}")', LOADER_SOURCE)
 
-        self.assertIn("ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU)", LOADER_SOURCE)
-        self.assertIn("ggml_backend_reg_get_proc_address(reg, name)", LOADER_SOURCE)
-        self.assertIn("if (set_expert_source)", LOADER_SOURCE)
-        self.assertIn("if (set_scattered_source)", LOADER_SOURCE)
-        self.assertIn("skipping Siliang model-file arena source", LOADER_SOURCE)
-        self.assertIn("Siliang model-file arena source is unavailable", LOADER_SOURCE)
-        self.assertNotIn("ggml_siliangem_set_expert_source(fname.c_str()", LOADER_SOURCE)
-        self.assertNotIn("ggml_siliangem_set_scattered_source(fname.c_str()", LOADER_SOURCE)
-        registry_window = CPU_REGISTRY_SOURCE[
-            CPU_REGISTRY_SOURCE.index('#if defined(_WIN32)', CPU_REGISTRY_SOURCE.index('ggml_backend_cpu_set_use_ref')):
-            CPU_REGISTRY_SOURCE.index('#endif', CPU_REGISTRY_SOURCE.index('ggml_siliangem_set_scattered_source')) + len('#endif')
-        ]
-        self.assertIn("ggml_siliangem_set_expert_source", registry_window)
-        self.assertIn("ggml_siliangem_set_scattered_source", registry_window)
-        helper = function_body(LOADER_SOURCE, "static void * llama_siliangem_get_cpu_proc")
-        self.assertIn("#if defined(_WIN32)", helper)
-        self.assertIn("#else", helper)
-        self.assertIn("(void) name;", helper)
+        self.assertIn("ggml_siliangem_cache_state_create()", CPU_REGISTRY_SOURCE)
+        self.assertIn("ggml_siliangem_cache_state_destroy(cpu_ctx->siliangem_cache)", CPU_REGISTRY_SOURCE)
+        self.assertNotIn("ggml_siliangem_set_expert_source", CPU_REGISTRY_SOURCE)
+        self.assertNotIn("ggml_siliangem_set_scattered_source", CPU_REGISTRY_SOURCE)
+        self.assertNotIn("llama_siliangem_get_cpu_proc", LOADER_SOURCE)
+        self.assertIn("siliang_expert_source.kind = llama_siliang_expert_source_kind::expert_major", LOADER_SOURCE)
+        self.assertIn("siliang_expert_source.kind = llama_siliang_expert_source_kind::scattered", LOADER_SOURCE)
 
     def test_loader_publishes_every_layer_part_stride(self) -> None:
         self.assertIn("std::vector<uint32_t> sc_stride;", LOADER_SOURCE)
         self.assertIn("sc_stride.push_back((uint32_t) stride);", LOADER_SOURCE)
         self.assertIn("sc_stride.size() == (size_t) sc_layers * 3", LOADER_SOURCE)
-        self.assertIn("sc_base.data(), sc_stride.data()", LOADER_SOURCE)
+        self.assertIn("siliang_expert_source.base = std::move(sc_base);", LOADER_SOURCE)
+        self.assertIn("siliang_expert_source.stride = std::move(sc_stride);", LOADER_SOURCE)
+        self.assertIn('siliang_expert_source.part_names = "gate,up,down";', LOADER_SOURCE)
         self.assertIn("if (max_expert_bytes <= 0xFFFFFFFFull)", LOADER_SOURCE)
         self.assertNotIn("uint32_t sc_stride[3]", LOADER_SOURCE)
 
-    def test_setter_validates_and_copies_the_flattened_geometry(self) -> None:
-        body = function_body(CPU_SOURCE, "void ggml_siliangem_set_scattered_source(")
-        validation = "const uint32_t part_bytes = stride[L * 3 + p];"
-        copy_stride = "g_scat.stride[i] = stride[i];"
-        copy_base = "g_scat.base[i]   = base[i];"
+    def test_configure_validates_and_copies_the_flattened_geometry(self) -> None:
+        body = function_body(CPU_SOURCE, "int ggml_siliangem_cache_state_configure(")
+        validation = "if (source->stride[index] == 0) return 0;"
+        copy_stride = "g_scat.stride[index] = source->stride[index];"
+        copy_base = "g_scat.base[index] = source->base[index];"
 
-        self.assertIn("for (int L = 0; L < n_layers; L++)", body)
+        self.assertIn("source->struct_size < sizeof(*source)", body)
+        self.assertIn("source->n_parts != 3", body)
+        self.assertIn("for (uint32_t layer = 0; layer < source->n_layers; ++layer)", body)
         self.assertIn(validation, body)
-        self.assertIn("if (part_bytes == 0) return;", body)
-        self.assertIn("if (expert_bytes > UINT32_MAX) return;", body)
-        self.assertIn("for (int i = 0; i < n_layers * 3; i++)", body)
+        self.assertIn("if (expert_bytes > UINT32_MAX) return 0;", body)
         self.assertIn(copy_stride, body)
         self.assertIn(copy_base, body)
         self.assertLess(body.index(validation), body.index(copy_stride))
