@@ -9,6 +9,7 @@ other deterministic sampling override is added here.
 Campaign shape:
   * screen64:    all declared cells, 3 fresh replicas, 64 requested tokens
   * qualify512:  an explicit shortlist, 3 fresh replicas, 512 requested tokens
+  * curve2048:   an explicit shortlist, 3 fresh replicas, 2048 requested tokens
   * top1024:     an explicit shortlist, 1 fresh replica, 1024 requested tokens
 
 The full screen contains 23 cells:
@@ -46,6 +47,7 @@ DEFAULT_PROMPT = (
 PHASE_DEFAULTS = {
     "screen64": (64, 3),
     "qualify512": (512, 3),
+    "curve2048": (2048, 3),
     "top1024": (1024, 1),
 }
 
@@ -297,7 +299,7 @@ def main() -> int:
     parser.add_argument("--prompt", default=DEFAULT_PROMPT)
     parser.add_argument(
         "--cells",
-        help="comma-separated cell ids. Required for qualify512/top1024; screen64 defaults to all 23 cells.",
+        help="comma-separated cell ids. Required for qualify512/curve2048/top1024; screen64 defaults to all 23 cells.",
     )
     parser.add_argument("--force", action="store_true", help="rerun completed receipts")
     parser.add_argument("--allow-dirty", action="store_true", help="allow a dirty git worktree")
@@ -328,7 +330,7 @@ def main() -> int:
         cells = [by_id[item] for item in requested]
     else:
         if args.phase != "screen64":
-            parser.error("--cells is required for qualify512/top1024")
+            parser.error("--cells is required for qualify512/curve2048/top1024")
         cells = all_cells
 
     if working_tree_dirty() and not args.allow_dirty:

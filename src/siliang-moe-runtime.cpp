@@ -32,7 +32,7 @@ constexpr int32_t SILIANG_RUNTIME_FAILURE_STAGING    = -4404;
 constexpr int32_t SILIANG_RUNTIME_FAILURE_H2D        = -4405;
 constexpr int32_t SILIANG_RUNTIME_FAILURE_EVENT      = -4406;
 constexpr int32_t SILIANG_RUNTIME_FAILURE_PREFILL    = -4407;
-constexpr std::array<uint32_t, 7> SILIANG_ROUTE_STATS_TOKEN_CHECKPOINTS = {32, 64, 128, 256, 512, 1024, 2048};
+constexpr std::array<uint32_t, 8> SILIANG_ROUTE_STATS_TOKEN_CHECKPOINTS = {32, 64, 128, 256, 512, 1024, 1512, 2048};
 
 using siliang_moe_policy::cache_slot;
 using siliang_moe_policy::slot_segment;
