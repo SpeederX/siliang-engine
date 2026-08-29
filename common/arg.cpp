@@ -108,13 +108,23 @@ static enum common_expert_cache_policy parse_expert_cache_policy(
     if (value == "wtinylfu" || value == "wtinylfu-w10-slru-p80") {
         return COMMON_EXPERT_CACHE_POLICY_WTINYLFU_W10_SLRU_P80;
     }
-    if (value == "cumulative-lfu" && allow_cumulative_lfu) {
+    if ((value == "slfu" || value == "cumulative-lfu") && allow_cumulative_lfu) {
         return COMMON_EXPERT_CACHE_POLICY_CUMULATIVE_LFU_ADMISSION;
     }
 
     throw std::invalid_argument(allow_cumulative_lfu ?
-        "expected lru, lfu, cumulative-lfu, wtinylfu, or wtinylfu-w10-slru-p80" :
+        "expected lru, lfu, slfu, cumulative-lfu, wtinylfu, or wtinylfu-w10-slru-p80" :
         "expected lru, lfu, wtinylfu, or wtinylfu-w10-slru-p80");
+}
+
+static bool parse_on_off(const std::string & value) {
+    if (value == "on") {
+        return true;
+    }
+    if (value == "off") {
+        return false;
+    }
+    throw std::invalid_argument("expected on or off");
 }
 
 static enum common_expert_cache_roll parse_expert_cache_roll(const std::string & value) {
@@ -895,9 +905,24 @@ static bool common_params_parse_ex(int argc, char ** argv, common_params_context
     if (expert_cache.l1_k == 0 &&
         (expert_cache.exchange_r != 0 || expert_cache.elevator_p != 0 ||
          expert_cache.roll != COMMON_EXPERT_CACHE_ROLL_OFF || expert_cache.prefill ||
-         expert_cache.route_stats)) {
+         expert_cache.route_stats || !expert_cache.admit_k_cold || expert_cache.demote_k_hot)) {
         throw std::invalid_argument(
-            "error: expert-cache R, P, roll, prefill, and route stats require --expert-cache-l1-k > 0\n");
+            "error: expert-cache R, P, roll, prefill, route stats, admit-k-cold, and demote-k-hot require --expert-cache-l1-k > 0\n");
+    }
+    if (expert_cache.l1_k > 0 && expert_cache.l1_policy == COMMON_EXPERT_CACHE_POLICY_LRU) {
+        throw std::invalid_argument(
+            "error: L1 LRU is retired: global K scan-thrashes when routed reuse distance exceeds K; use slfu, lfu, or wtinylfu\n");
+    }
+    if (expert_cache.l1_k > 0 &&
+        expert_cache.l1_policy != COMMON_EXPERT_CACHE_POLICY_CUMULATIVE_LFU_ADMISSION &&
+        (!expert_cache.admit_k_cold || expert_cache.demote_k_hot)) {
+        throw std::invalid_argument(
+            "error: --admit-k-cold off and --demote-k-hot on are SLFU-only research controls\n");
+    }
+    if (expert_cache.l1_k > 0 &&
+        (!expert_cache.admit_k_cold || expert_cache.demote_k_hot) && expert_cache.l2_mib == 0) {
+        throw std::invalid_argument(
+            "error: SLFU cold-admission/demotion controls require --expert-cache-l2-mib > 0\n");
     }
     if (static_cast<uint64_t>(expert_cache.l1_k) + expert_cache.exchange_r >
         std::numeric_limits<uint32_t>::max()) {
@@ -2768,11 +2793,30 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples({LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
-        {"--expert-cache-l1-policy"}, "{lru,lfu,cumulative-lfu,wtinylfu,wtinylfu-w10-slru-p80}",
-        "L1 policy; lfu is always-admit and resets its hit count on admission, cumulative-lfu uses "
-        "lifetime-frequency admission/bypass, and wtinylfu is W-TinyLFU W10/SLRU-P80 (default: lru)",
+        {"--expert-cache-l1-policy"}, "{lfu,slfu,cumulative-lfu,wtinylfu,wtinylfu-w10-slru-p80}",
+        "L1 policy; SLFU is Siliang lifetime-frequency admission/bypass (cumulative-lfu is a legacy alias), "
+        "lfu is always-admit, and wtinylfu is W-TinyLFU W10/SLRU-P80. LRU is retired for L1 because "
+        "global K scan-thrashes when route reuse distance exceeds K (default: slfu)",
         [](common_params & params, const std::string & value) {
             params.expert_cache.l1_policy = parse_expert_cache_policy(value, true);
+            params.expert_cache.tier_configured = true;
+        }
+    ).set_examples({LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--admit-k-cold"}, "{on,off}",
+        "SLFU only: on may admit a cold L2 miss into K on its first use; off keeps first-use cold experts in L2/R "
+        "and makes them eligible for K only on a later L2 hit (default: on)",
+        [](common_params & params, const std::string & value) {
+            params.expert_cache.admit_k_cold = parse_on_off(value);
+            params.expert_cache.tier_configured = true;
+        }
+    ).set_examples({LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--demote-k-hot"}, "{on,off}",
+        "SLFU only: keep a leased L2 shadow while an expert is K-resident, so K eviction becomes zero-copy "
+        "logical demotion back to L2 (default: off)",
+        [](common_params & params, const std::string & value) {
+            params.expert_cache.demote_k_hot = parse_on_off(value);
             params.expert_cache.tier_configured = true;
         }
     ).set_examples({LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER}));

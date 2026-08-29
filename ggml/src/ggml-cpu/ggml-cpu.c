@@ -1844,6 +1844,34 @@ int ggml_siliangem_cache_state_release_cached_expert(
     return 1;
 }
 
+int ggml_siliangem_cache_state_retain_cached_expert(
+        struct ggml_siliangem_cache_state * state, uint32_t layer, uint32_t expert) {
+    if (!state) return 0;
+    siliangem_bind_state(state);
+    if (!g_siliangem.ready || layer >= g_siliangem.n_layers || expert >= g_siliangem.n_experts) return 0;
+    const uint32_t slot = siliangem_lookup((layer << 16) | expert);
+    if (slot == SILIANGEM_EMPTY || g_siliangem.slots[slot].leases == UINT32_MAX) return 0;
+    ++g_siliangem.slots[slot].leases;
+    return 1;
+}
+
+int ggml_siliangem_cache_state_unretain_cached_expert(
+        struct ggml_siliangem_cache_state * state, uint32_t layer, uint32_t expert, uint64_t frequency_hint) {
+    if (!state) return 0;
+    siliangem_bind_state(state);
+    if (!g_siliangem.ready || layer >= g_siliangem.n_layers || expert >= g_siliangem.n_experts) return 0;
+    const uint32_t slot = siliangem_lookup((layer << 16) | expert);
+    if (slot == SILIANGEM_EMPTY || g_siliangem.slots[slot].leases == 0) return 0;
+    --g_siliangem.slots[slot].leases;
+    if (g_siliangem.slots[slot].leases == 0) {
+        g_siliangem.slots[slot].stamp = ++g_siliangem.clock;
+        if (frequency_hint > g_siliangem.slots[slot].frequency) {
+            g_siliangem.slots[slot].frequency = frequency_hint;
+        }
+    }
+    return 1;
+}
+
 #define GGML_MOE_PREFETCH_MAX 64
 
 static void ggml_moe_prefetch_experts(
@@ -1967,6 +1995,18 @@ int ggml_siliangem_cache_state_release_cached_expert(
         struct ggml_siliangem_cache_state * state, uint32_t layer, uint32_t expert,
         uint32_t * released_slot) {
     GGML_UNUSED(state); GGML_UNUSED(layer); GGML_UNUSED(expert); GGML_UNUSED(released_slot);
+    return 0;
+}
+
+int ggml_siliangem_cache_state_retain_cached_expert(
+        struct ggml_siliangem_cache_state * state, uint32_t layer, uint32_t expert) {
+    GGML_UNUSED(state); GGML_UNUSED(layer); GGML_UNUSED(expert);
+    return 0;
+}
+
+int ggml_siliangem_cache_state_unretain_cached_expert(
+        struct ggml_siliangem_cache_state * state, uint32_t layer, uint32_t expert, uint64_t frequency_hint) {
+    GGML_UNUSED(state); GGML_UNUSED(layer); GGML_UNUSED(expert); GGML_UNUSED(frequency_hint);
     return 0;
 }
 

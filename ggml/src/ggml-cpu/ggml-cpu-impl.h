@@ -62,6 +62,10 @@ int ggml_siliangem_cache_state_copy_cached_part(
 int ggml_siliangem_cache_state_release_cached_expert(
         struct ggml_siliangem_cache_state * state, uint32_t layer, uint32_t expert,
         uint32_t * released_slot);
+int ggml_siliangem_cache_state_retain_cached_expert(
+        struct ggml_siliangem_cache_state * state, uint32_t layer, uint32_t expert);
+int ggml_siliangem_cache_state_unretain_cached_expert(
+        struct ggml_siliangem_cache_state * state, uint32_t layer, uint32_t expert, uint64_t frequency_hint);
 int ggml_siliangem_cache_state_occupancy(
         struct ggml_siliangem_cache_state * state,
         uint32_t * capacity_slots, uint32_t * occupied_slots);

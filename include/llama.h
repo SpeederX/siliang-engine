@@ -94,6 +94,8 @@ extern "C" {
         bool prefill;
         bool memory_report;
         bool route_stats;
+        bool admit_k_cold;
+        bool demote_k_hot;
         bool deferred_wait;
     };
 

@@ -102,8 +102,11 @@ llama_context::llama_context(
                policy == LLAMA_SILIANG_EXPERT_CACHE_POLICY_LFU ||
                policy == LLAMA_SILIANG_EXPERT_CACHE_POLICY_WTINYLFU_W10_SLRU_P80;
     };
-    const bool valid_l1_policy = valid_l2_policy(expert_cache.l1_policy) ||
-        expert_cache.l1_policy == LLAMA_SILIANG_EXPERT_CACHE_POLICY_CUMULATIVE_LFU_ADMISSION;
+    const bool valid_l1_policy =
+        expert_cache.l1_policy == LLAMA_SILIANG_EXPERT_CACHE_POLICY_LFU ||
+        expert_cache.l1_policy == LLAMA_SILIANG_EXPERT_CACHE_POLICY_WTINYLFU_W10_SLRU_P80 ||
+        expert_cache.l1_policy == LLAMA_SILIANG_EXPERT_CACHE_POLICY_CUMULATIVE_LFU_ADMISSION ||
+        (expert_cache.l1_k == 0 && expert_cache.l1_policy == LLAMA_SILIANG_EXPERT_CACHE_POLICY_LRU);
     if (!valid_l1_policy || !valid_l2_policy(expert_cache.l2_policy)) {
         throw std::runtime_error("invalid Siliang expert-cache policy");
     }
@@ -125,6 +128,16 @@ llama_context::llama_context(
                 throw std::runtime_error("Siliang L1 exchange/elevator/roll requires a nonzero L1 K");
             }
         } else {
+            if (expert_cache.l1_policy == LLAMA_SILIANG_EXPERT_CACHE_POLICY_LRU) {
+                throw std::runtime_error("Siliang L1 LRU is retired because global K scan-thrashes when routed reuse distance exceeds K");
+            }
+            if (expert_cache.l1_policy != LLAMA_SILIANG_EXPERT_CACHE_POLICY_CUMULATIVE_LFU_ADMISSION &&
+                (!expert_cache.admit_k_cold || expert_cache.demote_k_hot)) {
+                throw std::runtime_error("Siliang admit-k-cold/demote-k-hot controls are SLFU-only");
+            }
+            if ((!expert_cache.admit_k_cold || expert_cache.demote_k_hot) && expert_cache.l2_bytes == 0) {
+                throw std::runtime_error("Siliang SLFU cold-admission/demotion controls require L2");
+            }
             if (expert_cache.l1_k < top_k || expert_cache.exchange_r < 2 * top_k ||
                 expert_cache.elevator_p < 2 * top_k || expert_cache.exchange_r % top_k != 0 ||
                 expert_cache.elevator_p % top_k != 0) {
@@ -4244,12 +4257,14 @@ llama_context_params llama_context_default_params() {
             /*.exchange_r    =*/ 0,
             /*.elevator_p    =*/ 0,
             /*.l2_policy     =*/ LLAMA_SILIANG_EXPERT_CACHE_POLICY_LRU,
-            /*.l1_policy     =*/ LLAMA_SILIANG_EXPERT_CACHE_POLICY_LRU,
+            /*.l1_policy     =*/ LLAMA_SILIANG_EXPERT_CACHE_POLICY_CUMULATIVE_LFU_ADMISSION,
             /*.roll          =*/ LLAMA_SILIANG_EXPERT_CACHE_ROLL_NONE,
             /*.enabled       =*/ false,
             /*.prefill       =*/ false,
             /*.memory_report =*/ false,
             /*.route_stats   =*/ false,
+            /*.admit_k_cold  =*/ true,
+            /*.demote_k_hot  =*/ false,
             /*.deferred_wait =*/ true,
         },
     };

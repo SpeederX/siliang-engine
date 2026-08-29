@@ -181,6 +181,12 @@ extern "C" {
     GGML_BACKEND_API int ggml_backend_cpu_siliangem_release_cached_expert(
             ggml_backend_t backend_cpu, uint32_t layer, uint32_t expert,
             uint32_t * released_slot);
+    // L2 shadow lease used by SLFU demote-k-hot. A leased slot remains readable
+    // but cannot be selected as an L2 victim until the lease is released.
+    GGML_BACKEND_API int ggml_backend_cpu_siliangem_retain_cached_expert(
+            ggml_backend_t backend_cpu, uint32_t layer, uint32_t expert);
+    GGML_BACKEND_API int ggml_backend_cpu_siliangem_unretain_cached_expert(
+            ggml_backend_t backend_cpu, uint32_t layer, uint32_t expert, uint64_t frequency_hint);
     GGML_BACKEND_API int ggml_backend_cpu_siliangem_cache_occupancy(
             ggml_backend_t backend_cpu, uint32_t * capacity_slots, uint32_t * occupied_slots);
 

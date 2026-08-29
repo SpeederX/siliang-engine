@@ -459,7 +459,7 @@ struct common_params_expert_cache {
     uint32_t l1_k       = 0;
     uint32_t exchange_r = 0;
     uint32_t elevator_p = 0;
-    enum common_expert_cache_policy l1_policy = COMMON_EXPERT_CACHE_POLICY_LRU;
+    enum common_expert_cache_policy l1_policy = COMMON_EXPERT_CACHE_POLICY_CUMULATIVE_LFU_ADMISSION;
 
     enum common_expert_cache_roll roll = COMMON_EXPERT_CACHE_ROLL_OFF;
 
@@ -470,6 +470,11 @@ struct common_params_expert_cache {
 
     bool memory_report = true;
     bool route_stats = false;
+    // SLFU research controls. admit_k_cold=true preserves the current
+    // cumulative-LFU first-use behavior. demote_k_hot keeps a leased L2 shadow
+    // for each K resident so K eviction becomes a zero-copy logical demotion.
+    bool admit_k_cold = true;
+    bool demote_k_hot = false;
     bool deferred_wait = true;
 
     // Parser-only presence marker: explicit tier options require --expert-cache.

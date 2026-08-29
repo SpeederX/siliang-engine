@@ -1837,6 +1837,8 @@ struct llama_context_params common_context_params_to_llama(const common_params &
     cparams.expert_cache.prefill       = params.expert_cache.prefill;
     cparams.expert_cache.memory_report = params.expert_cache.memory_report;
     cparams.expert_cache.route_stats   = params.expert_cache.route_stats;
+    cparams.expert_cache.admit_k_cold  = params.expert_cache.admit_k_cold;
+    cparams.expert_cache.demote_k_hot  = params.expert_cache.demote_k_hot;
     cparams.expert_cache.deferred_wait = params.expert_cache.deferred_wait;
 
     cparams.type_k = params.cache_type_k;

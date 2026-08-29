@@ -249,14 +249,19 @@ static void test(void) {
         assert(expert_defaults.expert_cache.l1_k == 0);
         assert(expert_defaults.expert_cache.exchange_r == 0);
         assert(expert_defaults.expert_cache.elevator_p == 0);
-        assert(expert_defaults.expert_cache.l1_policy == COMMON_EXPERT_CACHE_POLICY_LRU);
+        assert(expert_defaults.expert_cache.l1_policy == COMMON_EXPERT_CACHE_POLICY_CUMULATIVE_LFU_ADMISSION);
         assert(expert_defaults.expert_cache.roll == COMMON_EXPERT_CACHE_ROLL_OFF);
         assert(expert_defaults.expert_cache.memory_report == true);
         assert(expert_defaults.expert_cache.route_stats == false);
+        assert(expert_defaults.expert_cache.admit_k_cold == true);
+        assert(expert_defaults.expert_cache.demote_k_hot == false);
         assert(expert_defaults.expert_cache.deferred_wait == true);
         assert(expert_defaults.expert_cache.tier_configured == false);
         const auto llama_defaults = llama_context_default_params();
+        assert(llama_defaults.expert_cache.l1_policy == LLAMA_SILIANG_EXPERT_CACHE_POLICY_CUMULATIVE_LFU_ADMISSION);
         assert(llama_defaults.expert_cache.route_stats == false);
+        assert(llama_defaults.expert_cache.admit_k_cold == true);
+        assert(llama_defaults.expert_cache.demote_k_hot == false);
         assert(llama_defaults.expert_cache.deferred_wait == true);
 
         auto find_option = [](common_params_context & ctx, const std::string & arg) -> const common_arg * {
@@ -279,6 +284,8 @@ static void test(void) {
             "--expert-cache-exchange-r",
             "--expert-cache-elevator-p",
             "--expert-cache-l1-policy",
+            "--admit-k-cold",
+            "--demote-k-hot",
             "--expert-cache-roll",
             "--expert-cache-prefill",
             "--no-expert-cache-prefill",
@@ -313,9 +320,10 @@ static void test(void) {
         assert(l1_k_opt->help.find("incompatible with LoRA adapters") != std::string::npos);
         const common_arg * l1_policy_opt = find_option(cli_ctx, "--expert-cache-l1-policy");
         assert(l1_policy_opt != nullptr);
-        assert(std::string(l1_policy_opt->value_hint).find("cumulative-lfu") != std::string::npos);
-        assert(l1_policy_opt->help.find("lfu is always-admit") != std::string::npos);
-        assert(l1_policy_opt->help.find("lifetime-frequency admission/bypass") != std::string::npos);
+        assert(std::string(l1_policy_opt->value_hint).find("slfu") != std::string::npos);
+        assert(std::string(l1_policy_opt->value_hint).find("{lfu,slfu") != std::string::npos);
+        assert(l1_policy_opt->help.find("SLFU") != std::string::npos);
+        assert(l1_policy_opt->help.find("LRU is retired") != std::string::npos);
     }
 
     auto parse_expert_args = [&](std::vector<std::string> args, common_params & expert_params) {
@@ -334,7 +342,9 @@ static void test(void) {
             "--expert-cache-l1-k", "64",
             "--expert-cache-exchange-r", "16",
             "--expert-cache-elevator-p", "8",
-            "--expert-cache-l1-policy", "cumulative-lfu",
+            "--expert-cache-l1-policy", "slfu",
+            "--admit-k-cold", "off",
+            "--demote-k-hot", "on",
             "--expert-cache-roll", "deepseek4",
             "--expert-cache-prefill",
             "--ubatch-size", "8",
@@ -355,10 +365,14 @@ static void test(void) {
         assert(expert_params.n_ubatch == 8);
         assert(expert_params.expert_cache.memory_report == false);
         assert(expert_params.expert_cache.route_stats == true);
+        assert(expert_params.expert_cache.admit_k_cold == false);
+        assert(expert_params.expert_cache.demote_k_hot == true);
         assert(expert_params.expert_cache.deferred_wait == false);
         const auto context_params = common_context_params_to_llama(expert_params);
         assert(context_params.expert_cache.l1_policy == LLAMA_SILIANG_EXPERT_CACHE_POLICY_CUMULATIVE_LFU_ADMISSION);
         assert(context_params.expert_cache.route_stats == true);
+        assert(context_params.expert_cache.admit_k_cold == false);
+        assert(context_params.expert_cache.demote_k_hot == true);
     }
     {
         common_params expert_params;

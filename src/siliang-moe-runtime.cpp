@@ -29,6 +29,7 @@ constexpr int32_t SILIANG_RUNTIME_FAILURE_STAGING    = -4404;
 constexpr int32_t SILIANG_RUNTIME_FAILURE_H2D        = -4405;
 constexpr int32_t SILIANG_RUNTIME_FAILURE_EVENT      = -4406;
 constexpr int32_t SILIANG_RUNTIME_FAILURE_PREFILL    = -4407;
+constexpr std::array<uint32_t, 7> SILIANG_ROUTE_STATS_TOKEN_CHECKPOINTS = {32, 64, 128, 256, 512, 1024, 2048};
 
 using siliang_moe_policy::cache_slot;
 using siliang_moe_policy::slot_segment;
@@ -75,6 +76,8 @@ struct l2_prepare_counts {
     uint32_t hits = 0;
     uint32_t misses = 0;
     bool exact = true;
+    std::vector<int32_t> hit_experts;
+    std::vector<int32_t> miss_experts;
 };
 
 struct runtime_metrics {
@@ -104,6 +107,10 @@ struct runtime_metrics {
     uint64_t l2_waits = 0;
     uint64_t l2_releases = 0;
     uint64_t l2_release_failures = 0;
+    uint64_t l2_shadow_retains = 0;
+    uint64_t l2_shadow_unretains = 0;
+    uint64_t l2_shadow_failures = 0;
+    uint64_t slfu_cold_bypasses = 0;
     uint64_t phase_invalidations = 0;
     uint64_t prefill_maps = 0;
     uint64_t prefill_tokens = 0;
@@ -256,6 +263,8 @@ struct siliang_moe_runtime {
     using cpu_wait_fn = int (*)(ggml_backend_t);
     using cpu_copy_part_fn = int (*)(ggml_backend_t, uint32_t, uint32_t, uint32_t, void *, size_t);
     using cpu_release_fn = int (*)(ggml_backend_t, uint32_t, uint32_t, uint32_t *);
+    using cpu_retain_fn = int (*)(ggml_backend_t, uint32_t, uint32_t);
+    using cpu_unretain_fn = int (*)(ggml_backend_t, uint32_t, uint32_t, uint64_t);
 
     llama_model * model = nullptr;
     llama_context * ctx = nullptr;
@@ -284,6 +293,8 @@ struct siliang_moe_runtime {
     cpu_wait_fn cpu_wait = nullptr;
     cpu_copy_part_fn cpu_copy_part = nullptr;
     cpu_release_fn cpu_release = nullptr;
+    cpu_retain_fn cpu_retain = nullptr;
+    cpu_unretain_fn cpu_unretain = nullptr;
 
     ggml_context_ptr arena_ctx;
     ggml_backend_buffer_ptr arena_buffer;
@@ -328,6 +339,7 @@ struct siliang_moe_runtime {
 
     runtime_metrics metrics;
     route_stats_metrics route_stats_metrics;
+    size_t route_stats_checkpoint_index = 0;
     std::atomic<int32_t> failure {0};
     std::mutex mutex;
     bool bound = false;
@@ -414,11 +426,17 @@ struct siliang_moe_runtime {
         }
         if (model_info.layer_count <= 0 || model_info.routed_layer_count <= 0 || model_info.expert_count <= 0 ||
             model_info.top_k <= 0 || model_info.top_k > model_info.expert_count ||
-            (params.l1_policy != LLAMA_SILIANG_EXPERT_CACHE_POLICY_LRU &&
-             params.l1_policy != LLAMA_SILIANG_EXPERT_CACHE_POLICY_LFU &&
+            (params.l1_policy != LLAMA_SILIANG_EXPERT_CACHE_POLICY_LFU &&
              params.l1_policy != LLAMA_SILIANG_EXPERT_CACHE_POLICY_WTINYLFU_W10_SLRU_P80 &&
              params.l1_policy != LLAMA_SILIANG_EXPERT_CACHE_POLICY_CUMULATIVE_LFU_ADMISSION)) {
-            return fail(SILIANG_RUNTIME_FAILURE_INIT, "model geometry or L1 policy is invalid");
+            return fail(SILIANG_RUNTIME_FAILURE_INIT, "model geometry or supported L1 policy is invalid (LRU retired)");
+        }
+        if (params.l1_policy != LLAMA_SILIANG_EXPERT_CACHE_POLICY_CUMULATIVE_LFU_ADMISSION &&
+            (!params.admit_k_cold || params.demote_k_hot)) {
+            return fail(SILIANG_RUNTIME_FAILURE_INIT, "SLFU cold-admission/demotion controls used with a non-SLFU policy");
+        }
+        if ((!params.admit_k_cold || params.demote_k_hot) && params.l2_bytes == 0) {
+            return fail(SILIANG_RUNTIME_FAILURE_INIT, "SLFU cold-admission/demotion controls require L2");
         }
         const uint32_t route_width = static_cast<uint32_t>(model_info.top_k);
         if (params.route_stats) {
@@ -629,7 +647,9 @@ struct siliang_moe_runtime {
             load_proc(reg, "ggml_backend_cpu_siliangem_prepare_experts_async", cpu_prepare_async) &&
             load_proc(reg, "ggml_backend_cpu_siliangem_wait_experts", cpu_wait) &&
             load_proc(reg, "ggml_backend_cpu_siliangem_copy_cached_part", cpu_copy_part) &&
-            load_proc(reg, "ggml_backend_cpu_siliangem_release_cached_expert", cpu_release);
+            load_proc(reg, "ggml_backend_cpu_siliangem_release_cached_expert", cpu_release) &&
+            load_proc(reg, "ggml_backend_cpu_siliangem_retain_cached_expert", cpu_retain) &&
+            load_proc(reg, "ggml_backend_cpu_siliangem_unretain_cached_expert", cpu_unretain);
     }
 
     static bool same_schema(
@@ -1189,6 +1209,7 @@ struct siliang_moe_runtime {
         }
         if (!l2_enabled) {
             local.misses = static_cast<uint32_t>(needed.size());
+            local.miss_experts = needed;
             if (counts) {
                 *counts = local;
             }
@@ -1205,6 +1226,8 @@ struct siliang_moe_runtime {
             if (active != needed.size() || hits + misses != active) {
                 return fail(SILIANG_RUNTIME_FAILURE_L2, "L2 async ordering count is invalid");
             }
+            local.hit_experts.assign(order.begin(), order.begin() + hits);
+            local.miss_experts.assign(order.begin() + hits, order.begin() + hits + misses);
             std::sort(order.begin(), order.end());
             std::vector<int32_t> expected = needed;
             std::sort(expected.begin(), expected.end());
@@ -1242,6 +1265,10 @@ struct siliang_moe_runtime {
             return fail(SILIANG_RUNTIME_FAILURE_L2, "L2 blocking prepare failed");
         }
         const bool have_after = have_before && cpu_query && cpu_query(cpu, &after) != 0;
+        // The blocking API exposes aggregate deltas only, not which expert ids
+        // were hits vs cold misses. Keep totals for legacy metrics but mark the
+        // per-expert classification inexact so SLFU never guesses cold state.
+        local.exact = false;
         if (have_after && after.hits >= before.hits && after.misses >= before.misses) {
             const uint64_t sync_hits = after.hits - before.hits;
             const uint64_t sync_misses = after.misses - before.misses;
@@ -1308,6 +1335,7 @@ struct siliang_moe_runtime {
         if (!l2.exact || classified != count || count != top_k) {
             ++stats.unknown_routes;
             stats.state_unknown += count >= l1_hits ? count - l1_hits : count;
+            maybe_print_route_checkpoint();
             return;
         }
 
@@ -1320,6 +1348,37 @@ struct siliang_moe_runtime {
         } else {
             ++stats.unknown_routes;
             --stats.exact_routes;
+        }
+        maybe_print_route_checkpoint();
+    }
+
+    void maybe_print_route_checkpoint() {
+        if (!params.route_stats || model_info.routed_layer_count <= 0) {
+            return;
+        }
+        while (route_stats_checkpoint_index < SILIANG_ROUTE_STATS_TOKEN_CHECKPOINTS.size()) {
+            const uint64_t generated_tokens = SILIANG_ROUTE_STATS_TOKEN_CHECKPOINTS[route_stats_checkpoint_index];
+            const uint64_t target_routes = (generated_tokens - 1) * static_cast<uint64_t>(model_info.routed_layer_count);
+            if (route_stats_metrics.routes < target_routes) {
+                return;
+            }
+            const auto & stats = route_stats_metrics;
+            const double denom = stats.selections == 0 ? 1.0 : static_cast<double>(stats.selections);
+            std::fprintf(
+                    stderr,
+                    "siliang_moe_runtime: route_stats checkpoint generated_tokens=%" PRIu64
+                    " routes=%" PRIu64 " selections=%" PRIu64
+                    " L1=%" PRIu64 "(%.2f%%) L2=%" PRIu64 "(%.2f%%) uncached=%" PRIu64 "(%.2f%%)"
+                    " K_hit=%" PRIu64 " K_admit=%" PRIu64 " R=%" PRIu64 " CPU=%" PRIu64
+                    " unknown=%" PRIu64 "\n",
+                    generated_tokens, stats.routes, stats.selections,
+                    stats.state_l1, 100.0 * static_cast<double>(stats.state_l1) / denom,
+                    stats.state_l2, 100.0 * static_cast<double>(stats.state_l2) / denom,
+                    stats.state_uncached, 100.0 * static_cast<double>(stats.state_uncached) / denom,
+                    stats.exec_gpu_k_hit, stats.exec_gpu_k_admit, stats.exec_gpu_r, stats.exec_cpu,
+                    stats.state_unknown + stats.exec_unknown);
+            std::fflush(stderr);
+            ++route_stats_checkpoint_index;
         }
     }
 
@@ -1834,8 +1893,18 @@ struct siliang_moe_runtime {
 
             ++metrics.k_misses;
             ++route_misses;
+            const bool was_cold = route_l2.exact &&
+                std::find(route_l2.miss_experts.begin(), route_l2.miss_experts.end(), logical[index]) !=
+                    route_l2.miss_experts.end();
             bool admit = true;
-            slot = choose_hot_or_bypass(layer, key, route_keys, admit);
+            if (params.l1_policy == LLAMA_SILIANG_EXPERT_CACHE_POLICY_CUMULATIVE_LFU_ADMISSION &&
+                !params.admit_k_cold && was_cold) {
+                admit = false;
+                slot = -1;
+                ++metrics.slfu_cold_bypasses;
+            } else {
+                slot = choose_hot_or_bypass(layer, key, route_keys, admit);
+            }
             if (!admit) {
                 if (exchange_bank == exchange_release_events.size() && !acquire_exchange_bank(exchange_bank)) {
                     return false;
@@ -1866,8 +1935,23 @@ struct siliang_moe_runtime {
                 return fail(SILIANG_RUNTIME_FAILURE_ROUTE, "K admission has no valid bank-local translation");
             }
             const bool replaces_resident = slots[static_cast<size_t>(slot)].key >= 0;
+            const int64_t replaced_key = replaces_resident ? slots[static_cast<size_t>(slot)].key : -1;
+            bool retained_candidate_shadow = false;
+            if (params.demote_k_hot) {
+                if (!cpu_retain(cpu, static_cast<uint32_t>(layer), static_cast<uint32_t>(logical[index]))) {
+                    ++metrics.l2_shadow_failures;
+                    return fail(SILIANG_RUNTIME_FAILURE_L2, "SLFU could not lease candidate L2 shadow before K admission");
+                }
+                retained_candidate_shadow = true;
+                ++metrics.l2_shadow_retains;
+            }
             if (((force_k_reuse_fence || replaces_resident) && !fence_k_reuse(k_reuse_fenced)) ||
-                !copy_expert(layer, logical[index], admission_physical, staging_lane++, true)) {
+                !copy_expert(layer, logical[index], admission_physical, staging_lane++, !params.demote_k_hot)) {
+                if (retained_candidate_shadow) {
+                    (void) cpu_unretain(
+                        cpu, static_cast<uint32_t>(layer), static_cast<uint32_t>(logical[index]),
+                        frequencies[static_cast<size_t>(key)]);
+                }
                 return false;
             }
             if (k_reuse_fenced) {
@@ -1875,7 +1959,18 @@ struct siliang_moe_runtime {
             }
             copied = true;
             if (replaces_resident) {
-                resident[static_cast<size_t>(slots[static_cast<size_t>(slot)].key)] = -1;
+                resident[static_cast<size_t>(replaced_key)] = -1;
+                if (params.demote_k_hot) {
+                    const uint32_t demoted_layer = static_cast<uint32_t>(replaced_key / model_info.expert_count);
+                    const uint32_t demoted_expert = static_cast<uint32_t>(replaced_key % model_info.expert_count);
+                    if (!cpu_unretain(
+                            cpu, demoted_layer, demoted_expert,
+                            frequencies[static_cast<size_t>(replaced_key)])) {
+                        ++metrics.l2_shadow_failures;
+                        return fail(SILIANG_RUNTIME_FAILURE_L2, "SLFU could not release demoted K expert L2 shadow lease");
+                    }
+                    ++metrics.l2_shadow_unretains;
+                }
                 ++metrics.k_evictions;
             }
             slots[static_cast<size_t>(slot)].key = key;
@@ -1980,7 +2075,7 @@ struct siliang_moe_runtime {
             case LLAMA_SILIANG_EXPERT_CACHE_POLICY_LRU: return "lru";
             case LLAMA_SILIANG_EXPERT_CACHE_POLICY_LFU: return "lfu";
             case LLAMA_SILIANG_EXPERT_CACHE_POLICY_WTINYLFU_W10_SLRU_P80: return "wtinylfu-w10-slru-p80";
-            case LLAMA_SILIANG_EXPERT_CACHE_POLICY_CUMULATIVE_LFU_ADMISSION: return "cumulative-lfu";
+            case LLAMA_SILIANG_EXPERT_CACHE_POLICY_CUMULATIVE_LFU_ADMISSION: return "slfu";
         }
         return "invalid";
     }
@@ -2010,6 +2105,16 @@ struct siliang_moe_runtime {
                 " GPU_total=%" PRIu64 " CPU=%" PRIu64 " unknown=%" PRIu64 "\n",
                 stats.exec_gpu_k_hit, stats.exec_gpu_k_admit, stats.exec_gpu_r,
                 gpu_total, stats.exec_cpu, stats.exec_unknown);
+        if (params.l1_policy == LLAMA_SILIANG_EXPERT_CACHE_POLICY_CUMULATIVE_LFU_ADMISSION) {
+            std::fprintf(
+                    stderr,
+                    "siliang_moe_runtime: route_stats slfu admit_k_cold=%s demote_k_hot=%s"
+                    " cold_bypass=%" PRIu64 " shadow_retain=%" PRIu64
+                    " shadow_unretain=%" PRIu64 " shadow_failure=%" PRIu64 "\n",
+                    params.admit_k_cold ? "on" : "off", params.demote_k_hot ? "on" : "off",
+                    metrics.slfu_cold_bypasses, metrics.l2_shadow_retains,
+                    metrics.l2_shadow_unretains, metrics.l2_shadow_failures);
+        }
 
         const size_t top_k = static_cast<size_t>(model_info.top_k);
         const size_t side = top_k + 1;

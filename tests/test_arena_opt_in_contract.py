@@ -64,6 +64,8 @@ class ArenaOptInContractTests(unittest.TestCase):
             "--expert-cache-exchange-r",
             "--expert-cache-elevator-p",
             "--expert-cache-l1-policy",
+            "--admit-k-cold",
+            "--demote-k-hot",
             "--expert-cache-roll",
             "--expert-cache-prefill",
             "--no-expert-cache-prefill",

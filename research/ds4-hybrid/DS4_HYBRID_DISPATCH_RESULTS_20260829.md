@@ -251,3 +251,54 @@ Current execution placement for the same selections was:
 The most common pre-dispatch route composition was `L1=2, L2=2, cold=2` (361 routes, **9.03%**). Other common mixed states were `3/2/1` (6.83%), `2/3/1` (6.80%), `1/3/2` (6.78%), and `3/1/2` (5.50%). This directly shows that mixed same-layer states are central rather than edge cases.
 
 The current execution policy is correspondingly R-heavy: the most frequent execution compositions were `2 K-hit + 4 R` (20.51%), `1 K-hit + 5 R` (16.43%), `3 K-hit + 3 R` (15.40%), and `0 K-hit + 6 R` (13.93%). This makes the direct-register/hybrid CPU-GPU question quantitatively relevant to natural decode, not just to frozen micro-assays.
+
+## 11. SLFU cold-admission and K-hot demotion variants
+
+Follow-up policy work introduced `slfu` as the user-facing name for the existing lifetime-frequency cumulative-LFU admission policy (`cumulative-lfu` remains a legacy alias). L1 LRU is retired from qualification at K216: DS4's 43 routed layers x top-6 yield a 258-key cyclic route working set per token, larger than global K216. An always-admit recency scan therefore evicts early-layer entries before their next-token reuse. With exclusive L2->K admission it also removes those entries from L2, converting the next access into a cold miss.
+
+Two orthogonal SLFU controls are now research-visible:
+
+- `--admit-k-cold on|off`
+  - `on`: preserves the old first-use behavior; a cold miss may enter K immediately if SLFU admits it;
+  - `off`: a first-use cold expert is admitted to L2 but executed transiently via R; only a later L2 hit can be considered for K.
+- `--demote-k-hot on|off`
+  - `off`: preserves the exclusive L2->K behavior; successful K admission releases the L2 slot;
+  - `on`: K keeps a leased L2 shadow. L2 victim selection already excludes leased slots. K eviction releases that lease, refreshes L2 recency, and carries the SLFU lifetime-frequency as a frequency hint. This is a zero-D2H logical demotion because weights are immutable.
+
+This deliberately does **not** define a new L2 eviction policy. It only prevents K residency from destroying the lower-tier copy and preserves available cross-tier history when K residency ends. The cost is reduced effective L2 breadth while K shadows are leased.
+
+### Mechanical demotion gate
+
+A short natural `SLFU + admit-k-cold=off + demote-k-hot=on` run produced:
+
+- 279 K admissions;
+- 63 K evictions;
+- 279 L2 shadow retains;
+- 63 L2 shadow unretains;
+- 0 shadow failures.
+
+Thus every observed K eviction demoted exactly one retained shadow back to ordinary L2 eligibility without D2H.
+
+### Natural 32-token policy matrix
+
+Protocol held fixed: DS4 expert-major, L2=8 GiB LRU, K216/R12/P12, FRONT full registered, routed prefill arena off, deterministic prompt/sampling. Only L1 policy / SLFU toggles changed. Each arm observed 1,333 decode routes / 7,998 expert selections.
+
+| L1 policy | admit cold | demote hot | L1 hit | L2 hit | cold | K admits | R transient |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| LFU always-admit | n/a | n/a | **0.00%** | 9.23% | **90.77%** | 7,998 | 0 |
+| W-TinyLFU | n/a | n/a | 24.68% | 9.21% | 66.10% | 6,024 | 0 |
+| SLFU | on | off | 26.71% | **37.28%** | **36.01%** | 514 | 5,348 |
+| SLFU | off | off | **26.77%** | 37.05% | 36.18% | 492 | 5,365 |
+| SLFU | on | on | 26.74% | 34.97% | 38.28% | 512 | 5,347 |
+| SLFU | off | on | 26.68% | 34.98% | 38.33% | 505 | 5,359 |
+
+Immediate interpretation at 32 tokens:
+
+1. LFU's always-admit behavior is scan-thrashing at K216 just like LRU, despite its different victim ranking. It has not yet earned a global retirement conclusion, but it is non-competitive in this DS4/K216 cell.
+2. W-TinyLFU retains meaningful K locality but remains too admission-aggressive for an exclusive L2->K hierarchy in this early checkpoint: L2 breadth collapses and cold traffic remains high.
+3. SLFU's rejection/bypass behavior is the dominant structural improvement: it preserves a large warm L2 population while still learning a hot K set.
+4. `admit-k-cold=off` works mechanically (2,894 first-use cold bypasses in this run) but changes the 32-token aggregate only slightly because baseline SLFU already rejects most low-value cold candidates.
+5. `demote-k-hot=on` preserves K history across tiers, but at L2=8 GiB the leased shadows reduce L2 breadth enough to raise early cold share by about 2.3 percentage points. Whether that cost amortizes at later checkpoints is explicitly a long-horizon question, not resolved by the 32-token cell.
+6. Deterministic generated content was identical across the four SLFU variants; stdout diffs were limited to timing lines.
+
+The intended long-horizon checkpoints remain cumulative generated-token marks 32/64/128/256/512/1024/2048. The runtime now emits these checkpoints automatically under `--expert-cache-route-stats`. The full 2048-token matrix has not been physically completed in this pass; the 32-token matrix above is the completed natural comparison.
