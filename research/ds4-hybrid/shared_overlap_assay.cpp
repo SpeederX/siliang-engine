@@ -446,6 +446,27 @@ int main(int argc, char ** argv) try {
     const float shared_cuda_frozen_max_abs = max_abs_diff(shared_reference, gpu_graph.output);
     const float shared_current_cpu_cuda_max_abs = max_abs_between(cpu_graph.output, gpu_graph.output);
 
+    // Current-binary shared-GPU wall.  Inputs and weights are already resident;
+    // this is compute-only and intentionally excludes expert H2D.
+    std::vector<double> shared_cuda_only;
+    for (int i = 0; i < options.warmups; ++i) {
+        ggml_backend_tensor_set(gpu_graph.input, activation.data(), 0, activation.size());
+        if (ggml_backend_graph_compute(cuda.get(), gpu_graph.graph) != GGML_STATUS_SUCCESS) {
+            throw std::runtime_error("shared CUDA timing warmup failed");
+        }
+        ggml_backend_synchronize(cuda.get());
+    }
+    for (int i = 0; i < options.repeats; ++i) {
+        ggml_backend_tensor_set(gpu_graph.input, activation.data(), 0, activation.size());
+        const auto t0 = clock_type::now();
+        if (ggml_backend_graph_compute(cuda.get(), gpu_graph.graph) != GGML_STATUS_SUCCESS) {
+            throw std::runtime_error("shared CUDA timing compute failed");
+        }
+        ggml_backend_synchronize(cuda.get());
+        shared_cuda_only.push_back(ms(clock_type::now() - t0));
+    }
+    const double shared_cuda_only_ms = median(shared_cuda_only);
+
     json cells = json::array();
     for (int experts = 0; experts <= 6; ++experts) {
         std::vector<double> h2d_only;
@@ -529,6 +550,7 @@ int main(int argc, char ** argv) try {
         {"copy_style", "production-siliang-private-stream-3-h2d-ops-per-expert"},
         {"expert_slot_bytes", k_slot_bytes},
         {"shared_expert_payload_bytes", 3 * k_shared_part_bytes},
+        {"shared_cuda_only_ms_median", shared_cuda_only_ms},
         {"correctness", {
             {"shared_cpu_vs_frozen_max_abs", shared_max_abs},
             {"shared_cuda_vs_frozen_max_abs", shared_cuda_frozen_max_abs},

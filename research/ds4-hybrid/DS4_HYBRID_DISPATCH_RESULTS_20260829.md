@@ -155,3 +155,59 @@ FRONT rolling is expensive in traffic (~2.635 GiB/token), but retained phase-sla
 6. **Dedicated-thread shared CPU overlap is mechanically much better than the older contention result suggested.** It barely perturbs DMA, but the current CPU shared-expert numerical mismatch is a correctness blocker.
 
 These are component/mechanism results, not a whole-model tok/s claim. Natural integration should only follow after selecting the policy from these measured cells.
+
+## 7. Follow-up clarification: direct-registered transient GPU upper bound
+
+The section-3 result is specific to the current product path `L2 -> P memcpy -> H2D`. A second sweep removes that host copy and assumes the selected L2 source is already CUDA-registered/pinned. The destination is interpreted as transient GPU/R-style execution, not persistent K admission:
+
+`registered L2/source -> private-stream H2D -> transient GPU slot -> routed GPU compute`.
+
+No `cudaHostRegister` lifecycle is timed here; this is the already-registered transport upper bound. Per-use register/unregister was previously measured separately and rejected as too expensive.
+
+| Selected L2 hits | Best moved to transient GPU | Kept CPU | Best critical wall ms | Keep-all-CPU wall ms |
+|---:|---:|---:|---:|---:|
+| 1 | 0 | 1 | **0.655** | 0.655 |
+| 2 | 1 | 1 | **0.923** | 1.386 |
+| 3 | 1 | 2 | **1.367** | 1.518 |
+| 4 | 2 | 2 | **1.474** | 1.957 |
+| 5 | 3 | 2 | **1.957** | 2.441 |
+| 6 | 3 | 3 | **2.218** | 2.759 |
+
+This reverses the section-3 conclusion once the P memcpy is removed. For 4-6 L2-resident selected experts, the optimum converges near a balanced CPU/GPU split. In particular, with six L2-resident experts, `3 CPU + 3 transient GPU` beats `6 CPU` by about 0.54 ms in this current-binary mechanism assay.
+
+The result does **not** require a K eviction or persistent K admission. R=12 already provides two six-slot transient GPU banks in the product topology. A production direct-register design would therefore target `registered L2 -> R`, preserving K policy independently.
+
+## 8. Follow-up clarification: current shared GPU compute cost
+
+On the same 0.1.3 checkpoint and the same frozen shared-expert work unit:
+
+- shared GPU compute-only wall: **0.1139 ms/layer**;
+- shared CPU compute-only with one dedicated backend thread: **2.0027 ms/layer**;
+- current CUDA output vs frozen shared reference: `max_abs=0`;
+- current CPU output vs current CUDA/frozen: `max_abs~1.5093`.
+
+With six expert H2Ds and one dedicated shared-CPU worker:
+
+- H2D alone: **3.3018 ms**;
+- H2D while shared CPU runs: **3.3080 ms**;
+- shared CPU duration in that concurrent run: **2.6969 ms**;
+- observed H2D tail after shared CPU finishes: **0.4634 ms**;
+- shared+H2D critical wall: **3.3080 ms**.
+
+That tail stops at H2D completion; it does **not** include routed GPU compute. Six already-resident routed experts take about **0.505 ms/layer** in the current all-L1 assay. Therefore a simple `shared CPU || six H2D`, followed by six-expert GPU compute, projects to roughly `3.308 + 0.505 ~= 3.81 ms/layer`, or about `0.463 + 0.505 ~= 0.97 ms` remaining after the shared CPU branch finishes. This is a component projection, not an integrated natural-graph measurement.
+
+The shared-GPU alternative is dramatically cheaper when no routed transfer exists: about 0.114 ms/layer instead of about 2.00 ms/layer on one CPU thread. Shared-CPU placement therefore only becomes attractive if its VRAM release and overlap with routed transport compensate that exposed cost on hit-heavy layers/tokens.
+
+## 9. Terminology correction for full-L2 admission
+
+The `0-miss / 6-hit` ~0.011 ms figure is not a data admission. It is the fixed `prepare_async` lookup/classification/bookkeeping path that is called even when all selected experts are already resident in L2.
+
+For six real misses into a full 8-GiB L2:
+
+- `prepare_async`: **2.3549 ms total**, about 0.39 ms/miss, covering hit/miss classification, victim/table work and async read submission;
+- blocking `wait_experts`: **9.6698 ms total**, waiting for the six outstanding storage reads to complete;
+- total L2 arrival: **12.0445 ms**;
+- if all six are then executed on CPU, routed CPU compute adds **2.6872 ms**;
+- resulting routed/source component path: about **14.73 ms/layer**.
+
+The 2.6872 ms is actual routed expert matrix compute after the expert bytes are resident. It is not scheduling, copying or cache preparation.

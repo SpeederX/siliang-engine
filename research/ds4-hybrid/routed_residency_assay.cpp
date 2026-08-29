@@ -326,6 +326,73 @@ int main(int argc,char**argv) try {
             });
         }
     }
-    json result={{"schema","siliang-v013-ds4-residency-and-promotion-v1"},{"complete",true},{"base_checkpoint","738c1804a88e9f99742714d7fbc354ecf7e0b279"},{"cpu_threads",o.cpu_threads},{"worker_logical_cpu",o.worker_cpu},{"repeats",o.repeats},{"warmups",o.warmups},{"current_cpu_vs_gpu_endpoint_max_abs",max_abs(ref_cpu,ref_gpu)},{"all_hit_memory_only",cells},{"l2_to_gpu_promotion",promotion_cells}};
+    // Direct-registered upper-bound sweep.  This is the same post-router split
+    // as above, except the selected L2-resident source is assumed to be already
+    // CUDA-registered/pinned.  Therefore there is no L2->P memcpy: H2D reads
+    // directly from pinned_base into the transient GPU slots.  This models an
+    // R-style same-use execution without claiming persistent K admission.
+    json direct_registered_cells=json::array();
+    for(int n_l2=1;n_l2<=6;++n_l2){
+        for(int move_count=0;move_count<=n_l2;++move_count){
+            std::vector<int> move_slots;
+            std::vector<int32_t> cpu_ids,gpu_ids;
+            std::vector<float> cpu_w,gpu_w;
+            for(int i=0;i<6;++i){
+                if(i<n_l2){
+                    if(i<move_count){move_slots.push_back(i);gpu_ids.push_back(i);gpu_w.push_back(route_weights[i]);}
+                    else{cpu_ids.push_back(i);cpu_w.push_back(route_weights[i]);}
+                }else{gpu_ids.push_back(i);gpu_w.push_back(route_weights[i]);}
+            }
+            std::unique_ptr<RoutedGraph>cg,gg;
+            if(!cpu_ids.empty())cg=std::make_unique<RoutedGraph>(RoutedGraph::build(cpu.get(),cpu_arena,cpu_ids,cpu_w,clamp));
+            if(!gpu_ids.empty())gg=std::make_unique<RoutedGraph>(RoutedGraph::build(cuda.get(),gpu_arena,gpu_ids,gpu_w,clamp));
+            std::unique_ptr<CpuWorker>worker;if(cg)worker=std::make_unique<CpuWorker>(cpu.get(),cg.get(),o.worker_cpu);
+            for(int w=0;w<o.warmups;++w){
+                if(cg)ggml_backend_tensor_set(cg->input,input.data(),0,sizeof(input));
+                if(gg)ggml_backend_tensor_set(gg->input,input.data(),0,sizeof(input));
+                if(!move_slots.empty()){copy.submit_slots(gpu_arena,pinned_base,move_slots);copy.main_wait();}
+                uint64_t gen=0;if(worker)gen=worker->submit();
+                if(gg){if(ggml_backend_graph_compute(cuda.get(),gg->graph)!=GGML_STATUS_SUCCESS)throw std::runtime_error("direct-register warmup GPU compute failed");ggml_backend_synchronize(cuda.get());}
+                else if(!move_slots.empty())copy.wait_done();
+                if(worker)worker->wait(gen);
+            }
+            std::vector<double>critical,cpu_branch,gpu_path,solo_gpu_path;
+            for(int r=0;r<o.repeats;++r){
+                if(gg)ggml_backend_tensor_set(gg->input,input.data(),0,sizeof(input));
+                const auto s0=clock_type::now();
+                if(!move_slots.empty()){copy.submit_slots(gpu_arena,pinned_base,move_slots);copy.main_wait();}
+                if(gg){if(ggml_backend_graph_compute(cuda.get(),gg->graph)!=GGML_STATUS_SUCCESS)throw std::runtime_error("direct-register solo GPU compute failed");ggml_backend_synchronize(cuda.get());}
+                else if(!move_slots.empty())copy.wait_done();
+                solo_gpu_path.push_back(ms(clock_type::now()-s0));
+
+                if(cg)ggml_backend_tensor_set(cg->input,input.data(),0,sizeof(input));
+                if(gg)ggml_backend_tensor_set(gg->input,input.data(),0,sizeof(input));
+                const auto w0=clock_type::now();uint64_t gen=0;if(worker)gen=worker->submit();
+                if(!move_slots.empty()){copy.submit_slots(gpu_arena,pinned_base,move_slots);copy.main_wait();}
+                const auto g0=clock_type::now();
+                if(gg){if(ggml_backend_graph_compute(cuda.get(),gg->graph)!=GGML_STATUS_SUCCESS)throw std::runtime_error("direct-register concurrent GPU compute failed");ggml_backend_synchronize(cuda.get());}
+                else if(!move_slots.empty())copy.wait_done();
+                const auto g1=clock_type::now();
+                std::pair<clock_type::time_point,clock_type::time_point>ci={w0,w0};if(worker)ci=worker->wait(gen);
+                const auto w1=std::max(g1,ci.second);
+                critical.push_back(ms(w1-w0));cpu_branch.push_back(worker?ms(ci.second-ci.first):0.0);gpu_path.push_back(ms(g1-w0));
+            }
+            direct_registered_cells.push_back({
+                {"selected_l2_hits",n_l2},
+                {"selected_existing_l1_hits",6-n_l2},
+                {"moved_l2_to_transient_gpu",move_count},
+                {"kept_l2_cpu",n_l2-move_count},
+                {"gpu_compute_experts",6-n_l2+move_count},
+                {"timed_h2d_bytes",static_cast<uint64_t>(move_count)*(k_gate_bytes+k_up_bytes+k_down_bytes)},
+                {"source_to_p_memcpy_ms",0.0},
+                {"gpu_path_solo_ms_median",median(solo_gpu_path)},
+                {"critical_wall_concurrent_ms_median",median(critical)},
+                {"cpu_branch_concurrent_ms_median",median(cpu_branch)},
+                {"gpu_path_concurrent_ms_median",median(gpu_path)}
+            });
+        }
+    }
+
+    json result={{"schema","siliang-v013-ds4-residency-and-promotion-v2"},{"complete",true},{"base_checkpoint","738c1804a88e9f99742714d7fbc354ecf7e0b279"},{"cpu_threads",o.cpu_threads},{"worker_logical_cpu",o.worker_cpu},{"repeats",o.repeats},{"warmups",o.warmups},{"current_cpu_vs_gpu_endpoint_max_abs",max_abs(ref_cpu,ref_gpu)},{"all_hit_memory_only",cells},{"l2_to_gpu_promotion",promotion_cells},{"direct_registered_transient_gpu",direct_registered_cells}};
     std::ofstream f(o.output,std::ios::binary);if(!f)throw std::runtime_error("cannot create output");f<<result.dump(2)<<"\n";std::fprintf(stderr,"ds4-routed-residency-assay: complete: %s\n",o.output.string().c_str());return 0;
 } catch(const std::exception&e){std::fprintf(stderr,"ds4-routed-residency-assay: fatal: %s\n",e.what());return 2;}
