@@ -113,6 +113,9 @@ static enum common_expert_cache_policy parse_expert_cache_policy(
         return COMMON_EXPERT_CACHE_POLICY_CUMULATIVE_LFU_ADMISSION;
     }
 
+    if (allow_lru && allow_cumulative_lfu) {
+        throw std::invalid_argument("expected lru, lfu, slfu, cumulative-lfu, wtinylfu, or wtinylfu-w10-slru-p80");
+    }
     if (allow_lru) {
         throw std::invalid_argument("expected lru, lfu, wtinylfu, or wtinylfu-w10-slru-p80");
     }
@@ -2760,10 +2763,11 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples({LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
-        {"--expert-cache-l2-policy"}, "{lru,lfu,wtinylfu,wtinylfu-w10-slru-p80}",
-        "L2 eviction policy; wtinylfu is W-TinyLFU W10/SLRU-P80 (default: lru)",
+        {"--expert-cache-l2-policy"}, "{lru,lfu,slfu,cumulative-lfu,wtinylfu,wtinylfu-w10-slru-p80}",
+        "L2 admission/eviction policy; slfu uses lifetime-frequency candidate-victim admission with current-request transient bypass, "
+        "cumulative-lfu is a legacy alias, and wtinylfu is W-TinyLFU W10/SLRU-P80 (default: lru)",
         [](common_params & params, const std::string & value) {
-            params.expert_cache.l2_policy = parse_expert_cache_policy(value, false, true);
+            params.expert_cache.l2_policy = parse_expert_cache_policy(value, true, true);
             params.expert_cache.tier_configured = true;
         }
     ).set_examples({LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER}));

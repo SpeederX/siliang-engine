@@ -59,6 +59,8 @@
 #define SILIANGEM_POLICY_LRU                         0
 #define SILIANGEM_POLICY_LFU                         1
 #define SILIANGEM_POLICY_WTINYLFU_W10_SLRU_P80      2
+#define SILIANGEM_POLICY_SLFU                         3
+#define SILIANGEM_BYPASS                              0xFFFFFFFEu
 #define SILIANGEM_SEGMENT_NONE                       0
 #define SILIANGEM_SEGMENT_WINDOW                     1
 #define SILIANGEM_SEGMENT_PROBATION                  2
@@ -109,6 +111,14 @@ typedef struct {
     siliangem_slot *slots;
     uint32_t nslots;
 
+    /* SLFU rejected candidates still need bytes for the current request. This
+     * is bounded scratch, never persistent cache residency. It follows the
+     * backend request bound (SILIANGEM_MAX_BATCH), not the old top-k telemetry cap. */
+    uint8_t *transient_arena;
+    uint32_t transient_capacity;
+    uint32_t transient_count;
+    uint32_t transient_keys[SILIANGEM_MAX_BATCH];
+
     uint32_t *table;             /* open-addressed key -> slot, capacity mask+1 */
     uint32_t  mask;
 
@@ -130,6 +140,7 @@ typedef struct {
     OVERLAPPED pend_ov[SILIANGEM_MAX_BATCH];
     HANDLE     pend_ev[SILIANGEM_MAX_BATCH];
     uint32_t   pend_slot[SILIANGEM_MAX_BATCH];
+    uint32_t   pend_transient[SILIANGEM_MAX_BATCH];
     int        n_pending;
 
     /* Distribution of cne1 -- how many tokens routed to each expert.
@@ -963,6 +974,8 @@ static void siliangem_maybe_report(void) {
     }
 }
 
+static void siliangem_transient_reset(void);
+
 static void siliangem_shutdown(void) {
     if (g_siliangem.verbose && (g_siliangem.hits + g_siliangem.misses)) {
         siliangem_report("final");
@@ -976,6 +989,7 @@ static void siliangem_shutdown(void) {
     }
     if (g_siliangem.file && g_siliangem.file != INVALID_HANDLE_VALUE) CloseHandle(g_siliangem.file);
     if (g_siliangem.arena) VirtualFree(g_siliangem.arena, 0, MEM_RELEASE);
+    if (g_siliangem.transient_arena) VirtualFree(g_siliangem.transient_arena, 0, MEM_RELEASE);
     if (g_src.bounce) VirtualFree(g_src.bounce, 0, MEM_RELEASE);
     if (g_src.file && g_src.file != INVALID_HANDLE_VALUE) CloseHandle(g_src.file);
     free(g_src.stride);
@@ -1194,6 +1208,7 @@ have_geometry:
         g_siliangem.slots[i].segment = SILIANGEM_SEGMENT_NONE;
     }
     for (uint32_t i = 0; i <= g_siliangem.mask; i++)   g_siliangem.table[i] = SILIANGEM_EMPTY;
+    siliangem_transient_reset();
 
     if (g_siliangem.em_scattered) {
         siliangem_scat_init();
@@ -1429,6 +1444,33 @@ static void siliangem_table_rebuild(void) {
     }
 }
 
+static void siliangem_transient_reset(void) {
+    g_siliangem.transient_count = 0;
+    for (uint32_t i = 0; i < SILIANGEM_MAX_BATCH; ++i) g_siliangem.transient_keys[i] = SILIANGEM_EMPTY;
+}
+
+static int siliangem_transient_ensure(uint32_t capacity) {
+    if (g_siliangem.placement_policy != SILIANGEM_POLICY_SLFU) return 1;
+    if (capacity == 0) return 1;
+    if (capacity > SILIANGEM_MAX_BATCH || g_siliangem.expert_bytes == 0 || g_siliangem.n_pending != 0) return 0;
+    if (g_siliangem.transient_arena && g_siliangem.transient_capacity >= capacity) return 1;
+    const SIZE_T bytes = (SIZE_T) capacity * g_siliangem.expert_bytes;
+    uint8_t * replacement = (uint8_t *) VirtualAlloc(NULL, bytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!replacement) return 0;
+    if (g_siliangem.transient_arena) VirtualFree(g_siliangem.transient_arena, 0, MEM_RELEASE);
+    g_siliangem.transient_arena = replacement;
+    g_siliangem.transient_capacity = capacity;
+    siliangem_transient_reset();
+    return 1;
+}
+
+static uint32_t siliangem_transient_find(uint32_t key) {
+    for (uint32_t i = 0; i < g_siliangem.transient_count; ++i) {
+        if (g_siliangem.transient_keys[i] == key) return i;
+    }
+    return SILIANGEM_EMPTY;
+}
+
 static int siliangem_policy_key_is_active(
         uint32_t key, int layer, const int64_t * counts, int n_as) {
     if ((int) (key >> 16) != layer) return 0;
@@ -1520,7 +1562,36 @@ static uint32_t siliangem_policy_choose_basic_slot(
 }
 
 static uint32_t siliangem_policy_choose_slot(
-        int layer, const int64_t * counts, int n_as) {
+        uint32_t candidate_key, int layer, const int64_t * counts, int n_as) {
+    if (g_siliangem.placement_policy == SILIANGEM_POLICY_SLFU) {
+        uint32_t vacant = SILIANGEM_EMPTY;
+        uint32_t victim = SILIANGEM_EMPTY;
+        uint64_t victim_frequency = UINT64_MAX;
+        uint64_t oldest = UINT64_MAX;
+        for (uint32_t i = 0; i < g_siliangem.nslots; ++i) {
+            const siliangem_slot * slot = &g_siliangem.slots[i];
+            if (slot->leases != 0 || siliangem_policy_key_is_active(slot->key, layer, counts, n_as)) continue;
+            if (slot->key == SILIANGEM_EMPTY) { vacant = i; break; }
+            const uint64_t frequency = siliangem_policy_frequency(slot->key);
+            if (victim == SILIANGEM_EMPTY || frequency < victim_frequency ||
+                (frequency == victim_frequency && slot->stamp < oldest)) {
+                victim = i;
+                victim_frequency = frequency;
+                oldest = slot->stamp;
+            }
+        }
+        if (vacant != SILIANGEM_EMPTY) return vacant;
+        if (victim == SILIANGEM_EMPTY) {
+            // Every resident slot is active in the current request. Serving the
+            // candidate from transient request scratch is correct; evicting an
+            // active resident would not be.
+            ++g_siliangem.policy_main_candidate_rejections;
+            return SILIANGEM_BYPASS;
+        }
+        if (siliangem_policy_frequency(candidate_key) > victim_frequency) return victim;
+        ++g_siliangem.policy_main_candidate_rejections;
+        return SILIANGEM_BYPASS;
+    }
     if (g_siliangem.placement_policy != SILIANGEM_POLICY_WTINYLFU_W10_SLRU_P80) {
         return siliangem_policy_choose_basic_slot(layer, counts, n_as);
     }
@@ -1580,14 +1651,24 @@ static int siliangem_prepare(const char *name, const int64_t *counts, int n_as) 
     int layer, part;
     if (!siliangem_parse_name(name, &layer, &part)) return 0;
     if ((uint32_t) layer >= g_siliangem.n_layers) return 0;
+    if (part == 0 && g_siliangem.n_pending == 0) siliangem_transient_reset();
 
     uint32_t active = 0;
-    for (int a = 0; a < n_as; ++a) active += counts[a] != 0;
-    if (active > g_siliangem.nslots) return 0;
+    uint32_t missing = 0;
+    for (int a = 0; a < n_as; ++a) {
+        if (counts[a] == 0) continue;
+        ++active;
+        const uint32_t key = ((uint32_t) layer << 16) | (uint32_t) a;
+        missing += siliangem_lookup(key) == SILIANGEM_EMPTY;
+    }
+    if (active > SILIANGEM_MAX_BATCH) return 0;
+    if (g_siliangem.placement_policy != SILIANGEM_POLICY_SLFU && active > g_siliangem.nslots) return 0;
+    if (g_siliangem.placement_policy == SILIANGEM_POLICY_SLFU && !siliangem_transient_ensure(missing)) return 0;
 
     OVERLAPPED ov[SILIANGEM_MAX_BATCH];
     HANDLE     ev[SILIANGEM_MAX_BATCH];
     uint32_t   slot_of[SILIANGEM_MAX_BATCH];
+    uint32_t   transient_of[SILIANGEM_MAX_BATCH];
     int        nmiss = 0;
 
     for (int a = 0; a < n_as && nmiss < SILIANGEM_MAX_BATCH; a++) {
@@ -1596,25 +1677,39 @@ static int siliangem_prepare(const char *name, const int64_t *counts, int n_as) 
         if (part == 0) g_siliangem.expert_requests++;
         uint32_t key = ((uint32_t) layer << 16) | (uint32_t) a;
         uint32_t s = siliangem_lookup(key);
-        if (s != SILIANGEM_EMPTY) {                       /* hit */
+        const uint32_t transient = s == SILIANGEM_EMPTY ? siliangem_transient_find(key) : SILIANGEM_EMPTY;
+        if (s != SILIANGEM_EMPTY) {                       /* persistent hit */
             g_siliangem.slots[s].stamp = ++g_siliangem.clock;
             siliangem_policy_record_hit(s, layer, counts, n_as);
             g_siliangem.hits++;
             if (part == 0) g_siliangem.expert_hits++;
             continue;
         }
+        if (transient != SILIANGEM_EMPTY) {               /* current-request bypass already fetched */
+            continue;
+        }
         g_siliangem.misses++;
-        s = siliangem_policy_choose_slot(layer, counts, n_as);
+        s = siliangem_policy_choose_slot(key, layer, counts, n_as);
         if (s == SILIANGEM_EMPTY) return 0;
-        int was_occupied = (g_siliangem.slots[s].key != SILIANGEM_EMPTY);
-        g_siliangem.slots[s].key   = key;
-        g_siliangem.slots[s].stamp = ++g_siliangem.clock;
-        g_siliangem.slots[s].frequency = 1;
-        g_siliangem.slots[s].segment = g_siliangem.placement_policy == SILIANGEM_POLICY_WTINYLFU_W10_SLRU_P80
-                ? SILIANGEM_SEGMENT_WINDOW : SILIANGEM_SEGMENT_NONE;
-        ++g_siliangem.policy_admissions;
-        if (was_occupied) ++g_siliangem.policy_evictions;
-        if (was_occupied) siliangem_table_rebuild(); else siliangem_table_insert(key, s);
+        uint32_t transient_index = SILIANGEM_EMPTY;
+        uint8_t * fetch_destination = NULL;
+        if (s == SILIANGEM_BYPASS) {
+            if (!g_siliangem.transient_arena || g_siliangem.transient_count >= g_siliangem.transient_capacity) return 0;
+            transient_index = g_siliangem.transient_count++;
+            g_siliangem.transient_keys[transient_index] = key;
+            fetch_destination = g_siliangem.transient_arena + (size_t) transient_index * g_siliangem.expert_bytes;
+        } else {
+            int was_occupied = (g_siliangem.slots[s].key != SILIANGEM_EMPTY);
+            g_siliangem.slots[s].key   = key;
+            g_siliangem.slots[s].stamp = ++g_siliangem.clock;
+            g_siliangem.slots[s].frequency = 1;
+            g_siliangem.slots[s].segment = g_siliangem.placement_policy == SILIANGEM_POLICY_WTINYLFU_W10_SLRU_P80
+                    ? SILIANGEM_SEGMENT_WINDOW : SILIANGEM_SEGMENT_NONE;
+            ++g_siliangem.policy_admissions;
+            if (was_occupied) ++g_siliangem.policy_evictions;
+            if (was_occupied) siliangem_table_rebuild(); else siliangem_table_insert(key, s);
+            fetch_destination = g_siliangem.arena + (size_t) s * g_siliangem.expert_bytes;
+        }
 
         /* Scattered-source arm: same arena and unbuffered path, but bytes come
          * from the stock GGUF as three projection reads instead of one packed
@@ -1622,10 +1717,13 @@ static int siliangem_prepare(const char *name, const int64_t *counts, int n_as) 
          * misses are processed per expert. Measure the layout effect on the
          * target model and storage device. */
         if (g_src.enabled) {
-            if (!siliangem_src_fetch(layer, a,
-                              g_siliangem.arena + (size_t) s * g_siliangem.expert_bytes)) {
-                g_siliangem.slots[s].key = SILIANGEM_EMPTY;
-                siliangem_table_rebuild();
+            if (!siliangem_src_fetch(layer, a, fetch_destination)) {
+                if (transient_index != SILIANGEM_EMPTY) {
+                    g_siliangem.transient_keys[transient_index] = SILIANGEM_EMPTY;
+                } else {
+                    g_siliangem.slots[s].key = SILIANGEM_EMPTY;
+                    siliangem_table_rebuild();
+                }
             }
             continue;
         }
@@ -1637,13 +1735,18 @@ static int siliangem_prepare(const char *name, const int64_t *counts, int n_as) 
         ev[nmiss] = CreateEventA(NULL, TRUE, FALSE, NULL);
         ov[nmiss].hEvent = ev[nmiss];
         slot_of[nmiss] = s;
+        transient_of[nmiss] = transient_index;
 
-        if (!ReadFile(g_siliangem.file, g_siliangem.arena + (size_t) s * g_siliangem.expert_bytes,
+        if (!ReadFile(g_siliangem.file, fetch_destination,
                       siliangem_expert_len(layer), NULL, &ov[nmiss])
             && GetLastError() != ERROR_IO_PENDING) {
-            /* Poison the slot so a failed read is never mistaken for data. */
-            g_siliangem.slots[s].key = SILIANGEM_EMPTY;
-            siliangem_table_rebuild();
+            /* Poison the destination so a failed read is never mistaken for data. */
+            if (transient_index != SILIANGEM_EMPTY) {
+                g_siliangem.transient_keys[transient_index] = SILIANGEM_EMPTY;
+            } else {
+                g_siliangem.slots[s].key = SILIANGEM_EMPTY;
+                siliangem_table_rebuild();
+            }
             CloseHandle(ev[nmiss]);
             continue;
         }
@@ -1659,8 +1762,12 @@ static int siliangem_prepare(const char *name, const int64_t *counts, int n_as) 
             if (GetOverlappedResult(g_siliangem.file, &ov[i], &got, TRUE)) {
                 g_siliangem.bytes_read += got;
             } else {
-                g_siliangem.slots[slot_of[i]].key = SILIANGEM_EMPTY;
-                siliangem_table_rebuild();
+                if (transient_of[i] != SILIANGEM_EMPTY) {
+                    g_siliangem.transient_keys[transient_of[i]] = SILIANGEM_EMPTY;
+                } else {
+                    g_siliangem.slots[slot_of[i]].key = SILIANGEM_EMPTY;
+                    siliangem_table_rebuild();
+                }
             }
             CloseHandle(ev[i]);
         }
@@ -1710,26 +1817,33 @@ static int siliangem_prepare_async(const char *name, const int64_t *counts, int 
     for (int a = 0; a < n_as; a++) {
         if (counts[a] != 0 && (uint32_t) a < g_siliangem.n_experts) n_act++;
     }
-    if (n_act > SILIANGEM_MAX_BATCH || (uint32_t) n_act > g_siliangem.nslots) return 0;
+    if (n_act > SILIANGEM_MAX_BATCH) return 0;
+    if (g_siliangem.placement_policy != SILIANGEM_POLICY_SLFU && (uint32_t) n_act > g_siliangem.nslots) return 0;
+    if (g_siliangem.placement_policy == SILIANGEM_POLICY_SLFU && part == 0) siliangem_transient_reset();
 
-    /* pass 1: hits go straight into order[], misses are collected */
+    /* pass 1: hits and already-fetched transient bypasses go straight into
+     * order[]; only not-yet-available experts are collected as misses. */
     for (int a = 0; a < n_as; a++) {
         if (counts[a] == 0) continue;
         if ((uint32_t) a >= g_siliangem.n_experts) continue;
         if (part == 0) g_siliangem.expert_requests++;
         uint32_t key = ((uint32_t) layer << 16) | (uint32_t) a;
         uint32_t s = siliangem_lookup(key);
+        const uint32_t transient = s == SILIANGEM_EMPTY ? siliangem_transient_find(key) : SILIANGEM_EMPTY;
         if (s != SILIANGEM_EMPTY) {
             g_siliangem.slots[s].stamp = ++g_siliangem.clock;
             siliangem_policy_record_hit(s, layer, counts, n_as);
             g_siliangem.hits++;
             if (part == 0) g_siliangem.expert_hits++;
             order[(*n_hits)++] = a;
+        } else if (transient != SILIANGEM_EMPTY) {
+            order[(*n_hits)++] = a;
         } else if (nmiss < SILIANGEM_MAX_BATCH) {
             miss_idx[nmiss++] = a;
         }
     }
     *n_active = *n_hits;
+    if (g_siliangem.placement_policy == SILIANGEM_POLICY_SLFU && !siliangem_transient_ensure((uint32_t) nmiss)) return 0;
 
     /* pass 2: issue the misses, do NOT wait */
     int64_t t_issue = nmiss ? siliangem_now_ns() : 0;
@@ -1738,20 +1852,33 @@ static int siliangem_prepare_async(const char *name, const int64_t *counts, int 
         g_siliangem.misses++;
         uint32_t key = ((uint32_t) layer << 16) | (uint32_t) a;
         int64_t t_ev = siliangem_now_ns();
-        uint32_t s = siliangem_policy_choose_slot(layer, counts, n_as);
+        uint32_t s = siliangem_policy_choose_slot(key, layer, counts, n_as);
         if (s == SILIANGEM_EMPTY) {
             siliangem_wait();
             return 0;
         }
-        int was_occupied = (g_siliangem.slots[s].key != SILIANGEM_EMPTY);
-        g_siliangem.slots[s].key = key;
-        g_siliangem.slots[s].stamp = ++g_siliangem.clock;
-        g_siliangem.slots[s].frequency = 1;
-        g_siliangem.slots[s].segment = g_siliangem.placement_policy == SILIANGEM_POLICY_WTINYLFU_W10_SLRU_P80
-                ? SILIANGEM_SEGMENT_WINDOW : SILIANGEM_SEGMENT_NONE;
-        ++g_siliangem.policy_admissions;
-        if (was_occupied) ++g_siliangem.policy_evictions;
-        if (was_occupied) siliangem_table_rebuild(); else siliangem_table_insert(key, s);
+        uint32_t transient_index = SILIANGEM_EMPTY;
+        uint8_t * fetch_destination = NULL;
+        if (s == SILIANGEM_BYPASS) {
+            if (!g_siliangem.transient_arena || g_siliangem.transient_count >= g_siliangem.transient_capacity) {
+                siliangem_wait();
+                return 0;
+            }
+            transient_index = g_siliangem.transient_count++;
+            g_siliangem.transient_keys[transient_index] = key;
+            fetch_destination = g_siliangem.transient_arena + (size_t) transient_index * g_siliangem.expert_bytes;
+        } else {
+            int was_occupied = (g_siliangem.slots[s].key != SILIANGEM_EMPTY);
+            g_siliangem.slots[s].key = key;
+            g_siliangem.slots[s].stamp = ++g_siliangem.clock;
+            g_siliangem.slots[s].frequency = 1;
+            g_siliangem.slots[s].segment = g_siliangem.placement_policy == SILIANGEM_POLICY_WTINYLFU_W10_SLRU_P80
+                    ? SILIANGEM_SEGMENT_WINDOW : SILIANGEM_SEGMENT_NONE;
+            ++g_siliangem.policy_admissions;
+            if (was_occupied) ++g_siliangem.policy_evictions;
+            if (was_occupied) siliangem_table_rebuild(); else siliangem_table_insert(key, s);
+            fetch_destination = g_siliangem.arena + (size_t) s * g_siliangem.expert_bytes;
+        }
         int64_t t_after_evict = siliangem_now_ns();
         g_siliangem.evict_ns += (uint64_t)(t_after_evict - t_ev);
 
@@ -1763,19 +1890,23 @@ static int siliangem_prepare_async(const char *name, const int64_t *counts, int 
         g_siliangem.pend_ev[p] = CreateEventA(NULL, TRUE, FALSE, NULL);
         g_siliangem.pend_ov[p].hEvent = g_siliangem.pend_ev[p];
         g_siliangem.pend_slot[p] = s;
+        g_siliangem.pend_transient[p] = transient_index;
         int64_t t_after_event = siliangem_now_ns();
         g_siliangem.event_ns += (uint64_t)(t_after_event - t_after_evict);
 
-        BOOL rf_ok = ReadFile(g_siliangem.file, g_siliangem.arena + (size_t) s * g_siliangem.expert_bytes,
+        BOOL rf_ok = ReadFile(g_siliangem.file, fetch_destination,
                               siliangem_expert_len(layer), NULL, &g_siliangem.pend_ov[p]);
         DWORD rf_err = rf_ok ? 0 : GetLastError();
         g_siliangem.read_ns += (uint64_t)(siliangem_now_ns() - t_after_event);
         if (rf_ok) g_siliangem.n_sync++; else if (rf_err == ERROR_IO_PENDING) g_siliangem.n_pend++;
 
         if (!rf_ok && rf_err != ERROR_IO_PENDING) {
-            g_siliangem.slots[s].key = SILIANGEM_EMPTY;   /* poison: never mistake a failed
-                                             * read for data */
-            siliangem_table_rebuild();
+            if (transient_index != SILIANGEM_EMPTY) {
+                g_siliangem.transient_keys[transient_index] = SILIANGEM_EMPTY;
+            } else {
+                g_siliangem.slots[s].key = SILIANGEM_EMPTY;
+                siliangem_table_rebuild();
+            }
             CloseHandle(g_siliangem.pend_ev[p]);
             /* Still emit it. Dropping it from order[] would skip the expert
              * entirely and silently lose its contribution to those tokens --
@@ -1803,6 +1934,8 @@ static void siliangem_wait(void) {
         DWORD got = 0;
         if (GetOverlappedResult(g_siliangem.file, &g_siliangem.pend_ov[i], &got, TRUE)) {
             g_siliangem.bytes_read += got;
+        } else if (g_siliangem.pend_transient[i] != SILIANGEM_EMPTY) {
+            g_siliangem.transient_keys[g_siliangem.pend_transient[i]] = SILIANGEM_EMPTY;
         } else {
             g_siliangem.slots[g_siliangem.pend_slot[i]].key = SILIANGEM_EMPTY;
             siliangem_table_rebuild();
@@ -1846,9 +1979,13 @@ static const char *siliangem_ptr(const char *name, int a, size_t stride, int ith
         if (stride != (size_t) g_siliangem.part_bytes[part]) return NULL;
         poff = g_siliangem.part_off[part];
     }
-    uint32_t s = siliangem_lookup(((uint32_t) layer << 16) | (uint32_t) a);
-    if (s == SILIANGEM_EMPTY) return NULL;
-    const char *cached = (const char *) (g_siliangem.arena + (size_t) s * g_siliangem.expert_bytes + poff);
+    const uint32_t key = ((uint32_t) layer << 16) | (uint32_t) a;
+    const uint32_t s = siliangem_lookup(key);
+    const uint32_t transient = s == SILIANGEM_EMPTY ? siliangem_transient_find(key) : SILIANGEM_EMPTY;
+    if (s == SILIANGEM_EMPTY && transient == SILIANGEM_EMPTY) return NULL;
+    const char *cached = s != SILIANGEM_EMPTY
+        ? (const char *) (g_siliangem.arena + (size_t) s * g_siliangem.expert_bytes + poff)
+        : (const char *) (g_siliangem.transient_arena + (size_t) transient * g_siliangem.expert_bytes + poff);
     if (g_src.enabled && ith == 0 && !g_src_layer_substituted[layer]) {
         g_src_layer_substituted[layer] = 1;
         g_src_layers_substituted++;

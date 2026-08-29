@@ -15,7 +15,7 @@ path without hidden session state.
 | --- | --- |
 | `--expert-cache` / `--no-expert-cache` | Enable or disable the typed hierarchy. Enabling requires a nonzero L2 or L1 tier. |
 | `--expert-cache-l2-mib N` | Managed host L2 capacity in MiB. The requested value is exact and is not silently resized. |
-| `--expert-cache-l2-policy POLICY` | L2 policy: `lru`, `lfu`, or `wtinylfu-w10-slru-p80`. `wtinylfu` is an accepted short spelling. |
+| `--expert-cache-l2-policy POLICY` | L2 policy: `lru`, `lfu`, `slfu` (`cumulative-lfu` legacy alias), or `wtinylfu-w10-slru-p80`. L2 SLFU admits a candidate only when its lifetime frequency beats the coldest resident victim; rejected candidates are served from bounded current-request host scratch and do not become persistent L2 residency. `wtinylfu` is an accepted short spelling. |
 | `--expert-cache-l1-k N` | Total persistent CUDA L1 policy budget K, in expert slots. Homogeneous models share it globally; heterogeneous models partition it across routed layers. |
 | `--expert-cache-exchange-r N` | CUDA exchange capacity R per schema arena, in expert slots. Homogeneous physical capacity is K + R. |
 | `--expert-cache-elevator-p N` | One global pinned-host elevator ring P, in expert slots, sized to the largest expert schema. |

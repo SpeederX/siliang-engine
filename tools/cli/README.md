@@ -167,7 +167,7 @@
 | `--image-max-tokens N` | maximum number of tokens each image can take, only used by vision models with dynamic resolution (default: read from model)<br/>(env: LLAMA_ARG_IMAGE_MAX_TOKENS) |
 | `--expert-cache, --no-expert-cache` | enable the expert cache arena configuration (default: disabled) |
 | `--expert-cache-l2-mib N` | L2 expert cache capacity in MiB (default: 0) |
-| `--expert-cache-l2-policy {lru,lfu,wtinylfu,wtinylfu-w10-slru-p80}` | L2 eviction policy; wtinylfu is W-TinyLFU W10/SLRU-P80 (default: lru) |
+| `--expert-cache-l2-policy {lru,lfu,slfu,cumulative-lfu,wtinylfu,wtinylfu-w10-slru-p80}` | L2 admission/eviction policy; slfu uses lifetime-frequency admission with current-request transient bypass (cumulative-lfu is a legacy alias), and wtinylfu is W-TinyLFU W10/SLRU-P80 (default: lru) |
 | `--expert-cache-l1-k N` | total persistent CUDA L1 policy budget K; heterogeneous models partition K across routed layers; incompatible with LoRA adapters (default: 0) |
 | `--expert-cache-exchange-r N` | exchange slots R per schema arena; requires K > 0 (default: 0) |
 | `--expert-cache-elevator-p N` | global pinned-host elevator slots P, sized to the largest expert schema; requires K > 0 (default: 0) |

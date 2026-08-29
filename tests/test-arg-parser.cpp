@@ -313,8 +313,10 @@ static void test(void) {
         const common_arg * l2_policy_opt = find_option(cli_ctx, "--expert-cache-l2-policy");
         assert(l2_policy_opt != nullptr);
         assert(std::string(l2_policy_opt->value_hint).find("wtinylfu-w10-slru-p80") != std::string::npos);
-        assert(std::string(l2_policy_opt->value_hint).find("slfu") == std::string::npos);
+        assert(std::string(l2_policy_opt->value_hint).find("slfu") != std::string::npos);
         assert(std::string(l2_policy_opt->value_hint).find("lru") != std::string::npos);
+        assert(l2_policy_opt->help.find("lifetime-frequency") != std::string::npos);
+        assert(l2_policy_opt->help.find("transient bypass") != std::string::npos);
         assert(l2_policy_opt->help.find("W-TinyLFU") != std::string::npos);
         const common_arg * l1_k_opt = find_option(cli_ctx, "--expert-cache-l1-k");
         assert(l1_k_opt != nullptr);
@@ -459,10 +461,21 @@ static void test(void) {
     }
     {
         common_params expert_params;
-        assert(false == parse_expert_args({
+        assert(parse_expert_args({
             "binary_name", "--expert-cache", "--expert-cache-l2-mib", "1",
             "--expert-cache-l2-policy", "cumulative-lfu",
         }, expert_params));
+        assert(expert_params.expert_cache.l2_policy == COMMON_EXPERT_CACHE_POLICY_CUMULATIVE_LFU_ADMISSION);
+        const auto context_params = common_context_params_to_llama(expert_params);
+        assert(context_params.expert_cache.l2_policy == LLAMA_SILIANG_EXPERT_CACHE_POLICY_CUMULATIVE_LFU_ADMISSION);
+    }
+    {
+        common_params expert_params;
+        assert(parse_expert_args({
+            "binary_name", "--expert-cache", "--expert-cache-l2-mib", "1",
+            "--expert-cache-l2-policy", "slfu",
+        }, expert_params));
+        assert(expert_params.expert_cache.l2_policy == COMMON_EXPERT_CACHE_POLICY_CUMULATIVE_LFU_ADMISSION);
     }
     {
         common_params expert_params;

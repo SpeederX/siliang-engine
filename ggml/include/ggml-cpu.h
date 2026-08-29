@@ -92,6 +92,13 @@ extern "C" {
         GGML_SILIANGEM_CACHE_POLICY_LRU = 0,
         GGML_SILIANGEM_CACHE_POLICY_LFU = 1,
         GGML_SILIANGEM_CACHE_POLICY_WTINYLFU_W10_SLRU_P80 = 2,
+        GGML_SILIANGEM_CACHE_POLICY_SLFU = 3,
+    };
+
+    enum ggml_siliangem_expert_location {
+        GGML_SILIANGEM_EXPERT_LOCATION_NONE = 0,
+        GGML_SILIANGEM_EXPERT_LOCATION_RESIDENT = 1,
+        GGML_SILIANGEM_EXPERT_LOCATION_TRANSIENT = 2,
     };
 
     enum ggml_siliangem_source_kind {
@@ -178,6 +185,8 @@ extern "C" {
     GGML_BACKEND_API int ggml_backend_cpu_siliangem_copy_cached_part(
             ggml_backend_t backend_cpu, uint32_t layer, uint32_t expert, uint32_t part,
             void * destination, size_t destination_size);
+    GGML_BACKEND_API int ggml_backend_cpu_siliangem_expert_location(
+            ggml_backend_t backend_cpu, uint32_t layer, uint32_t expert);
     GGML_BACKEND_API int ggml_backend_cpu_siliangem_release_cached_expert(
             ggml_backend_t backend_cpu, uint32_t layer, uint32_t expert,
             uint32_t * released_slot);

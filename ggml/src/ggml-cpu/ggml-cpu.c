@@ -1604,7 +1604,8 @@ int ggml_siliangem_cache_state_configure(
 
     if (config->policy != GGML_SILIANGEM_CACHE_POLICY_LRU &&
         config->policy != GGML_SILIANGEM_CACHE_POLICY_LFU &&
-        config->policy != GGML_SILIANGEM_CACHE_POLICY_WTINYLFU_W10_SLRU_P80) return 0;
+        config->policy != GGML_SILIANGEM_CACHE_POLICY_WTINYLFU_W10_SLRU_P80 &&
+        config->policy != GGML_SILIANGEM_CACHE_POLICY_SLFU) return 0;
 
     state->enabled = config->enabled != 0;
     state->capacity_mib = config->capacity_mib;
@@ -1804,8 +1805,10 @@ int ggml_siliangem_cache_state_copy_cached_part(
     if (!state || !destination || destination_size == 0) return 0;
     siliangem_bind_state(state);
     if (!g_siliangem.ready || layer >= g_siliangem.n_layers || expert >= g_siliangem.n_experts) return 0;
-    const uint32_t slot = siliangem_lookup((layer << 16) | expert);
-    if (slot == SILIANGEM_EMPTY) return 0;
+    const uint32_t key = (layer << 16) | expert;
+    const uint32_t slot = siliangem_lookup(key);
+    const uint32_t transient = slot == SILIANGEM_EMPTY ? siliangem_transient_find(key) : SILIANGEM_EMPTY;
+    if (slot == SILIANGEM_EMPTY && transient == SILIANGEM_EMPTY) return 0;
     uint32_t offset = 0;
     uint32_t bytes = 0;
     if (g_siliangem.em) {
@@ -1819,8 +1822,24 @@ int ggml_siliangem_cache_state_copy_cached_part(
         bytes = g_siliangem.part_bytes[part];
     }
     if (bytes == 0 || destination_size != bytes) return 0;
-    memcpy(destination, g_siliangem.arena + (size_t) slot * g_siliangem.expert_bytes + offset, bytes);
+    const uint8_t * source = slot != SILIANGEM_EMPTY
+        ? g_siliangem.arena + (size_t) slot * g_siliangem.expert_bytes
+        : g_siliangem.transient_arena + (size_t) transient * g_siliangem.expert_bytes;
+    memcpy(destination, source + offset, bytes);
     return 1;
+}
+
+int ggml_siliangem_cache_state_expert_location(
+        struct ggml_siliangem_cache_state * state, uint32_t layer, uint32_t expert) {
+    if (!state) return GGML_SILIANGEM_EXPERT_LOCATION_NONE;
+    siliangem_bind_state(state);
+    if (!g_siliangem.ready || layer >= g_siliangem.n_layers || expert >= g_siliangem.n_experts) {
+        return GGML_SILIANGEM_EXPERT_LOCATION_NONE;
+    }
+    const uint32_t key = (layer << 16) | expert;
+    if (siliangem_lookup(key) != SILIANGEM_EMPTY) return GGML_SILIANGEM_EXPERT_LOCATION_RESIDENT;
+    if (siliangem_transient_find(key) != SILIANGEM_EMPTY) return GGML_SILIANGEM_EXPERT_LOCATION_TRANSIENT;
+    return GGML_SILIANGEM_EXPERT_LOCATION_NONE;
 }
 
 int ggml_siliangem_cache_state_release_cached_expert(
@@ -2001,6 +2020,12 @@ int ggml_siliangem_cache_state_copy_cached_part(
     GGML_UNUSED(state); GGML_UNUSED(layer); GGML_UNUSED(expert); GGML_UNUSED(part);
     GGML_UNUSED(destination); GGML_UNUSED(destination_size);
     return 0;
+}
+
+int ggml_siliangem_cache_state_expert_location(
+        struct ggml_siliangem_cache_state * state, uint32_t layer, uint32_t expert) {
+    GGML_UNUSED(state); GGML_UNUSED(layer); GGML_UNUSED(expert);
+    return GGML_SILIANGEM_EXPERT_LOCATION_NONE;
 }
 
 int ggml_siliangem_cache_state_release_cached_expert(

@@ -100,7 +100,8 @@ llama_context::llama_context(
     const auto valid_l2_policy = [](llama_siliang_expert_cache_policy policy) {
         return policy == LLAMA_SILIANG_EXPERT_CACHE_POLICY_LRU ||
                policy == LLAMA_SILIANG_EXPERT_CACHE_POLICY_LFU ||
-               policy == LLAMA_SILIANG_EXPERT_CACHE_POLICY_WTINYLFU_W10_SLRU_P80;
+               policy == LLAMA_SILIANG_EXPERT_CACHE_POLICY_WTINYLFU_W10_SLRU_P80 ||
+               policy == LLAMA_SILIANG_EXPERT_CACHE_POLICY_CUMULATIVE_LFU_ADMISSION;
     };
     const bool valid_l1_policy =
         expert_cache.l1_policy == LLAMA_SILIANG_EXPERT_CACHE_POLICY_LFU ||
@@ -462,7 +463,8 @@ llama_context::llama_context(
                     config.policy = GGML_SILIANGEM_CACHE_POLICY_WTINYLFU_W10_SLRU_P80;
                     break;
                 case LLAMA_SILIANG_EXPERT_CACHE_POLICY_CUMULATIVE_LFU_ADMISSION:
-                    throw std::runtime_error("Siliang L2 does not support SLFU; use lru, lfu, or wtinylfu");
+                    config.policy = GGML_SILIANGEM_CACHE_POLICY_SLFU;
+                    break;
             }
             config.deferred_io = cparams.expert_cache.deferred_wait ? 1 : 0;
             config.verbose = cparams.expert_cache.memory_report ? 1 : 0;

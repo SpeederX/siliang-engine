@@ -265,7 +265,7 @@ Two orthogonal SLFU controls are now research-visible:
   - `off`: preserves the immediate exclusive L2->K behavior;
   - `on`: if SLFU selects a K victim, the candidate executes from R for the current layer. After routed compute completes, the runtime performs an exclusive tier swap: K victim D2H -> bounded pinned demotion staging, candidate R -> K by D2D, then the candidate's L2 slot is released and reused for the victim. K metadata changes only after this transition completes. No persistent K/L2 duplication exists.
 
-This does **not** define or alter the L2 eviction policy. L2 remains independently configured as LRU, LFU, or W-TinyLFU. A demoted victim is inserted into the exact L2 slot freed by the promoted candidate and starts with normal L2-local insertion state; K lifetime-frequency is not injected into L2 policy state.
+This does **not** override the configured L2 policy. L2 is independently selectable as LRU, LFU, W-TinyLFU, or SLFU. A demoted victim is inserted into the exact L2 slot freed by the promoted candidate and starts with ordinary L2-local insertion state; K lifetime-frequency is not injected into L2 policy state. For L2 SLFU specifically, that tier swap is an explicit hot-tier demotion event rather than an ordinary cold-candidate admission, and its later survival/reuse is measured by the demotion lifecycle telemetry.
 
 ### Mechanical demotion gate — corrected exclusive swap
 
@@ -309,7 +309,7 @@ The intended long-horizon checkpoints remain cumulative generated-token marks 32
 
 A second screening pass removed frozen routes and deterministic sampling overrides. Each cell used three fresh processes with the same prompt and ordinary/default sampler behavior. Each process generated 64 requested tokens and emitted cumulative 32/64 route-stat checkpoints from the same continuously evolving cache state. K216/R12/P12, 8-GiB L2 capacity, full registered FRONT, and routed prefill arena off were held fixed. No runs were concurrent.
 
-L1 LRU was excluded by the already-established K216 scan-thrash mechanism. L2 LRU was not physically repeated in this screening; its retained historical DS4 cells remain the external control. L2 LFU and W-TinyLFU were screened physically.
+L1 LRU was excluded by the already-established K216 scan-thrash mechanism. L2 LRU was not physically repeated in this screening; its retained historical DS4 cells remained the external control. L2 LFU and W-TinyLFU were screened physically. **This was an incomplete screen and is now retained only as historical evidence:** the corrected full campaign in Section 14 repeats L2 LRU and adds L2 SLFU plus the missing L1/L2 intersections on one common binary/protocol.
 
 ### L2 policy screen with SLFU `cold=off, demote=off`
 
@@ -334,7 +334,7 @@ The W-TinyLFU-L1 arm remains admission-aggressive: at 64 tokens its three runs p
 
 The corrected exclusive `demote-k-hot=on` path does not reproduce the rejected shadow-capacity penalty. Across the three `cold=off, demote=on` runs it committed 364-404 real K<->L2 swaps per run with no cancels/failures. The persistent worker hid the D2H/D2D plus host-L2 commit work so that next-router exposed wait was about 0.036-0.064 ms per swap. The `cold=on, demote=on` cell showed higher variance in exposed wait (~0.029-0.148 ms/swap), another reason not to rank it from hit-rate alone.
 
-The three configurations retained for longer natural runs are therefore:
+The three configurations provisionally retained from that incomplete screen were therefore:
 
 1. `L2=W-TinyLFU, L1=SLFU, admit-k-cold=on, demote-k-hot=off`;
 2. `L2=W-TinyLFU, L1=SLFU, admit-k-cold=off, demote-k-hot=on`;
@@ -384,3 +384,75 @@ Before long-horizon qualification, `--expert-cache-route-stats` was extended to 
 Reuse distance is measured in subsequent visits to the victim's own layer, not raw global route calls, with buckets `1`, `2-4`, `5-8`, `9-16`, and `17+`. This handles global-K victims from both earlier and later layers correctly. No per-expert logging or additional L2 lookup is performed; the metric reuses `prepare_l2`'s existing per-route hit/miss classification.
 
 A 4-token mechanical smoke on L2 W-TinyLFU + L1 SLFU, `admit-k-cold=off`, `demote-k-hot=on` closed exactly: 44 demotions = 3 `reuse_L2` + 0 `reuse_cold` + 41 pending + 0 unknown. All three resolved useful reuses were in the first same-layer revisit bucket. This smoke is a telemetry gate only, not a performance result.
+
+## 14. L2 SLFU and corrected full natural policy campaign
+
+The earlier policy screening was not a full L2 x L1 matrix: it compared only one LFU-L2/SLFU-L1 cell and a W-TinyLFU-L2 subset, while L2 LRU was represented by historical controls and L2 SLFU did not yet exist. Any 256/1024-token "top 3" selected from that screen is therefore **provisional historical evidence**, not the final policy ranking.
+
+### L2 SLFU semantics
+
+L2 now accepts `slfu` (`cumulative-lfu` remains a legacy CLI alias) as a lifetime-frequency admission policy independent of L1 SLFU. It uses the L2 backend's existing per-`(layer, expert)` lifetime request counters:
+
+- if L2 has a vacant slot, the candidate is admitted;
+- otherwise the candidate is compared with the lowest-lifetime-frequency resident victim, with recency as a tie-breaker;
+- candidate frequency must be **strictly greater** than the victim frequency to replace it;
+- if it does not win, or every possible victim is active in the current request, persistent L2 admission is rejected;
+- a rejected expert is still fetched into **bounded current-request host scratch**, so current compute is preserved without evicting a resident L2 entry;
+- transient scratch is not inserted into the L2 hash table and disappears at the next request boundary.
+
+The transient path is not DS4/top-6 specific. It is sized from the current request miss set and is usable by both the explicit L2->P/R/K runtime path and the CPU `mul_mat_id` path. Gate/up/down reuse the same transient expert bytes within one request rather than re-reading the expert per projection.
+
+The remaining generic SiliangEM contract still has a historical `SILIANGEM_MAX_BATCH=256` bound on active experts in one backend request. L2 SLFU does **not** add a top-k<=8 restriction, but models/ubatches that require more than 256 active experts in one SiliangEM request still need the separate request-storage generalization.
+
+### L2 SLFU mechanical gates
+
+A 64-MiB L2 was used deliberately to force rejection/bypass behavior.
+
+`L2=SLFU, L1=SLFU, admit-k-cold=off, demote-k-hot=off`, 32 requested tokens:
+
+- 1,333 exact decode routes / 7,998 selections;
+- L1 10.29%, L2 1.29%, cold 88.42%;
+- **L2 policy rejections: 9,495**;
+- unknown route/execution classification: 0;
+- process return code: 0.
+
+Thus rejected L2 candidates were still available for current execution rather than being silently dropped.
+
+A second composition smoke used `L2=SLFU, L1=SLFU, admit-k-cold=on, demote-k-hot=on` with the same deliberately tiny L2. It produced:
+
+- 42 real K<->L2 transition commits;
+- 42 transition cancels for replacement candidates that were only L2-transient and therefore had no persistent L2 slot to exchange;
+- 42 real demotions;
+- 0 demotion failures / 0 unknown classifications;
+- process return code: 0.
+
+This proves that L2 transient bypass cannot be mistaken for persistent L2 ownership by the K promotion/demotion machinery.
+
+### Corrected full screening matrix
+
+The reproducible runner is `research/ds4-hybrid/run_natural_policy_matrix.py`. `screen64` declares **23 physical cells**, all run serially with three fresh processes:
+
+- L2: `LRU`, `LFU`, `W-TinyLFU`, `SLFU`;
+- L1: `LFU`, `W-TinyLFU`, and SLFU with all four `admit-k-cold on/off x demote-k-hot on/off` combinations;
+- `W-TinyLFU L1 x W-TinyLFU L2` is the one explicit exclusion because the prior natural screen already showed severe admission churn/cold collapse and the campaign decision is not to spend more qualification time on it.
+
+That gives `4 * 6 - 1 = 23` cells and `23 * 3 = 69` fresh screening runs.
+
+The fixed screen protocol is:
+
+- DS4 expert-major model used throughout this research;
+- context 4096, batch/ubatch 512;
+- CPU/batch threads 2/2;
+- `-ngl 99 -ncmoe 43 -nkvo --no-op-offload`;
+- L2 = 8192 MiB;
+- K216 / R12 / P12;
+- DeepSeek4 FRONT rolling enabled;
+- routed prefill arena disabled;
+- route/demotion telemetry enabled;
+- one fixed technical prompt for comparability;
+- **no frozen route, replay/oracle, fixed seed, temperature override, top-k override, top-p override, or min-p override**;
+- 64 requested tokens per screening replica, with cumulative 32/64 checkpoints from the same continuously evolving cache.
+
+The runner writes a campaign manifest with source commit and binary SHA-256, one JSON receipt per replica, raw stdout/stderr, cumulative checkpoint parsing, and a resumable summary. It refuses a dirty worktree by default so a campaign cannot silently span two binaries.
+
+`qualify512` is defined as three fresh natural replicas to 512 tokens for an **explicit shortlist chosen after the complete 64-token screen**; it is not auto-selected by an arbitrary built-in threshold. `top1024` is then one fresh natural run per final top-three cell. Demotion-enabled qualification uses the new reuse lifecycle metrics (`reuse_L2`, `reuse_cold`, pending and same-layer revisit distance) so transport cost and policy benefit can be evaluated together.

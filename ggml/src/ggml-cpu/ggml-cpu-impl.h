@@ -59,6 +59,8 @@ int ggml_siliangem_cache_state_wait_experts(struct ggml_siliangem_cache_state * 
 int ggml_siliangem_cache_state_copy_cached_part(
         struct ggml_siliangem_cache_state * state, uint32_t layer, uint32_t expert, uint32_t part,
         void * destination, size_t destination_size);
+int ggml_siliangem_cache_state_expert_location(
+        struct ggml_siliangem_cache_state * state, uint32_t layer, uint32_t expert);
 int ggml_siliangem_cache_state_release_cached_expert(
         struct ggml_siliangem_cache_state * state, uint32_t layer, uint32_t expert,
         uint32_t * released_slot);

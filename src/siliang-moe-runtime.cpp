@@ -294,6 +294,7 @@ struct siliang_moe_runtime {
             int32_t *, uint32_t, uint32_t *, uint32_t *, uint32_t *);
     using cpu_wait_fn = int (*)(ggml_backend_t);
     using cpu_copy_part_fn = int (*)(ggml_backend_t, uint32_t, uint32_t, uint32_t, void *, size_t);
+    using cpu_location_fn = int (*)(ggml_backend_t, uint32_t, uint32_t);
     using cpu_release_fn = int (*)(ggml_backend_t, uint32_t, uint32_t, uint32_t *);
     using cpu_store_fn = int (*)(ggml_backend_t, uint32_t, uint32_t, uint32_t,
             const void * const *, const size_t *, uint32_t);
@@ -326,6 +327,7 @@ struct siliang_moe_runtime {
     cpu_prepare_async_fn cpu_prepare_async = nullptr;
     cpu_wait_fn cpu_wait = nullptr;
     cpu_copy_part_fn cpu_copy_part = nullptr;
+    cpu_location_fn cpu_location = nullptr;
     cpu_release_fn cpu_release = nullptr;
     cpu_store_fn cpu_store = nullptr;
 
@@ -817,6 +819,7 @@ struct siliang_moe_runtime {
             load_proc(reg, "ggml_backend_cpu_siliangem_prepare_experts_async", cpu_prepare_async) &&
             load_proc(reg, "ggml_backend_cpu_siliangem_wait_experts", cpu_wait) &&
             load_proc(reg, "ggml_backend_cpu_siliangem_copy_cached_part", cpu_copy_part) &&
+            load_proc(reg, "ggml_backend_cpu_siliangem_expert_location", cpu_location) &&
             load_proc(reg, "ggml_backend_cpu_siliangem_release_cached_expert", cpu_release) &&
             load_proc(reg, "ggml_backend_cpu_siliangem_store_cached_expert_at_slot", cpu_store);
     }
@@ -2302,9 +2305,14 @@ struct siliang_moe_runtime {
             const bool was_cold = route_l2.exact &&
                 std::find(route_l2.miss_experts.begin(), route_l2.miss_experts.end(), logical[index]) !=
                     route_l2.miss_experts.end();
-            const bool l2_persistent = l2_enabled && route_l2.exact &&
-                (std::find(route_l2.hit_experts.begin(), route_l2.hit_experts.end(), logical[index]) != route_l2.hit_experts.end() ||
-                 std::find(route_l2.miss_experts.begin(), route_l2.miss_experts.end(), logical[index]) != route_l2.miss_experts.end());
+            const int l2_location = l2_enabled && cpu_location
+                ? cpu_location(cpu, static_cast<uint32_t>(layer), static_cast<uint32_t>(logical[index]))
+                : GGML_SILIANGEM_EXPERT_LOCATION_NONE;
+            const bool l2_persistent = l2_location == GGML_SILIANGEM_EXPERT_LOCATION_RESIDENT;
+            const bool l2_transient = l2_location == GGML_SILIANGEM_EXPERT_LOCATION_TRANSIENT;
+            if (l2_enabled && route_l2.exact && !l2_persistent && !l2_transient) {
+                return fail(SILIANG_RUNTIME_FAILURE_L2, "prepared L2 expert has no resident or transient location");
+            }
             bool admit = true;
             if (params.l1_policy == LLAMA_SILIANG_EXPERT_CACHE_POLICY_CUMULATIVE_LFU_ADMISSION &&
                 !params.admit_k_cold && was_cold) {
@@ -2527,6 +2535,18 @@ struct siliang_moe_runtime {
         const auto & stats = route_stats_metrics;
         const double denom = stats.selections == 0 ? 1.0 : static_cast<double>(stats.selections);
         const uint64_t gpu_total = stats.exec_gpu_k_hit + stats.exec_gpu_k_admit + stats.exec_gpu_r;
+        uint64_t l2_admissions = 0;
+        uint64_t l2_evictions = 0;
+        uint64_t l2_rejections = 0;
+        if (l2_enabled && cpu_query) {
+            ggml_siliangem_cache_info info = {};
+            info.struct_size = sizeof(info);
+            if (cpu_query(cpu, &info)) {
+                l2_admissions = info.policy_admissions;
+                l2_evictions = info.policy_evictions;
+                l2_rejections = info.policy_rejections;
+            }
+        }
         std::fprintf(
                 stderr,
                 "siliang_moe_runtime: route_stats routes=%" PRIu64 " exact_routes=%" PRIu64
@@ -2545,6 +2565,11 @@ struct siliang_moe_runtime {
                 " GPU_total=%" PRIu64 " CPU=%" PRIu64 " unknown=%" PRIu64 "\n",
                 stats.exec_gpu_k_hit, stats.exec_gpu_k_admit, stats.exec_gpu_r,
                 gpu_total, stats.exec_cpu, stats.exec_unknown);
+        std::fprintf(
+                stderr,
+                "siliang_moe_runtime: route_stats l2 admissions=%" PRIu64
+                " evictions=%" PRIu64 " rejections=%" PRIu64 "\n",
+                l2_admissions, l2_evictions, l2_rejections);
         if (params.l1_policy == LLAMA_SILIANG_EXPERT_CACHE_POLICY_CUMULATIVE_LFU_ADMISSION) {
             std::fprintf(
                     stderr,

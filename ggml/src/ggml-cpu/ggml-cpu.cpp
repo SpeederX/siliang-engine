@@ -330,6 +330,15 @@ int ggml_backend_cpu_siliangem_copy_cached_part(
             ctx->siliangem_cache, layer, expert, part, destination, destination_size);
 }
 
+int ggml_backend_cpu_siliangem_expert_location(
+        ggml_backend_t backend_cpu, uint32_t layer, uint32_t expert) {
+    if (!ggml_backend_is_cpu(backend_cpu)) {
+        return GGML_SILIANGEM_EXPERT_LOCATION_NONE;
+    }
+    auto * ctx = (ggml_backend_cpu_context *) backend_cpu->context;
+    return ggml_siliangem_cache_state_expert_location(ctx->siliangem_cache, layer, expert);
+}
+
 int ggml_backend_cpu_siliangem_release_cached_expert(
         ggml_backend_t backend_cpu, uint32_t layer, uint32_t expert,
         uint32_t * released_slot) {
@@ -805,6 +814,9 @@ static void * ggml_backend_cpu_get_proc_address(ggml_backend_reg_t reg, const ch
     }
     if (strcmp(name, "ggml_backend_cpu_siliangem_copy_cached_part") == 0) {
         return (void *)ggml_backend_cpu_siliangem_copy_cached_part;
+    }
+    if (strcmp(name, "ggml_backend_cpu_siliangem_expert_location") == 0) {
+        return (void *)ggml_backend_cpu_siliangem_expert_location;
     }
     if (strcmp(name, "ggml_backend_cpu_siliangem_release_cached_expert") == 0) {
         return (void *)ggml_backend_cpu_siliangem_release_cached_expert;
