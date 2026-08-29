@@ -304,3 +304,40 @@ Immediate interpretation at 32 tokens:
 5. The original `demote-k-hot=on` rows are invalid for the corrected design because they came from the rejected leased-shadow prototype. The corrected exclusive swap must be re-run naturally before any hit-rate conclusion is drawn.
 
 The intended long-horizon checkpoints remain cumulative generated-token marks 32/64/128/256/512/1024/2048. The runtime now emits these checkpoints automatically under `--expert-cache-route-stats`. The full 2048-token matrix has not been physically completed in this pass; the 32-token matrix above is the completed natural comparison.
+
+## 12. Natural 64-token three-replica screening
+
+A second screening pass removed frozen routes and deterministic sampling overrides. Each cell used three fresh processes with the same prompt and ordinary/default sampler behavior. Each process generated 64 requested tokens and emitted cumulative 32/64 route-stat checkpoints from the same continuously evolving cache state. K216/R12/P12, 8-GiB L2 capacity, full registered FRONT, and routed prefill arena off were held fixed. No runs were concurrent.
+
+L1 LRU was excluded by the already-established K216 scan-thrash mechanism. L2 LRU was not physically repeated in this screening; its retained historical DS4 cells remain the external control. L2 LFU and W-TinyLFU were screened physically.
+
+### L2 policy screen with SLFU `cold=off, demote=off`
+
+| L2 policy | L1 median | L2 median | cold median | combined hit | generation median |
+|---|---:|---:|---:|---:|---:|
+| LFU | 26.49% | 21.58% | **51.35%** | 48.07% | ~1.65 tok/s (2 completed timing rows) |
+| W-TinyLFU | **28.71%** | **32.32%** | **38.97%** | **61.03%** | **1.9 tok/s** |
+
+The LFU L2 result was stable across its three 64-token checkpoints (cold 51.33-53.85%) and is rejected for the longer pass in this topology. W-TinyLFU materially improves warm-L2 breadth and reduces cold traffic.
+
+### W-TinyLFU L2 x L1/admission screen
+
+| L1 policy / controls | L1 median | L2 median | cold median | combined hit | generation median | swap exposed median |
+|---|---:|---:|---:|---:|---:|---:|
+| SLFU cold=off, demote=off | 28.71% | 32.32% | 38.97% | 61.03% | 1.9 tok/s | — |
+| **SLFU cold=on, demote=off** | 28.81% | **34.26%** | **37.10%** | **63.07%** | 1.9 tok/s | — |
+| **SLFU cold=off, demote=on** | **29.26%** | 33.27% | 38.15% | 62.53% | 1.9 tok/s | **~0.040 ms/swap** |
+| **SLFU cold=on, demote=on** | 28.36% | 34.06% | 37.58% | 62.42% | 1.9 tok/s | ~0.129 ms/swap |
+| W-TinyLFU L1 | 22.68% | 5.39% | **71.93%** | 28.07% | **1.4 tok/s** | — |
+
+The W-TinyLFU-L1 arm remains admission-aggressive: at 64 tokens its three runs produced roughly 12.3k-12.7k K admissions out of 16,254 selections, R=0, and only ~5% L2 residency. It is rejected for longer qualification. L1 LFU is likewise not repeated because its always-admit K216 scan-thrash is structural and had already produced zero/near-zero useful K locality in the earlier natural cell.
+
+The corrected exclusive `demote-k-hot=on` path does not reproduce the rejected shadow-capacity penalty. Across the three `cold=off, demote=on` runs it committed 364-404 real K<->L2 swaps per run with no cancels/failures. The persistent worker hid the D2H/D2D plus host-L2 commit work so that next-router exposed wait was about 0.036-0.064 ms per swap. The `cold=on, demote=on` cell showed higher variance in exposed wait (~0.029-0.148 ms/swap), another reason not to rank it from hit-rate alone.
+
+The three configurations retained for longer natural runs are therefore:
+
+1. `L2=W-TinyLFU, L1=SLFU, admit-k-cold=on, demote-k-hot=off`;
+2. `L2=W-TinyLFU, L1=SLFU, admit-k-cold=off, demote-k-hot=on`;
+3. `L2=W-TinyLFU, L1=SLFU, admit-k-cold=on, demote-k-hot=on`.
+
+The next stage extends these cells with fresh three-replica natural runs and reads cumulative checkpoints from each uninterrupted generation rather than restarting the cache at each checkpoint.
