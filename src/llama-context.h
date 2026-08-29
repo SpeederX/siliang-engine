@@ -114,6 +114,9 @@ struct llama_context {
     bool siliang_moe_arena_set_compute_wait(
             llama_siliang_moe_arena_compute_wait_hook hook,
             void * user_data);
+    bool siliang_moe_arena_set_post_compute(
+            llama_siliang_moe_arena_post_compute_hook hook,
+            void * user_data);
     void siliang_moe_arena_clear();
     int32_t siliang_moe_arena_failure() const;
     bool siliang_moe_arena_metrics(uint64_t * generation, uint64_t * map_calls) const;

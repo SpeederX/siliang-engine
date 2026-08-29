@@ -1014,6 +1014,71 @@ enum ggml_backend_cuda_siliang_status ggml_backend_cuda_siliang_h2d_async(
             : GGML_BACKEND_CUDA_SILIANG_STATUS_CUDA_ERROR;
 }
 
+enum ggml_backend_cuda_siliang_status ggml_backend_cuda_siliang_d2h_async(
+        ggml_backend_cuda_siliang_stream_t stream,
+        ggml_tensor * tensor,
+        void * destination,
+        size_t offset,
+        size_t size) {
+    auto * stream_value = static_cast<ggml_backend_cuda_siliang_stream *>(stream);
+    if (stream_value == nullptr || tensor == nullptr || destination == nullptr || tensor->buffer == nullptr) {
+        return GGML_BACKEND_CUDA_SILIANG_STATUS_INVALID_ARGUMENT;
+    }
+    if (!ggml_backend_buffer_is_cuda(tensor->buffer)) {
+        return GGML_BACKEND_CUDA_SILIANG_STATUS_WRONG_BUFFER;
+    }
+    auto * buffer_context = static_cast<ggml_backend_cuda_buffer_context *>(tensor->buffer->context);
+    if (buffer_context == nullptr || buffer_context->device != stream_value->device) {
+        return GGML_BACKEND_CUDA_SILIANG_STATUS_WRONG_DEVICE;
+    }
+    const size_t tensor_size = ggml_nbytes(tensor);
+    if (offset > tensor_size || size > tensor_size - offset) {
+        return GGML_BACKEND_CUDA_SILIANG_STATUS_RANGE;
+    }
+    ggml_cuda_set_device(stream_value->device);
+    return cudaMemcpyAsync(
+        destination,
+        static_cast<const char *>(tensor->data) + offset,
+        size,
+        cudaMemcpyDeviceToHost,
+        stream_value->stream) == cudaSuccess
+            ? GGML_BACKEND_CUDA_SILIANG_STATUS_SUCCESS
+            : GGML_BACKEND_CUDA_SILIANG_STATUS_CUDA_ERROR;
+}
+
+enum ggml_backend_cuda_siliang_status ggml_backend_cuda_siliang_d2d_async(
+        ggml_backend_cuda_siliang_stream_t stream,
+        ggml_tensor * tensor,
+        size_t destination_offset,
+        size_t source_offset,
+        size_t size) {
+    auto * stream_value = static_cast<ggml_backend_cuda_siliang_stream *>(stream);
+    if (stream_value == nullptr || tensor == nullptr || tensor->buffer == nullptr) {
+        return GGML_BACKEND_CUDA_SILIANG_STATUS_INVALID_ARGUMENT;
+    }
+    if (!ggml_backend_buffer_is_cuda(tensor->buffer)) {
+        return GGML_BACKEND_CUDA_SILIANG_STATUS_WRONG_BUFFER;
+    }
+    auto * buffer_context = static_cast<ggml_backend_cuda_buffer_context *>(tensor->buffer->context);
+    if (buffer_context == nullptr || buffer_context->device != stream_value->device) {
+        return GGML_BACKEND_CUDA_SILIANG_STATUS_WRONG_DEVICE;
+    }
+    const size_t tensor_size = ggml_nbytes(tensor);
+    if (destination_offset > tensor_size || size > tensor_size - destination_offset ||
+        source_offset > tensor_size || size > tensor_size - source_offset) {
+        return GGML_BACKEND_CUDA_SILIANG_STATUS_RANGE;
+    }
+    ggml_cuda_set_device(stream_value->device);
+    return cudaMemcpyAsync(
+        static_cast<char *>(tensor->data) + destination_offset,
+        static_cast<const char *>(tensor->data) + source_offset,
+        size,
+        cudaMemcpyDeviceToDevice,
+        stream_value->stream) == cudaSuccess
+            ? GGML_BACKEND_CUDA_SILIANG_STATUS_SUCCESS
+            : GGML_BACKEND_CUDA_SILIANG_STATUS_CUDA_ERROR;
+}
+
 enum ggml_backend_cuda_siliang_status ggml_backend_cuda_siliang_host_register_readonly(
         ggml_backend_t backend,
         void * buffer,
@@ -5700,6 +5765,12 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
     }
     if (strcmp(name, "ggml_backend_cuda_siliang_h2d_async") == 0) {
         return (void *)ggml_backend_cuda_siliang_h2d_async;
+    }
+    if (strcmp(name, "ggml_backend_cuda_siliang_d2h_async") == 0) {
+        return (void *)ggml_backend_cuda_siliang_d2h_async;
+    }
+    if (strcmp(name, "ggml_backend_cuda_siliang_d2d_async") == 0) {
+        return (void *)ggml_backend_cuda_siliang_d2d_async;
     }
     if (strcmp(name, "ggml_backend_cuda_siliang_host_register_readonly") == 0) {
         return (void *)ggml_backend_cuda_siliang_host_register_readonly;

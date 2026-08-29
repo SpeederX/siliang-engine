@@ -87,6 +87,18 @@ GGML_BACKEND_API enum ggml_backend_cuda_siliang_status ggml_backend_cuda_siliang
         const void * source,
         size_t offset,
         size_t size);
+GGML_BACKEND_API enum ggml_backend_cuda_siliang_status ggml_backend_cuda_siliang_d2h_async(
+        ggml_backend_cuda_siliang_stream_t stream,
+        struct ggml_tensor * tensor,
+        void * destination,
+        size_t offset,
+        size_t size);
+GGML_BACKEND_API enum ggml_backend_cuda_siliang_status ggml_backend_cuda_siliang_d2d_async(
+        ggml_backend_cuda_siliang_stream_t stream,
+        struct ggml_tensor * tensor,
+        size_t destination_offset,
+        size_t source_offset,
+        size_t size);
 GGML_BACKEND_API enum ggml_backend_cuda_siliang_status ggml_backend_cuda_siliang_host_register_readonly(
         ggml_backend_t backend,
         void * buffer,

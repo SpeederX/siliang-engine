@@ -21,7 +21,7 @@ path without hidden session state.
 | `--expert-cache-elevator-p N` | One global pinned-host elevator ring P, in expert slots, sized to the largest expert schema. |
 | `--expert-cache-l1-policy POLICY` | L1 policy: `slfu` (Siliang lifetime-frequency admission/bypass; `cumulative-lfu` is a legacy alias), always-admit `lfu`, or W-TinyLFU W10/SLRU-P80. L1 LRU is retired because it scan-thrashes when routed reuse distance exceeds K. |
 | `--admit-k-cold on|off` | SLFU only. `on` permits first-use cold experts to enter K; `off` keeps first-use cold experts in L2/R and only considers them for K on a later L2 hit. Default: `on`. |
-| `--demote-k-hot on|off` | SLFU only. `on` retains a leased L2 shadow for each K resident; K eviction releases the lease and logically demotes the expert to L2 without D2H. Default: `off`. |
+| `--demote-k-hot on|off` | SLFU only. `on` defers K replacement until routed compute finishes, then swaps the L2 candidate into K and demotes the displaced K victim into the candidate's released L2 slot. No persistent K/L2 duplication. Default: `off`. |
 | `--expert-cache-roll MODE` | Static rolling mode: `off` or `deepseek4`. `deepseek4` controls only the architecture-specific FRONT slab; it is independent of the generic routed-expert K/R/P arena. |
 | `--expert-cache-prefill` / `--no-expert-cache-prefill` | Enable or disable experimental routed-MoE batch-union prompt processing in K. The current bitmap supports up to 256 experts per layer and the worst-case union must fit every layer-local K slice. Disabled by default. |
 | `--expert-cache-memory-report` / `--no-expert-cache-memory-report` | Enable or suppress periodic host-memory reporting. |

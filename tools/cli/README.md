@@ -173,7 +173,7 @@
 | `--expert-cache-elevator-p N` | global pinned-host elevator slots P, sized to the largest expert schema; requires K > 0 (default: 0) |
 | `--expert-cache-l1-policy {lfu,slfu,cumulative-lfu,wtinylfu,wtinylfu-w10-slru-p80}` | L1 policy; slfu is Siliang lifetime-frequency admission/bypass (cumulative-lfu is a legacy alias), lfu is always-admit, and wtinylfu is W-TinyLFU W10/SLRU-P80. L1 LRU is retired (default: slfu) |
 | `--admit-k-cold {on,off}` | SLFU only: allow first-use cold experts into K or keep them in L2/R until a later L2 hit (default: on) |
-| `--demote-k-hot {on,off}` | SLFU only: retain a leased L2 shadow for K residents so K eviction becomes zero-copy logical demotion (default: off) |
+| `--demote-k-hot {on,off}` | SLFU only: defer K replacement until routed compute finishes, then swap the L2 candidate into K and demote the displaced K victim into the released L2 slot; no persistent duplication (default: off) |
 | `--expert-cache-roll {off,deepseek4}` | architecture-specific static rolling mode; deepseek4 controls only the DeepSeek-V4 FRONT slab, not the generic routed-expert K/R/P arena (default: off) |
 | `--expert-cache-prefill, --no-expert-cache-prefill` | enable bounded routed-MoE batch-union prefill in the CUDA K arena; supports up to 256 experts per layer and the ubatch route union must fit every layer-local K slice (experimental, default: disabled) |
 | `--expert-cache-memory-report, --no-expert-cache-memory-report` | enable periodic expert-cache memory reporting (default: enabled) |

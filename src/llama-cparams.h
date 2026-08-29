@@ -25,6 +25,12 @@ struct llama_siliang_moe_arena_wait_call {
     uint64_t generation = 0;
 };
 
+struct llama_siliang_moe_arena_post_call {
+    llama_siliang_moe_arena_state * state = nullptr;
+    int32_t layer = -1;
+    uint64_t generation = 0;
+};
+
 struct llama_siliang_moe_arena_state {
     uint64_t generation = 0;
     std::vector<std::array<ggml_tensor *, LLAMA_SILIANG_MOE_ARENA_PART_ROLE_COUNT>> parts_by_layer;
@@ -41,13 +47,16 @@ struct llama_siliang_moe_arena_state {
     llama_siliang_moe_arena_slot_mapper mapper = nullptr;
     llama_siliang_moe_arena_failure_query failure_query = nullptr;
     llama_siliang_moe_arena_compute_wait_hook compute_wait_hook = nullptr;
+    llama_siliang_moe_arena_post_compute_hook post_compute_hook = nullptr;
     void * user_data = nullptr;
     void * compute_wait_user_data = nullptr;
+    void * post_compute_user_data = nullptr;
     std::atomic<int32_t> failure_code {0};
     std::atomic<uint64_t> map_calls {0};
     std::atomic<bool> contract_failure_logged {false};
     std::vector<llama_siliang_moe_arena_map_call> map_calls_by_layer;
     std::vector<llama_siliang_moe_arena_wait_call> wait_calls_by_layer;
+    std::vector<llama_siliang_moe_arena_post_call> post_calls_by_layer;
 };
 
 struct llama_cparams {

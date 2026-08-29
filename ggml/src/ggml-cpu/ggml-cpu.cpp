@@ -341,23 +341,15 @@ int ggml_backend_cpu_siliangem_release_cached_expert(
             ctx->siliangem_cache, layer, expert, released_slot);
 }
 
-int ggml_backend_cpu_siliangem_retain_cached_expert(
-        ggml_backend_t backend_cpu, uint32_t layer, uint32_t expert) {
+int ggml_backend_cpu_siliangem_store_cached_expert_at_slot(
+        ggml_backend_t backend_cpu, uint32_t layer, uint32_t expert, uint32_t slot,
+        const void * const * parts, const size_t * part_sizes, uint32_t part_count) {
     if (!ggml_backend_is_cpu(backend_cpu)) {
         return 0;
     }
     auto * ctx = (ggml_backend_cpu_context *) backend_cpu->context;
-    return ggml_siliangem_cache_state_retain_cached_expert(ctx->siliangem_cache, layer, expert);
-}
-
-int ggml_backend_cpu_siliangem_unretain_cached_expert(
-        ggml_backend_t backend_cpu, uint32_t layer, uint32_t expert, uint64_t frequency_hint) {
-    if (!ggml_backend_is_cpu(backend_cpu)) {
-        return 0;
-    }
-    auto * ctx = (ggml_backend_cpu_context *) backend_cpu->context;
-    return ggml_siliangem_cache_state_unretain_cached_expert(
-            ctx->siliangem_cache, layer, expert, frequency_hint);
+    return ggml_siliangem_cache_state_store_cached_expert_at_slot(
+            ctx->siliangem_cache, layer, expert, slot, parts, part_sizes, part_count);
 }
 
 int ggml_backend_cpu_siliangem_cache_occupancy(
@@ -817,11 +809,8 @@ static void * ggml_backend_cpu_get_proc_address(ggml_backend_reg_t reg, const ch
     if (strcmp(name, "ggml_backend_cpu_siliangem_release_cached_expert") == 0) {
         return (void *)ggml_backend_cpu_siliangem_release_cached_expert;
     }
-    if (strcmp(name, "ggml_backend_cpu_siliangem_retain_cached_expert") == 0) {
-        return (void *)ggml_backend_cpu_siliangem_retain_cached_expert;
-    }
-    if (strcmp(name, "ggml_backend_cpu_siliangem_unretain_cached_expert") == 0) {
-        return (void *)ggml_backend_cpu_siliangem_unretain_cached_expert;
+    if (strcmp(name, "ggml_backend_cpu_siliangem_store_cached_expert_at_slot") == 0) {
+        return (void *)ggml_backend_cpu_siliangem_store_cached_expert_at_slot;
     }
     if (strcmp(name, "ggml_backend_cpu_siliangem_cache_occupancy") == 0) {
         return (void *)ggml_backend_cpu_siliangem_cache_occupancy;

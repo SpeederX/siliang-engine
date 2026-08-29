@@ -11,6 +11,8 @@
 #include <array>
 #include <atomic>
 #include <cinttypes>
+#include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <cstring>
 #include <exception>
@@ -18,6 +20,7 @@
 #include <mutex>
 #include <new>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -80,6 +83,17 @@ struct l2_prepare_counts {
     std::vector<int32_t> miss_experts;
 };
 
+struct pending_k_transition {
+    int32_t layer = -1;
+    int32_t candidate_expert = -1;
+    int64_t candidate_key = -1;
+    int32_t candidate_r_physical = -1;
+    int32_t policy_slot = -1;
+    int32_t k_physical = -1;
+    int64_t victim_key = -1;
+    uint32_t released_l2_slot = 0;
+};
+
 struct runtime_metrics {
     uint64_t map_calls = 0;
     uint64_t route_choices = 0;
@@ -107,9 +121,19 @@ struct runtime_metrics {
     uint64_t l2_waits = 0;
     uint64_t l2_releases = 0;
     uint64_t l2_release_failures = 0;
-    uint64_t l2_shadow_retains = 0;
-    uint64_t l2_shadow_unretains = 0;
-    uint64_t l2_shadow_failures = 0;
+    uint64_t l2_demotions = 0;
+    uint64_t l2_demotion_failures = 0;
+    uint64_t k_deferred_promotions = 0;
+    uint64_t k_transition_commits = 0;
+    uint64_t k_transition_cancels = 0;
+    uint64_t demotion_d2h_ops = 0;
+    uint64_t demotion_d2h_bytes = 0;
+    uint64_t promotion_d2d_ops = 0;
+    uint64_t promotion_d2d_bytes = 0;
+    uint64_t transition_submit_ns = 0;
+    uint64_t transition_device_wait_ns = 0;
+    uint64_t transition_host_copy_ns = 0;
+    uint64_t transition_exposed_wait_ns = 0;
     uint64_t slfu_cold_bypasses = 0;
     uint64_t phase_invalidations = 0;
     uint64_t prefill_maps = 0;
@@ -255,6 +279,8 @@ struct siliang_moe_runtime {
     using cuda_stream_wait_event_fn = cuda_status (*)(cuda_stream_t, cuda_event_t);
     using cuda_main_wait_event_fn = cuda_status (*)(ggml_backend_t, cuda_event_t);
     using cuda_h2d_async_fn = cuda_status (*)(cuda_stream_t, ggml_tensor *, const void *, size_t, size_t);
+    using cuda_d2h_async_fn = cuda_status (*)(cuda_stream_t, ggml_tensor *, void *, size_t, size_t);
+    using cuda_d2d_async_fn = cuda_status (*)(cuda_stream_t, ggml_tensor *, size_t, size_t, size_t);
 
     using cpu_query_fn = int (*)(ggml_backend_t, ggml_siliangem_cache_info *);
     using cpu_prepare_fn = int (*)(ggml_backend_t, uint32_t, const int32_t *, uint32_t);
@@ -263,8 +289,8 @@ struct siliang_moe_runtime {
     using cpu_wait_fn = int (*)(ggml_backend_t);
     using cpu_copy_part_fn = int (*)(ggml_backend_t, uint32_t, uint32_t, uint32_t, void *, size_t);
     using cpu_release_fn = int (*)(ggml_backend_t, uint32_t, uint32_t, uint32_t *);
-    using cpu_retain_fn = int (*)(ggml_backend_t, uint32_t, uint32_t);
-    using cpu_unretain_fn = int (*)(ggml_backend_t, uint32_t, uint32_t, uint64_t);
+    using cpu_store_fn = int (*)(ggml_backend_t, uint32_t, uint32_t, uint32_t,
+            const void * const *, const size_t *, uint32_t);
 
     llama_model * model = nullptr;
     llama_context * ctx = nullptr;
@@ -286,6 +312,8 @@ struct siliang_moe_runtime {
     cuda_stream_wait_event_fn cuda_stream_wait_event = nullptr;
     cuda_main_wait_event_fn cuda_main_wait_event = nullptr;
     cuda_h2d_async_fn cuda_h2d_async = nullptr;
+    cuda_d2h_async_fn cuda_d2h_async = nullptr;
+    cuda_d2d_async_fn cuda_d2d_async = nullptr;
 
     cpu_query_fn cpu_query = nullptr;
     cpu_prepare_fn cpu_prepare = nullptr;
@@ -293,13 +321,14 @@ struct siliang_moe_runtime {
     cpu_wait_fn cpu_wait = nullptr;
     cpu_copy_part_fn cpu_copy_part = nullptr;
     cpu_release_fn cpu_release = nullptr;
-    cpu_retain_fn cpu_retain = nullptr;
-    cpu_unretain_fn cpu_unretain = nullptr;
+    cpu_store_fn cpu_store = nullptr;
 
     ggml_context_ptr arena_ctx;
     ggml_backend_buffer_ptr arena_buffer;
     ggml_backend_buffer_ptr staging_buffer;
+    ggml_backend_buffer_ptr demotion_buffer;
     uint8_t * staging_base = nullptr;
+    uint8_t * demotion_base = nullptr;
     size_t staging_slot_bytes = 0;
     size_t arena_bytes = 0;
 
@@ -333,6 +362,18 @@ struct siliang_moe_runtime {
     std::vector<cuda_event_t> staging_events;
     std::vector<uint8_t> staging_event_recorded;
     std::vector<cuda_event_t> k_reuse_events;
+    cuda_event_t transition_event = nullptr;
+    bool transition_event_recorded = false;
+    std::vector<pending_k_transition> pending_transitions;
+    std::thread transition_worker;
+    std::mutex transition_worker_mutex;
+    std::condition_variable transition_worker_cv;
+    bool transition_worker_stop = false;
+    bool transition_worker_job_pending = false;
+    bool transition_worker_done = true;
+    int32_t transition_worker_error = 0;
+    uint64_t transition_worker_device_wait_ns = 0;
+    uint64_t transition_worker_host_copy_ns = 0;
     size_t next_exchange_bank = 0;
     size_t next_staging_bank = 0;
     size_t active_staging_bank = 0;
@@ -358,18 +399,122 @@ struct siliang_moe_runtime {
     };
     route_phase phase = route_phase::none;
 
+    void transition_worker_loop() {
+        for (;;) {
+            {
+                std::unique_lock<std::mutex> lock(transition_worker_mutex);
+                transition_worker_cv.wait(lock, [this] {
+                    return transition_worker_stop || transition_worker_job_pending;
+                });
+                if (transition_worker_stop) {
+                    return;
+                }
+                transition_worker_job_pending = false;
+            }
+
+            int32_t error = 0;
+            const auto device_wait_start = std::chrono::steady_clock::now();
+            if (!transition_event ||
+                cuda_event_synchronize(transition_event) != GGML_BACKEND_CUDA_SILIANG_STATUS_SUCCESS) {
+                error = SILIANG_RUNTIME_FAILURE_EVENT;
+            }
+            const auto device_wait_end = std::chrono::steady_clock::now();
+
+            const auto host_copy_start = device_wait_end;
+            if (error == 0) {
+                for (auto & transition : pending_transitions) {
+                    uint32_t released_slot = 0;
+                    if (!cpu_release(
+                            cpu, static_cast<uint32_t>(transition.layer),
+                            static_cast<uint32_t>(transition.candidate_expert), &released_slot)) {
+                        error = SILIANG_RUNTIME_FAILURE_L2;
+                        break;
+                    }
+                    transition.released_l2_slot = released_slot;
+                }
+            }
+
+            if (error == 0) {
+                const auto & source = model->siliang_expert_source;
+                for (size_t transition_index = 0; transition_index < pending_transitions.size(); ++transition_index) {
+                    auto & transition = pending_transitions[transition_index];
+                    const uint32_t victim_layer = static_cast<uint32_t>(transition.victim_key / model_info.expert_count);
+                    const uint32_t victim_expert = static_cast<uint32_t>(transition.victim_key % model_info.expert_count);
+                    if (victim_layer >= layers.size() || source.n_parts == 0) {
+                        error = SILIANG_RUNTIME_FAILURE_L2;
+                        break;
+                    }
+                    const auto & victim_descriptor = layers[victim_layer];
+                    std::vector<const void *> parts(source.n_parts, nullptr);
+                    std::vector<size_t> part_sizes(source.n_parts, 0);
+                    const uint8_t * slot_base = demotion_base + transition_index * staging_slot_bytes;
+                    for (int role = 0; role < LLAMA_SILIANG_MOE_ARENA_PART_ROLE_COUNT; ++role) {
+                        if (!victim_descriptor.present[role]) {
+                            continue;
+                        }
+                        const auto & part = victim_descriptor.parts[role];
+                        if (part.l2_part < 0 || static_cast<uint32_t>(part.l2_part) >= source.n_parts) {
+                            continue;
+                        }
+                        parts[static_cast<size_t>(part.l2_part)] = slot_base + part.staging_offset;
+                        part_sizes[static_cast<size_t>(part.l2_part)] = part.bytes;
+                    }
+                    if (std::any_of(parts.begin(), parts.end(), [](const void * ptr) { return ptr == nullptr; }) ||
+                        !cpu_store(
+                            cpu, victim_layer, victim_expert, transition.released_l2_slot,
+                            parts.data(), part_sizes.data(), source.n_parts)) {
+                        error = SILIANG_RUNTIME_FAILURE_L2;
+                        break;
+                    }
+                }
+            }
+            const auto host_copy_end = std::chrono::steady_clock::now();
+
+            {
+                std::lock_guard<std::mutex> lock(transition_worker_mutex);
+                transition_worker_error = error;
+                transition_worker_device_wait_ns = static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(device_wait_end - device_wait_start).count());
+                transition_worker_host_copy_ns = static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(host_copy_end - host_copy_start).count());
+                transition_worker_done = true;
+            }
+            transition_worker_cv.notify_all();
+        }
+    }
+
+    void stop_transition_worker() {
+        if (!transition_worker.joinable()) {
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> lock(transition_worker_mutex);
+            transition_worker_stop = true;
+        }
+        transition_worker_cv.notify_all();
+        transition_worker.join();
+    }
+
     ~siliang_moe_runtime() {
+        if (copy_stream && cuda_stream_synchronize) {
+            (void) cuda_stream_synchronize(copy_stream);
+        }
+        if (!pending_transitions.empty()) {
+            (void) finalize_pending_transitions();
+        }
+        stop_transition_worker();
         if (bound && ctx) {
             llama_siliang_moe_arena_clear(ctx);
             bound = false;
-        }
-        if (copy_stream && cuda_stream_synchronize) {
-            (void) cuda_stream_synchronize(copy_stream);
         }
         destroy_events(layer_ready_events);
         destroy_events(exchange_release_events);
         destroy_events(staging_events);
         destroy_events(k_reuse_events);
+        if (transition_event && cuda_event_destroy) {
+            (void) cuda_event_destroy(transition_event);
+            transition_event = nullptr;
+        }
         if (copy_stream && cuda_stream_destroy) {
             (void) cuda_stream_destroy(copy_stream);
             copy_stream = nullptr;
@@ -417,6 +562,11 @@ struct siliang_moe_runtime {
     static int compute_wait_callback(void * user_data, int32_t layer) {
         auto * self = static_cast<siliang_moe_runtime *>(user_data);
         return self && self->compute_wait(layer) ? 0 : 1;
+    }
+
+    static int post_compute_callback(void * user_data, int32_t layer) {
+        auto * self = static_cast<siliang_moe_runtime *>(user_data);
+        return self && self->post_compute(layer) ? 0 : 1;
     }
 
     bool initialize() {
@@ -585,6 +735,12 @@ struct siliang_moe_runtime {
         if (!llama_siliang_moe_arena_set_compute_wait(ctx, compute_wait_callback, this)) {
             return fail(SILIANG_RUNTIME_FAILURE_INIT, "context compute-wait hook was rejected");
         }
+        if (params.demote_k_hot && !llama_siliang_moe_arena_set_post_compute(ctx, post_compute_callback, this)) {
+            return fail(SILIANG_RUNTIME_FAILURE_INIT, "context post-compute hook was rejected");
+        }
+        if (params.demote_k_hot) {
+            transition_worker = std::thread(&siliang_moe_runtime::transition_worker_loop, this);
+        }
 
         LLAMA_LOG_INFO(
                 "siliang_moe_runtime: armed %s arena layers=%zu/%d schemas=%zu layout=%s experts=%d top_k=%d "
@@ -635,7 +791,9 @@ struct siliang_moe_runtime {
             load_proc(reg, "ggml_backend_cuda_siliang_main_stream_event_record", cuda_main_event_record) &&
             load_proc(reg, "ggml_backend_cuda_siliang_stream_wait_event", cuda_stream_wait_event) &&
             load_proc(reg, "ggml_backend_cuda_siliang_main_stream_wait_event", cuda_main_wait_event) &&
-            load_proc(reg, "ggml_backend_cuda_siliang_h2d_async", cuda_h2d_async);
+            load_proc(reg, "ggml_backend_cuda_siliang_h2d_async", cuda_h2d_async) &&
+            load_proc(reg, "ggml_backend_cuda_siliang_d2h_async", cuda_d2h_async) &&
+            load_proc(reg, "ggml_backend_cuda_siliang_d2d_async", cuda_d2d_async);
     }
 
     bool load_cpu_procs() {
@@ -648,8 +806,7 @@ struct siliang_moe_runtime {
             load_proc(reg, "ggml_backend_cpu_siliangem_wait_experts", cpu_wait) &&
             load_proc(reg, "ggml_backend_cpu_siliangem_copy_cached_part", cpu_copy_part) &&
             load_proc(reg, "ggml_backend_cpu_siliangem_release_cached_expert", cpu_release) &&
-            load_proc(reg, "ggml_backend_cpu_siliangem_retain_cached_expert", cpu_retain) &&
-            load_proc(reg, "ggml_backend_cpu_siliangem_unretain_cached_expert", cpu_unretain);
+            load_proc(reg, "ggml_backend_cpu_siliangem_store_cached_expert_at_slot", cpu_store);
     }
 
     static bool same_schema(
@@ -953,6 +1110,20 @@ struct siliang_moe_runtime {
         if (!staging_base) {
             return fail(SILIANG_RUNTIME_FAILURE_INIT, "pinned P allocation has no host address");
         }
+        if (params.demote_k_hot) {
+            size_t demotion_bytes = 0;
+            if (!checked_mul(staging_slot_bytes, static_cast<size_t>(model_info.top_k), demotion_bytes)) {
+                return fail(SILIANG_RUNTIME_FAILURE_INIT, "demotion staging size overflow");
+            }
+            demotion_buffer.reset(ggml_backend_buft_alloc_buffer(host_buft, demotion_bytes));
+            if (!demotion_buffer) {
+                return fail(SILIANG_RUNTIME_FAILURE_INIT, "demotion staging allocation failed");
+            }
+            demotion_base = static_cast<uint8_t *>(ggml_backend_buffer_get_base(demotion_buffer.get()));
+            if (!demotion_base) {
+                return fail(SILIANG_RUNTIME_FAILURE_INIT, "demotion staging has no host address");
+            }
+        }
         return true;
     }
 
@@ -986,6 +1157,10 @@ struct siliang_moe_runtime {
             if (cuda_event_create(cuda, &event) != GGML_BACKEND_CUDA_SILIANG_STATUS_SUCCESS || !event) {
                 return fail(SILIANG_RUNTIME_FAILURE_EVENT, "K reuse CUDA event creation failed");
             }
+        }
+        if (params.demote_k_hot &&
+            (cuda_event_create(cuda, &transition_event) != GGML_BACKEND_CUDA_SILIANG_STATUS_SUCCESS || !transition_event)) {
+            return fail(SILIANG_RUNTIME_FAILURE_EVENT, "K/L2 transition event creation failed");
         }
         return !exchange_release_events.empty() && !staging_events.empty() &&
             k_reuse_events.size() == staging_events.size();
@@ -1364,18 +1539,30 @@ struct siliang_moe_runtime {
             }
             const auto & stats = route_stats_metrics;
             const double denom = stats.selections == 0 ? 1.0 : static_cast<double>(stats.selections);
+            uint64_t l2_evictions = 0;
+            uint64_t l2_rejections = 0;
+            if (l2_enabled && cpu_query) {
+                ggml_siliangem_cache_info info = {};
+                info.struct_size = sizeof(info);
+                if (cpu_query(cpu, &info)) {
+                    l2_evictions = info.policy_evictions;
+                    l2_rejections = info.policy_rejections;
+                }
+            }
             std::fprintf(
                     stderr,
                     "siliang_moe_runtime: route_stats checkpoint generated_tokens=%" PRIu64
                     " routes=%" PRIu64 " selections=%" PRIu64
                     " L1=%" PRIu64 "(%.2f%%) L2=%" PRIu64 "(%.2f%%) uncached=%" PRIu64 "(%.2f%%)"
                     " K_hit=%" PRIu64 " K_admit=%" PRIu64 " R=%" PRIu64 " CPU=%" PRIu64
-                    " unknown=%" PRIu64 "\n",
+                    " L1_evict=%" PRIu64 " L2_evict=%" PRIu64 " L2_reject=%" PRIu64
+                    " demotions=%" PRIu64 " unknown=%" PRIu64 "\n",
                     generated_tokens, stats.routes, stats.selections,
                     stats.state_l1, 100.0 * static_cast<double>(stats.state_l1) / denom,
                     stats.state_l2, 100.0 * static_cast<double>(stats.state_l2) / denom,
                     stats.state_uncached, 100.0 * static_cast<double>(stats.state_uncached) / denom,
                     stats.exec_gpu_k_hit, stats.exec_gpu_k_admit, stats.exec_gpu_r, stats.exec_cpu,
+                    metrics.k_evictions, l2_evictions, l2_rejections, metrics.l2_demotions,
                     stats.state_unknown + stats.exec_unknown);
             std::fflush(stderr);
             ++route_stats_checkpoint_index;
@@ -1801,6 +1988,146 @@ struct siliang_moe_runtime {
         return true;
     }
 
+    bool finalize_pending_transitions() {
+        if (pending_transitions.empty()) {
+            transition_event_recorded = false;
+            return true;
+        }
+        if (!transition_event_recorded) {
+            metrics.k_transition_cancels += pending_transitions.size();
+            pending_transitions.clear();
+            return true;
+        }
+
+        const auto exposed_wait_start = std::chrono::steady_clock::now();
+        int32_t worker_error = 0;
+        uint64_t device_wait_ns = 0;
+        uint64_t host_copy_ns = 0;
+        {
+            std::unique_lock<std::mutex> lock(transition_worker_mutex);
+            transition_worker_cv.wait(lock, [this] { return transition_worker_done; });
+            worker_error = transition_worker_error;
+            device_wait_ns = transition_worker_device_wait_ns;
+            host_copy_ns = transition_worker_host_copy_ns;
+        }
+        const auto exposed_wait_end = std::chrono::steady_clock::now();
+        metrics.transition_exposed_wait_ns += static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(exposed_wait_end - exposed_wait_start).count());
+        metrics.transition_device_wait_ns += device_wait_ns;
+        metrics.transition_host_copy_ns += host_copy_ns;
+
+        if (worker_error != 0) {
+            ++metrics.l2_demotion_failures;
+            return fail(
+                worker_error == SILIANG_RUNTIME_FAILURE_EVENT ? SILIANG_RUNTIME_FAILURE_EVENT : SILIANG_RUNTIME_FAILURE_L2,
+                worker_error == SILIANG_RUNTIME_FAILURE_EVENT ?
+                    "K/L2 transition worker CUDA wait failed" :
+                    "K/L2 transition worker L2 swap failed");
+        }
+
+        for (auto & transition : pending_transitions) {
+            const size_t policy_slot = static_cast<size_t>(transition.policy_slot);
+            if (policy_slot >= slots.size() || slots[policy_slot].key != transition.victim_key) {
+                return fail(SILIANG_RUNTIME_FAILURE_ROUTE, "SLFU transition K victim changed before commit");
+            }
+            resident[static_cast<size_t>(transition.victim_key)] = -1;
+            slots[policy_slot].key = transition.candidate_key;
+            slots[policy_slot].last_used = ++clock;
+            slots[policy_slot].segment = slot_segment::none;
+            slots[policy_slot].frequency = 1;
+            resident[static_cast<size_t>(transition.candidate_key)] = transition.policy_slot;
+            ++metrics.l2_releases;
+            ++metrics.k_admissions;
+            ++metrics.k_evictions;
+            ++metrics.l2_demotions;
+            ++metrics.k_transition_commits;
+        }
+        pending_transitions.clear();
+        transition_event_recorded = false;
+        return true;
+    }
+
+    bool post_compute(int32_t layer) {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (failure.load(std::memory_order_acquire) != 0 || layer < 0 || layer >= model_info.layer_count) {
+            return false;
+        }
+        if (pending_transitions.empty()) {
+            return true;
+        }
+        if (!params.demote_k_hot || !demotion_base || !transition_event || transition_event_recorded) {
+            return fail(SILIANG_RUNTIME_FAILURE_EVENT, "SLFU transition post-compute state is invalid");
+        }
+        if (pending_transitions.size() > static_cast<size_t>(model_info.top_k)) {
+            return fail(SILIANG_RUNTIME_FAILURE_ROUTE, "SLFU transition count exceeds route width");
+        }
+        const auto submit_start = std::chrono::steady_clock::now();
+
+        for (size_t transition_index = 0; transition_index < pending_transitions.size(); ++transition_index) {
+            const auto & transition = pending_transitions[transition_index];
+            if (transition.layer != layer || transition.victim_key < 0 || transition.candidate_key < 0) {
+                return fail(SILIANG_RUNTIME_FAILURE_ROUTE, "SLFU transition layer/key state is invalid");
+            }
+            const uint32_t victim_layer = static_cast<uint32_t>(transition.victim_key / model_info.expert_count);
+            if (victim_layer >= layers.size()) {
+                return fail(SILIANG_RUNTIME_FAILURE_ROUTE, "SLFU transition victim layer is invalid");
+            }
+            const auto & victim_descriptor = layers[victim_layer];
+            const auto & candidate_descriptor = layers[static_cast<size_t>(transition.layer)];
+            uint8_t * demotion_slot = demotion_base + transition_index * staging_slot_bytes;
+
+            for (int role = 0; role < LLAMA_SILIANG_MOE_ARENA_PART_ROLE_COUNT; ++role) {
+                if (!victim_descriptor.present[role]) {
+                    continue;
+                }
+                const auto & part = victim_descriptor.parts[role];
+                const size_t source_offset = static_cast<size_t>(transition.k_physical) * part.bytes;
+                if (!part.arena || cuda_d2h_async(
+                        copy_stream, part.arena, demotion_slot + part.staging_offset,
+                        source_offset, part.bytes) != GGML_BACKEND_CUDA_SILIANG_STATUS_SUCCESS) {
+                    return fail(SILIANG_RUNTIME_FAILURE_H2D, "SLFU K victim D2H submission failed");
+                }
+                ++metrics.demotion_d2h_ops;
+                metrics.demotion_d2h_bytes += part.bytes;
+            }
+
+            for (int role = 0; role < LLAMA_SILIANG_MOE_ARENA_PART_ROLE_COUNT; ++role) {
+                if (!candidate_descriptor.present[role]) {
+                    continue;
+                }
+                const auto & part = candidate_descriptor.parts[role];
+                const size_t destination_offset = static_cast<size_t>(transition.k_physical) * part.bytes;
+                const size_t source_offset = static_cast<size_t>(transition.candidate_r_physical) * part.bytes;
+                if (!part.arena || cuda_d2d_async(
+                        copy_stream, part.arena, destination_offset, source_offset, part.bytes) !=
+                            GGML_BACKEND_CUDA_SILIANG_STATUS_SUCCESS) {
+                    return fail(SILIANG_RUNTIME_FAILURE_H2D, "SLFU R-to-K D2D submission failed");
+                }
+                ++metrics.promotion_d2d_ops;
+                metrics.promotion_d2d_bytes += part.bytes;
+            }
+        }
+        if (cuda_event_record(copy_stream, transition_event) != GGML_BACKEND_CUDA_SILIANG_STATUS_SUCCESS) {
+            return fail(SILIANG_RUNTIME_FAILURE_EVENT, "SLFU transition completion event record failed");
+        }
+        transition_event_recorded = true;
+        {
+            std::lock_guard<std::mutex> worker_lock(transition_worker_mutex);
+            if (!transition_worker.joinable() || !transition_worker_done || transition_worker_job_pending) {
+                return fail(SILIANG_RUNTIME_FAILURE_EVENT, "SLFU transition worker state is busy or unavailable");
+            }
+            transition_worker_error = 0;
+            transition_worker_device_wait_ns = 0;
+            transition_worker_host_copy_ns = 0;
+            transition_worker_done = false;
+            transition_worker_job_pending = true;
+        }
+        transition_worker_cv.notify_one();
+        const auto submit_end = std::chrono::steady_clock::now();
+        metrics.transition_submit_ns += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(submit_end - submit_start).count());
+        return true;
+    }
+
     bool map(
             int32_t layer,
             const int32_t * logical,
@@ -1814,6 +2141,9 @@ struct siliang_moe_runtime {
             count == 0 || route_width == 0 || count % route_width != 0 ||
             (!prefill && count != route_width)) {
             return fail(SILIANG_RUNTIME_FAILURE_ROUTE, "route callback contract failed");
+        }
+        if (!finalize_pending_transitions()) {
+            return false;
         }
         if (layer_event_pending[static_cast<size_t>(layer)]) {
             cuda_event_t ready = layer_ready_events[static_cast<size_t>(layer)];
@@ -1871,6 +2201,7 @@ struct siliang_moe_runtime {
         uint64_t route_admissions = 0;
         uint64_t route_bypasses = 0;
         bool k_reuse_fenced = false;
+        std::vector<int64_t> policy_protected_keys = route_keys;
         for (size_t index = 0; index < count; ++index) {
             const int64_t key = route_keys[index];
             if (frequencies[static_cast<size_t>(key)] == std::numeric_limits<uint64_t>::max()) {
@@ -1896,6 +2227,9 @@ struct siliang_moe_runtime {
             const bool was_cold = route_l2.exact &&
                 std::find(route_l2.miss_experts.begin(), route_l2.miss_experts.end(), logical[index]) !=
                     route_l2.miss_experts.end();
+            const bool l2_persistent = l2_enabled && route_l2.exact &&
+                (std::find(route_l2.hit_experts.begin(), route_l2.hit_experts.end(), logical[index]) != route_l2.hit_experts.end() ||
+                 std::find(route_l2.miss_experts.begin(), route_l2.miss_experts.end(), logical[index]) != route_l2.miss_experts.end());
             bool admit = true;
             if (params.l1_policy == LLAMA_SILIANG_EXPERT_CACHE_POLICY_CUMULATIVE_LFU_ADMISSION &&
                 !params.admit_k_cold && was_cold) {
@@ -1903,7 +2237,7 @@ struct siliang_moe_runtime {
                 slot = -1;
                 ++metrics.slfu_cold_bypasses;
             } else {
-                slot = choose_hot_or_bypass(layer, key, route_keys, admit);
+                slot = choose_hot_or_bypass(layer, key, policy_protected_keys, admit);
             }
             if (!admit) {
                 if (exchange_bank == exchange_release_events.size() && !acquire_exchange_bank(exchange_bank)) {
@@ -1936,22 +2270,64 @@ struct siliang_moe_runtime {
             }
             const bool replaces_resident = slots[static_cast<size_t>(slot)].key >= 0;
             const int64_t replaced_key = replaces_resident ? slots[static_cast<size_t>(slot)].key : -1;
-            bool retained_candidate_shadow = false;
-            if (params.demote_k_hot) {
-                if (!cpu_retain(cpu, static_cast<uint32_t>(layer), static_cast<uint32_t>(logical[index]))) {
-                    ++metrics.l2_shadow_failures;
-                    return fail(SILIANG_RUNTIME_FAILURE_L2, "SLFU could not lease candidate L2 shadow before K admission");
+
+            if (params.demote_k_hot && replaces_resident && !l2_persistent) {
+                if (exchange_bank == exchange_release_events.size() && !acquire_exchange_bank(exchange_bank)) {
+                    return false;
                 }
-                retained_candidate_shadow = true;
-                ++metrics.l2_shadow_retains;
+                if (exchange_lane >= static_cast<size_t>(model_info.top_k)) {
+                    return fail(SILIANG_RUNTIME_FAILURE_ROUTE, "R bank route capacity exhausted by nonresident L2 K candidate");
+                }
+                const int32_t exchange_physical = physical_slot_for_exchange(layer, exchange_bank, exchange_lane);
+                if (exchange_physical < 0 ||
+                    !copy_expert(layer, logical[index], exchange_physical, staging_lane++, false)) {
+                    return false;
+                }
+                physical[index] = exchange_physical;
+                ++exchange_lane;
+                ++metrics.r_experts;
+                ++route_bypasses;
+                ++metrics.k_transition_cancels;
+                exchange_used = true;
+                copied = true;
+                continue;
             }
-            if (((force_k_reuse_fence || replaces_resident) && !fence_k_reuse(k_reuse_fenced)) ||
-                !copy_expert(layer, logical[index], admission_physical, staging_lane++, !params.demote_k_hot)) {
-                if (retained_candidate_shadow) {
-                    (void) cpu_unretain(
-                        cpu, static_cast<uint32_t>(layer), static_cast<uint32_t>(logical[index]),
-                        frequencies[static_cast<size_t>(key)]);
+
+            if (params.demote_k_hot && replaces_resident) {
+                if (exchange_bank == exchange_release_events.size() && !acquire_exchange_bank(exchange_bank)) {
+                    return false;
                 }
+                if (exchange_lane >= static_cast<size_t>(model_info.top_k)) {
+                    return fail(SILIANG_RUNTIME_FAILURE_ROUTE, "R bank route capacity exhausted by deferred K promotion");
+                }
+                const int32_t exchange_physical = physical_slot_for_exchange(layer, exchange_bank, exchange_lane);
+                if (exchange_physical < 0 ||
+                    !copy_expert(layer, logical[index], exchange_physical, staging_lane++, false)) {
+                    return false;
+                }
+                physical[index] = exchange_physical;
+                pending_transitions.push_back({
+                    /*.layer                =*/ layer,
+                    /*.candidate_expert     =*/ logical[index],
+                    /*.candidate_key        =*/ key,
+                    /*.candidate_r_physical =*/ exchange_physical,
+                    /*.policy_slot          =*/ slot,
+                    /*.k_physical           =*/ admission_physical,
+                    /*.victim_key           =*/ replaced_key,
+                    /*.released_l2_slot     =*/ 0,
+                });
+                policy_protected_keys.push_back(replaced_key);
+                ++exchange_lane;
+                ++metrics.r_experts;
+                ++route_bypasses;
+                ++metrics.k_deferred_promotions;
+                exchange_used = true;
+                copied = true;
+                continue;
+            }
+
+            if (((force_k_reuse_fence || replaces_resident) && !fence_k_reuse(k_reuse_fenced)) ||
+                !copy_expert(layer, logical[index], admission_physical, staging_lane++, l2_persistent)) {
                 return false;
             }
             if (k_reuse_fenced) {
@@ -1960,17 +2336,6 @@ struct siliang_moe_runtime {
             copied = true;
             if (replaces_resident) {
                 resident[static_cast<size_t>(replaced_key)] = -1;
-                if (params.demote_k_hot) {
-                    const uint32_t demoted_layer = static_cast<uint32_t>(replaced_key / model_info.expert_count);
-                    const uint32_t demoted_expert = static_cast<uint32_t>(replaced_key % model_info.expert_count);
-                    if (!cpu_unretain(
-                            cpu, demoted_layer, demoted_expert,
-                            frequencies[static_cast<size_t>(replaced_key)])) {
-                        ++metrics.l2_shadow_failures;
-                        return fail(SILIANG_RUNTIME_FAILURE_L2, "SLFU could not release demoted K expert L2 shadow lease");
-                    }
-                    ++metrics.l2_shadow_unretains;
-                }
                 ++metrics.k_evictions;
             }
             slots[static_cast<size_t>(slot)].key = key;
@@ -2109,11 +2474,22 @@ struct siliang_moe_runtime {
             std::fprintf(
                     stderr,
                     "siliang_moe_runtime: route_stats slfu admit_k_cold=%s demote_k_hot=%s"
-                    " cold_bypass=%" PRIu64 " shadow_retain=%" PRIu64
-                    " shadow_unretain=%" PRIu64 " shadow_failure=%" PRIu64 "\n",
+                    " cold_bypass=%" PRIu64 " deferred_promotions=%" PRIu64
+                    " transition_commits=%" PRIu64 " transition_cancels=%" PRIu64
+                    " demotions=%" PRIu64 " demotion_failures=%" PRIu64
+                    " D2H_ops=%" PRIu64 " D2H_bytes=%" PRIu64
+                    " D2D_ops=%" PRIu64 " D2D_bytes=%" PRIu64
+                    " submit_ms=%.3f device_wait_ms=%.3f host_copy_ms=%.3f exposed_wait_ms=%.3f\n",
                     params.admit_k_cold ? "on" : "off", params.demote_k_hot ? "on" : "off",
-                    metrics.slfu_cold_bypasses, metrics.l2_shadow_retains,
-                    metrics.l2_shadow_unretains, metrics.l2_shadow_failures);
+                    metrics.slfu_cold_bypasses, metrics.k_deferred_promotions,
+                    metrics.k_transition_commits, metrics.k_transition_cancels,
+                    metrics.l2_demotions, metrics.l2_demotion_failures,
+                    metrics.demotion_d2h_ops, metrics.demotion_d2h_bytes,
+                    metrics.promotion_d2d_ops, metrics.promotion_d2d_bytes,
+                    static_cast<double>(metrics.transition_submit_ns) / 1e6,
+                    static_cast<double>(metrics.transition_device_wait_ns) / 1e6,
+                    static_cast<double>(metrics.transition_host_copy_ns) / 1e6,
+                    static_cast<double>(metrics.transition_exposed_wait_ns) / 1e6);
         }
 
         const size_t top_k = static_cast<size_t>(model_info.top_k);

@@ -313,8 +313,9 @@ static void test(void) {
         const common_arg * l2_policy_opt = find_option(cli_ctx, "--expert-cache-l2-policy");
         assert(l2_policy_opt != nullptr);
         assert(std::string(l2_policy_opt->value_hint).find("wtinylfu-w10-slru-p80") != std::string::npos);
-        assert(std::string(l2_policy_opt->value_hint).find("cumulative-lfu") == std::string::npos);
-        assert(l2_policy_opt->help.find("W-TinyLFU W10/SLRU-P80") != std::string::npos);
+        assert(std::string(l2_policy_opt->value_hint).find("slfu") == std::string::npos);
+        assert(std::string(l2_policy_opt->value_hint).find("lru") != std::string::npos);
+        assert(l2_policy_opt->help.find("W-TinyLFU") != std::string::npos);
         const common_arg * l1_k_opt = find_option(cli_ctx, "--expert-cache-l1-k");
         assert(l1_k_opt != nullptr);
         assert(l1_k_opt->help.find("incompatible with LoRA adapters") != std::string::npos);

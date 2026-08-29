@@ -462,7 +462,7 @@ llama_context::llama_context(
                     config.policy = GGML_SILIANGEM_CACHE_POLICY_WTINYLFU_W10_SLRU_P80;
                     break;
                 case LLAMA_SILIANG_EXPERT_CACHE_POLICY_CUMULATIVE_LFU_ADMISSION:
-                    throw std::runtime_error("Siliang cumulative LFU admission is valid only for L1");
+                    throw std::runtime_error("Siliang L2 does not support SLFU; use lru, lfu, or wtinylfu");
             }
             config.deferred_io = cparams.expert_cache.deferred_wait ? 1 : 0;
             config.verbose = cparams.expert_cache.memory_report ? 1 : 0;
@@ -1336,8 +1336,10 @@ bool llama_context::siliang_moe_arena_bind(
     state.mapper = mapper;
     state.failure_query = failure_query;
     state.compute_wait_hook = nullptr;
+    state.post_compute_hook = nullptr;
     state.user_data = user_data;
     state.compute_wait_user_data = nullptr;
+    state.post_compute_user_data = nullptr;
     state.failure_code.store(0, std::memory_order_release);
     state.map_calls.store(0, std::memory_order_release);
     state.contract_failure_logged.store(false, std::memory_order_release);
@@ -1376,6 +1378,34 @@ bool llama_context::siliang_moe_arena_set_compute_wait(
     return true;
 }
 
+bool llama_context::siliang_moe_arena_set_post_compute(
+        llama_siliang_moe_arena_post_compute_hook hook,
+        void * user_data) {
+    auto & state = siliang_moe_arena_state;
+    if (!cparams.siliang_moe_arena_enabled || cparams.siliang_moe_arena_state != &state ||
+        !state.mapper || ((hook == nullptr) != (user_data == nullptr))) {
+        return false;
+    }
+    synchronize();
+    ++state.generation;
+    ++cparams.siliang_moe_arena_generation;
+    state.post_compute_hook = hook;
+    state.post_compute_user_data = user_data;
+    state.map_calls_by_layer.resize(model.layers.size());
+    state.wait_calls_by_layer.resize(state.compute_wait_hook ? model.layers.size() : 0);
+    state.post_calls_by_layer.resize(hook ? model.layers.size() : 0);
+    for (size_t layer = 0; layer < model.layers.size(); ++layer) {
+        state.map_calls_by_layer[layer] = { &state, static_cast<int32_t>(layer), state.generation };
+        if (state.compute_wait_hook) {
+            state.wait_calls_by_layer[layer] = { &state, static_cast<int32_t>(layer), state.generation };
+        }
+        if (hook) {
+            state.post_calls_by_layer[layer] = { &state, static_cast<int32_t>(layer), state.generation };
+        }
+    }
+    return true;
+}
+
 void llama_context::siliang_moe_arena_clear() {
     synchronize();
     auto & state = siliang_moe_arena_state;
@@ -1390,6 +1420,7 @@ void llama_context::siliang_moe_arena_clear() {
     state.exchange_slot_count_by_layer.clear();
     state.map_calls_by_layer.clear();
     state.wait_calls_by_layer.clear();
+    state.post_calls_by_layer.clear();
     state.capacity = 0;
     state.expert_count = 0;
     state.top_k = 0;
@@ -1398,8 +1429,10 @@ void llama_context::siliang_moe_arena_clear() {
     state.mapper = nullptr;
     state.failure_query = nullptr;
     state.compute_wait_hook = nullptr;
+    state.post_compute_hook = nullptr;
     state.user_data = nullptr;
     state.compute_wait_user_data = nullptr;
+    state.post_compute_user_data = nullptr;
     state.failure_code.store(0, std::memory_order_release);
     state.map_calls.store(0, std::memory_order_release);
     state.contract_failure_logged.store(false, std::memory_order_release);
@@ -4173,6 +4206,13 @@ int llama_siliang_moe_arena_set_compute_wait(
         llama_siliang_moe_arena_compute_wait_hook hook,
         void * user_data) {
     return ctx && ctx->siliang_moe_arena_set_compute_wait(hook, user_data) ? 1 : 0;
+}
+
+int llama_siliang_moe_arena_set_post_compute(
+        llama_context * ctx,
+        llama_siliang_moe_arena_post_compute_hook hook,
+        void * user_data) {
+    return ctx && ctx->siliang_moe_arena_set_post_compute(hook, user_data) ? 1 : 0;
 }
 
 void llama_siliang_moe_arena_clear(llama_context * ctx) {

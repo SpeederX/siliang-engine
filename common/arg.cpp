@@ -98,8 +98,9 @@ static uint64_t parse_unsigned_decimal(const std::string & value, uint64_t max_v
 
 static enum common_expert_cache_policy parse_expert_cache_policy(
         const std::string & value,
-        bool allow_cumulative_lfu) {
-    if (value == "lru") {
+        bool allow_cumulative_lfu,
+        bool allow_lru) {
+    if (value == "lru" && allow_lru) {
         return COMMON_EXPERT_CACHE_POLICY_LRU;
     }
     if (value == "lfu") {
@@ -112,9 +113,10 @@ static enum common_expert_cache_policy parse_expert_cache_policy(
         return COMMON_EXPERT_CACHE_POLICY_CUMULATIVE_LFU_ADMISSION;
     }
 
-    throw std::invalid_argument(allow_cumulative_lfu ?
-        "expected lru, lfu, slfu, cumulative-lfu, wtinylfu, or wtinylfu-w10-slru-p80" :
-        "expected lru, lfu, wtinylfu, or wtinylfu-w10-slru-p80");
+    if (allow_lru) {
+        throw std::invalid_argument("expected lru, lfu, wtinylfu, or wtinylfu-w10-slru-p80");
+    }
+    throw std::invalid_argument("expected lfu, slfu, cumulative-lfu, wtinylfu, or wtinylfu-w10-slru-p80");
 }
 
 static bool parse_on_off(const std::string & value) {
@@ -2761,7 +2763,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         {"--expert-cache-l2-policy"}, "{lru,lfu,wtinylfu,wtinylfu-w10-slru-p80}",
         "L2 eviction policy; wtinylfu is W-TinyLFU W10/SLRU-P80 (default: lru)",
         [](common_params & params, const std::string & value) {
-            params.expert_cache.l2_policy = parse_expert_cache_policy(value, false);
+            params.expert_cache.l2_policy = parse_expert_cache_policy(value, false, true);
             params.expert_cache.tier_configured = true;
         }
     ).set_examples({LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER}));
@@ -2798,7 +2800,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         "lfu is always-admit, and wtinylfu is W-TinyLFU W10/SLRU-P80. LRU is retired for L1 because "
         "global K scan-thrashes when route reuse distance exceeds K (default: slfu)",
         [](common_params & params, const std::string & value) {
-            params.expert_cache.l1_policy = parse_expert_cache_policy(value, true);
+            params.expert_cache.l1_policy = parse_expert_cache_policy(value, true, false);
             params.expert_cache.tier_configured = true;
         }
     ).set_examples({LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER}));
@@ -2813,8 +2815,8 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
     ).set_examples({LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
         {"--demote-k-hot"}, "{on,off}",
-        "SLFU only: keep a leased L2 shadow while an expert is K-resident, so K eviction becomes zero-copy "
-        "logical demotion back to L2 (default: off)",
+        "SLFU only: after routed compute, swap an admitted L2 candidate into K and demote the displaced K victim "
+        "into the candidate's released L2 slot; no persistent tier duplication (default: off)",
         [](common_params & params, const std::string & value) {
             params.expert_cache.demote_k_hot = parse_on_off(value);
             params.expert_cache.tier_configured = true;

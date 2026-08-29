@@ -1844,31 +1844,43 @@ int ggml_siliangem_cache_state_release_cached_expert(
     return 1;
 }
 
-int ggml_siliangem_cache_state_retain_cached_expert(
-        struct ggml_siliangem_cache_state * state, uint32_t layer, uint32_t expert) {
-    if (!state) return 0;
+int ggml_siliangem_cache_state_store_cached_expert_at_slot(
+        struct ggml_siliangem_cache_state * state, uint32_t layer, uint32_t expert, uint32_t slot,
+        const void * const * parts, const size_t * part_sizes, uint32_t part_count) {
+    if (!state || !parts || !part_sizes) return 0;
     siliangem_bind_state(state);
-    if (!g_siliangem.ready || layer >= g_siliangem.n_layers || expert >= g_siliangem.n_experts) return 0;
-    const uint32_t slot = siliangem_lookup((layer << 16) | expert);
-    if (slot == SILIANGEM_EMPTY || g_siliangem.slots[slot].leases == UINT32_MAX) return 0;
-    ++g_siliangem.slots[slot].leases;
-    return 1;
-}
+    if (!g_siliangem.ready || layer >= g_siliangem.n_layers || expert >= g_siliangem.n_experts ||
+        slot >= g_siliangem.nslots || g_siliangem.slots[slot].key != SILIANGEM_EMPTY ||
+        g_siliangem.slots[slot].leases != 0 || g_siliangem.n_pending != 0) return 0;
+    const uint32_t expected_parts = g_siliangem.em ? (uint32_t) g_siliangem.em_nparts : 3u;
+    if (part_count != expected_parts) return 0;
+    const uint32_t key = (layer << 16) | expert;
+    if (siliangem_lookup(key) != SILIANGEM_EMPTY) return 0;
 
-int ggml_siliangem_cache_state_unretain_cached_expert(
-        struct ggml_siliangem_cache_state * state, uint32_t layer, uint32_t expert, uint64_t frequency_hint) {
-    if (!state) return 0;
-    siliangem_bind_state(state);
-    if (!g_siliangem.ready || layer >= g_siliangem.n_layers || expert >= g_siliangem.n_experts) return 0;
-    const uint32_t slot = siliangem_lookup((layer << 16) | expert);
-    if (slot == SILIANGEM_EMPTY || g_siliangem.slots[slot].leases == 0) return 0;
-    --g_siliangem.slots[slot].leases;
-    if (g_siliangem.slots[slot].leases == 0) {
-        g_siliangem.slots[slot].stamp = ++g_siliangem.clock;
-        if (frequency_hint > g_siliangem.slots[slot].frequency) {
-            g_siliangem.slots[slot].frequency = frequency_hint;
+    uint8_t * destination = g_siliangem.arena + (size_t) slot * g_siliangem.expert_bytes;
+    for (uint32_t part = 0; part < part_count; ++part) {
+        uint32_t offset = 0;
+        uint32_t bytes = 0;
+        if (g_siliangem.em) {
+            const size_t index = (size_t) layer * (uint32_t) g_siliangem.em_nparts + part;
+            offset = g_siliangem.em_poff[index];
+            bytes = g_siliangem.em_pbytes[index];
+        } else {
+            offset = g_siliangem.part_off[part];
+            bytes = g_siliangem.part_bytes[part];
         }
+        if (!parts[part] || bytes == 0 || part_sizes[part] != bytes ||
+            offset > g_siliangem.expert_bytes || bytes > g_siliangem.expert_bytes - offset) return 0;
+        memcpy(destination + offset, parts[part], bytes);
     }
+
+    g_siliangem.slots[slot].key = key;
+    g_siliangem.slots[slot].stamp = ++g_siliangem.clock;
+    g_siliangem.slots[slot].frequency = 1;
+    g_siliangem.slots[slot].segment = g_siliangem.placement_policy == SILIANGEM_POLICY_WTINYLFU_W10_SLRU_P80
+            ? SILIANGEM_SEGMENT_WINDOW : SILIANGEM_SEGMENT_NONE;
+    ++g_siliangem.policy_admissions;
+    siliangem_table_insert(key, slot);
     return 1;
 }
 
@@ -1998,15 +2010,11 @@ int ggml_siliangem_cache_state_release_cached_expert(
     return 0;
 }
 
-int ggml_siliangem_cache_state_retain_cached_expert(
-        struct ggml_siliangem_cache_state * state, uint32_t layer, uint32_t expert) {
-    GGML_UNUSED(state); GGML_UNUSED(layer); GGML_UNUSED(expert);
-    return 0;
-}
-
-int ggml_siliangem_cache_state_unretain_cached_expert(
-        struct ggml_siliangem_cache_state * state, uint32_t layer, uint32_t expert, uint64_t frequency_hint) {
-    GGML_UNUSED(state); GGML_UNUSED(layer); GGML_UNUSED(expert); GGML_UNUSED(frequency_hint);
+int ggml_siliangem_cache_state_store_cached_expert_at_slot(
+        struct ggml_siliangem_cache_state * state, uint32_t layer, uint32_t expert, uint32_t slot,
+        const void * const * parts, const size_t * part_sizes, uint32_t part_count) {
+    GGML_UNUSED(state); GGML_UNUSED(layer); GGML_UNUSED(expert); GGML_UNUSED(slot);
+    GGML_UNUSED(parts); GGML_UNUSED(part_sizes); GGML_UNUSED(part_count);
     return 0;
 }
 

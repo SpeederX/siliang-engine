@@ -158,6 +158,7 @@ extern "C" {
             size_t count);
     typedef int32_t (*llama_siliang_moe_arena_failure_query)(void * user_data);
     typedef int (*llama_siliang_moe_arena_compute_wait_hook)(void * user_data, int32_t layer);
+    typedef int (*llama_siliang_moe_arena_post_compute_hook)(void * user_data, int32_t layer);
 
     struct llama_siliang_ds4_front_slab_metrics {
         int32_t prepared;
@@ -708,6 +709,10 @@ extern "C" {
     LLAMA_API int llama_siliang_moe_arena_set_compute_wait(
             struct llama_context * ctx,
             llama_siliang_moe_arena_compute_wait_hook hook,
+            void * user_data);
+    LLAMA_API int llama_siliang_moe_arena_set_post_compute(
+            struct llama_context * ctx,
+            llama_siliang_moe_arena_post_compute_hook hook,
             void * user_data);
     LLAMA_API void llama_siliang_moe_arena_clear(struct llama_context * ctx);
     LLAMA_API int32_t llama_siliang_moe_arena_failure(const struct llama_context * ctx);

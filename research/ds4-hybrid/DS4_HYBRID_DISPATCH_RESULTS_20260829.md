@@ -262,22 +262,25 @@ Two orthogonal SLFU controls are now research-visible:
   - `on`: preserves the old first-use behavior; a cold miss may enter K immediately if SLFU admits it;
   - `off`: a first-use cold expert is admitted to L2 but executed transiently via R; only a later L2 hit can be considered for K.
 - `--demote-k-hot on|off`
-  - `off`: preserves the exclusive L2->K behavior; successful K admission releases the L2 slot;
-  - `on`: K keeps a leased L2 shadow. L2 victim selection already excludes leased slots. K eviction releases that lease, refreshes L2 recency, and carries the SLFU lifetime-frequency as a frequency hint. This is a zero-D2H logical demotion because weights are immutable.
+  - `off`: preserves the immediate exclusive L2->K behavior;
+  - `on`: if SLFU selects a K victim, the candidate executes from R for the current layer. After routed compute completes, the runtime performs an exclusive tier swap: K victim D2H -> bounded pinned demotion staging, candidate R -> K by D2D, then the candidate's L2 slot is released and reused for the victim. K metadata changes only after this transition completes. No persistent K/L2 duplication exists.
 
-This deliberately does **not** define a new L2 eviction policy. It only prevents K residency from destroying the lower-tier copy and preserves available cross-tier history when K residency ends. The cost is reduced effective L2 breadth while K shadows are leased.
+This does **not** define or alter the L2 eviction policy. L2 remains independently configured as LRU, LFU, or W-TinyLFU. A demoted victim is inserted into the exact L2 slot freed by the promoted candidate and starts with normal L2-local insertion state; K lifetime-frequency is not injected into L2 policy state.
 
-### Mechanical demotion gate
+### Mechanical demotion gate — corrected exclusive swap
 
-A short natural `SLFU + admit-k-cold=off + demote-k-hot=on` run produced:
+The earlier leased-shadow prototype was rejected because it duplicated K residents in L2 and reduced effective L2 capacity. Its `demote=on` measurements are superseded and must not be used for qualification.
 
-- 279 K admissions;
-- 63 K evictions;
-- 279 L2 shadow retains;
-- 63 L2 shadow unretains;
-- 0 shadow failures.
+The corrected zero-duplication mechanism was then smoke-tested with `SLFU + admit-k-cold=off + demote-k-hot=on`. In a 4-token run it produced:
 
-Thus every observed K eviction demoted exactly one retained shadow back to ordinary L2 eligibility without D2H.
+- 58 deferred K promotions;
+- 58 transition commits;
+- 58 K->L2 demotions;
+- 0 transition cancels / 0 demotion failures;
+- D2H victim traffic: 174 part copies, 410,517,504 B total;
+- D2D R->K traffic: 174 part copies, 410,517,504 B total.
+
+With the L2 commit still performed synchronously at the next mapper, host commit work was ~95 ms total across 58 swaps. Moving that L2 release/store work to one persistent worker reduced the next-router exposed wait to **12.895 ms total**, while the worker performed ~33.553 ms of device-event wait and ~55.190 ms of L2 host-copy work in parallel with the graph. This is about **0.22 ms exposed per swap** in the smoke cell. These are mechanism timings, not a whole-model throughput claim.
 
 ### Natural 32-token policy matrix
 
@@ -289,8 +292,8 @@ Protocol held fixed: DS4 expert-major, L2=8 GiB LRU, K216/R12/P12, FRONT full re
 | W-TinyLFU | n/a | n/a | 24.68% | 9.21% | 66.10% | 6,024 | 0 |
 | SLFU | on | off | 26.71% | **37.28%** | **36.01%** | 514 | 5,348 |
 | SLFU | off | off | **26.77%** | 37.05% | 36.18% | 492 | 5,365 |
-| SLFU | on | on | 26.74% | 34.97% | 38.28% | 512 | 5,347 |
-| SLFU | off | on | 26.68% | 34.98% | 38.33% | 505 | 5,359 |
+| SLFU | on | on | *superseded* | *superseded* | *superseded* | — | — |
+| SLFU | off | on | *superseded* | *superseded* | *superseded* | — | — |
 
 Immediate interpretation at 32 tokens:
 
@@ -298,7 +301,6 @@ Immediate interpretation at 32 tokens:
 2. W-TinyLFU retains meaningful K locality but remains too admission-aggressive for an exclusive L2->K hierarchy in this early checkpoint: L2 breadth collapses and cold traffic remains high.
 3. SLFU's rejection/bypass behavior is the dominant structural improvement: it preserves a large warm L2 population while still learning a hot K set.
 4. `admit-k-cold=off` works mechanically (2,894 first-use cold bypasses in this run) but changes the 32-token aggregate only slightly because baseline SLFU already rejects most low-value cold candidates.
-5. `demote-k-hot=on` preserves K history across tiers, but at L2=8 GiB the leased shadows reduce L2 breadth enough to raise early cold share by about 2.3 percentage points. Whether that cost amortizes at later checkpoints is explicitly a long-horizon question, not resolved by the 32-token cell.
-6. Deterministic generated content was identical across the four SLFU variants; stdout diffs were limited to timing lines.
+5. The original `demote-k-hot=on` rows are invalid for the corrected design because they came from the rejected leased-shadow prototype. The corrected exclusive swap must be re-run naturally before any hit-rate conclusion is drawn.
 
 The intended long-horizon checkpoints remain cumulative generated-token marks 32/64/128/256/512/1024/2048. The runtime now emits these checkpoints automatically under `--expert-cache-route-stats`. The full 2048-token matrix has not been physically completed in this pass; the 32-token matrix above is the completed natural comparison.

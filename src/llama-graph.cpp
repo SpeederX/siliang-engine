@@ -424,6 +424,43 @@ static ggml_tensor * siliang_moe_arena_compute_wait_slots(
     return out;
 }
 
+static void siliang_moe_arena_post_compute_custom(
+        ggml_tensor * dst,
+        const ggml_tensor * src,
+        int ith,
+        int nth,
+        void * userdata) {
+    GGML_ASSERT(dst && src && userdata);
+    GGML_UNUSED(nth);
+    if (ith != 0) {
+        return;
+    }
+    auto * call = static_cast<llama_siliang_moe_arena_post_call *>(userdata);
+    auto * state = call->state;
+    GGML_ASSERT(state && call->layer >= 0 && call->generation == state->generation);
+    GGML_ASSERT(ggml_nbytes(dst) == ggml_nbytes(src));
+    std::memcpy(dst->data, src->data, ggml_nbytes(src));
+    if (state->failure_code.load(std::memory_order_acquire) != 0) {
+        return;
+    }
+    if (!state->post_compute_hook ||
+        state->post_compute_hook(state->post_compute_user_data, call->layer) != 0) {
+        state->failure_code.store(-4311, std::memory_order_release);
+        std::memset(dst->data, 0, ggml_nbytes(dst));
+    }
+}
+
+static ggml_tensor * siliang_moe_arena_post_compute_marker(
+        ggml_context * ctx,
+        ggml_tensor * source,
+        llama_siliang_moe_arena_post_call * call) {
+    ggml_tensor * scalar = ggml_view_1d(ctx, source, 1, 0);
+    ggml_tensor * out = ggml_map_custom1(
+            ctx, scalar, siliang_moe_arena_post_compute_custom, 1, call);
+    ggml_set_name(out, "siliang_moe_arena_post_compute");
+    return out;
+}
+
 void llm_graph_input_mean::set_input(const llama_ubatch * ubatch) {
     if (cparams.embeddings   &&
        (cparams.pooling_type == LLAMA_POOLING_TYPE_MEAN ||
@@ -2516,6 +2553,17 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
     }
 
     cb(moe_out, "ffn_moe_out", il);
+
+    if (moe_arena && moe_arena->post_compute_hook) {
+        if (static_cast<size_t>(il) >= moe_arena->post_calls_by_layer.size()) {
+            throw std::runtime_error("Siliang MoE arena post-compute contract mismatch");
+        }
+        ggml_tensor * marker = siliang_moe_arena_post_compute_marker(
+                ctx0, moe_out, &moe_arena->post_calls_by_layer[il]);
+        ggml_backend_sched_set_tensor_backend(sched, marker, backend_cpu);
+        ggml_build_forward_expand(gf, marker);
+        cb(marker, "siliang_moe_arena_post_compute", il);
+    }
 
     return moe_out;
 }
