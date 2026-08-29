@@ -146,14 +146,15 @@ llama_context::llama_context(
             const uint64_t maximum_route_union = std::min<uint64_t>(
                     static_cast<uint64_t>(configured_ubatch) * static_cast<uint64_t>(top_k),
                     hparams.n_expert);
-            if (model.arch != LLM_ARCH_DEEPSEEK4 || hparams.n_layer() != 43 ||
-                hparams.n_layer_nextn != 0 || hparams.n_expert != 256 || top_k != 6) {
+            if (hparams.n_expert == 0 ||
+                hparams.n_expert > LLAMA_SILIANG_MOE_PREFILL_MAX_EXPERTS) {
                 throw std::runtime_error(
-                        "Siliang expert-cache prefill requires the exact 43-layer, 256-expert, top-k-6 DeepSeek4 architecture");
+                        "Siliang expert-cache prefill currently supports routed MoE models with at most 256 experts per layer");
             }
             if (configured_ubatch == 0 || maximum_route_union > expert_cache.l1_k) {
                 throw std::runtime_error(
-                        "Siliang expert-cache prefill requires min(n_ubatch * top-k, expert-count) <= L1 K");
+                        "Siliang expert-cache prefill requires min(n_ubatch * top-k, expert-count) <= L1 K; "
+                        "the runtime will additionally validate each layer-local schema-bank K slice");
             }
         }
         LLAMA_LOG_INFO("%s: Siliang expert cache enabled: L2=%" PRIu64 " MiB K=%u R=%u P=%u roll=%d prefill=%d\n",
@@ -1184,10 +1185,8 @@ bool llama_context::siliang_moe_arena_bind(
             static_cast<uint64_t>(cparams.n_ubatch) * static_cast<uint64_t>(model_info.top_k),
             static_cast<uint64_t>(model_info.expert_count));
     if (cparams.expert_cache.prefill &&
-        (model.arch != LLM_ARCH_DEEPSEEK4 || model_info.layer_count != 43 ||
-         model_info.routed_layer_count != 43 || model_info.expert_count != 256 ||
-         model_info.top_k != 6 || !model_info.homogeneous_schema || cparams.n_ubatch == 0 ||
-         prefill_route_capacity > cparams.expert_cache.l1_k)) {
+        (model_info.expert_count > static_cast<int32_t>(LLAMA_SILIANG_MOE_PREFILL_MAX_EXPERTS) ||
+         cparams.n_ubatch == 0 || prefill_route_capacity > cparams.expert_cache.l1_k)) {
         return false;
     }
 

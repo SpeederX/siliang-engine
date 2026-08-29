@@ -20,8 +20,8 @@ path without hidden session state.
 | `--expert-cache-exchange-r N` | CUDA exchange capacity R per schema arena, in expert slots. Homogeneous physical capacity is K + R. |
 | `--expert-cache-elevator-p N` | One global pinned-host elevator ring P, in expert slots, sized to the largest expert schema. |
 | `--expert-cache-l1-policy POLICY` | L1 policy: always-admit `lru`; resident-frequency, always-admit `lfu`; lifetime-frequency `cumulative-lfu` admission/bypass; or W-TinyLFU W10/SLRU-P80. |
-| `--expert-cache-roll MODE` | Rolling mode: `off` or `deepseek4`. The latter is architecture-specific in v0.1.3. |
-| `--expert-cache-prefill` / `--no-expert-cache-prefill` | Enable or disable experimental DeepSeek4 batch-union prompt processing in K. Disabled by default. |
+| `--expert-cache-roll MODE` | Static rolling mode: `off` or `deepseek4`. `deepseek4` controls only the architecture-specific FRONT slab; it is independent of the generic routed-expert K/R/P arena. |
+| `--expert-cache-prefill` / `--no-expert-cache-prefill` | Enable or disable experimental routed-MoE batch-union prompt processing in K. The current bitmap supports up to 256 experts per layer and the worst-case union must fit every layer-local K slice. Disabled by default. |
 | `--expert-cache-memory-report` / `--no-expert-cache-memory-report` | Enable or suppress periodic host-memory reporting. |
 | `--expert-cache-deferred-wait` / `--no-expert-cache-deferred-wait` | Enable or disable deferred L2 I/O waits. |
 
@@ -45,9 +45,19 @@ serving a request.
 
 `--expert-cache-roll deepseek4` is accepted only for the validated DeepSeek4
 shape: 43 routed layers, 256 experts per layer, and top-k 6. v0.1.3 rolls the
-DeepSeek4 FRONT set only. With `--expert-cache-prefill`, the same FRONT bank may
-serve an admitted prompt microbatch. It does not implement a general
-architecture pack rule, whole-model static rolling, or pre-bake.
+DeepSeek4 FRONT set only. This is deliberately separate from the routed-expert
+arena: Gemma/Qwen/Ornith use the same generic K/R/P mechanism with roll `off`.
+The FRONT source store uses ordinary committed host memory that is registered
+read-only with CUDA after population, matching the qualified research topology.
+It does not require one multi-gigabyte `cudaMallocHost` allocation. The small
+P elevator remains a separate pinned-host allocation.
+
+`--expert-cache-prefill` is topology-gated rather than architecture-name-gated.
+Startup requires a routed MoE with at most 256 experts per layer and
+`min(n_ubatch * top_k, expert_count)` must fit the K slice available to every
+routed layer after schema-bank partitioning. Unsupported capacities fail closed.
+This does not make prefill a performance-qualified preset for every supported
+model; it only removes the DeepSeek-only implementation constraint.
 
 ## DeepSeek4 requalification prototype
 
@@ -117,9 +127,9 @@ For a CLI smoke, use the same cache and placement options with `llama-cli`:
 Use `--no-expert-cache` for the explicit control. Do not add tier options to a
 disabled command.
 
-## Experimental DeepSeek4 microbatch prefill
+## Experimental routed-MoE microbatch prefill
 
-This path is opt-in and DeepSeek4-specific. It is an adaptation to the bounded
+This path is opt-in and model-structure-derived. It is an adaptation to the bounded
 K/P/R hierarchy, not the full-layer double buffering described by the
 [FreeToken paper](https://arxiv.org/abs/2608.16157). That method needs two whole
 expert layers resident at once. On the 8 GB RTX 2070 test system, two DS4 expert
@@ -141,12 +151,12 @@ union, manage K/L2, and translate logical experts to physical slots. Removing
 the weight tensor from that callback does not change top-k selection,
 normalization, or the GPU weighted sum of expert outputs.
 
-Each fully mapped DS4 sweep also produces one 256-bit expert bitmap per routed
+Each fully mapped routed-MoE sweep also produces one 256-bit expert bitmap per routed
 layer. The info summary reports `prefill_bitmap` completed sweeps, sweep tokens,
 adjacent-sweep comparisons per layer, seeded experts, needed experts, overlap,
 new experts, unused seed experts, coverage, precision, resets, and incomplete
 sweep sequences. The legacy `prefill_tokens` field is summed once per mapped
-layer; `sweep_tokens` is summed once per completed 43-layer sweep. Debug
+layer; `sweep_tokens` is summed once per completed routed-layer sweep. Debug
 logging emits the four raw 64-bit words for every mapped layer and sweep. The
 common startup graph-reservation and optional warmup traces, together with
 their prefill counters, are discarded before serving begins. `llama-server`
@@ -165,13 +175,15 @@ Rolling L2 lookahead remains conditional on this telemetry showing that saved
 wait exceeds wrong-read and eviction cost. The ordinary L1/L2 exclusivity and
 the P/R overlap exception are unchanged.
 
-Admission is deliberately conservative. Startup requires
-`min(n_ubatch * top_k, expert_count) <= K`, even though real token routes may
-overlap. DS4 has top-k 6, so K216 permits at most `-ub 36`; `-ub 32` leaves a
-24-slot margin and caps the worst-case union at 192. K256 can admit a larger
-ubatch because a layer contains only 256 experts, but its extra device memory
-and batch workspace must fit. The exact DS4 shape is also checked at startup.
-Unsupported shapes or capacities fail closed.
+Admission is deliberately conservative. Startup uses the worst-case union
+`min(n_ubatch * top_k, expert_count)` even though real token routes may overlap,
+and requires that union to fit each routed layer's local K window. For a
+homogeneous schema the full K budget is shared; for heterogeneous schema banks,
+K is partitioned across routed layers before this check. DS4 K216/top-k 6 still
+permits at most `-ub 36`; `-ub 32` leaves a 24-slot margin. The same rule applies
+to Gemma/Qwen/Ornith without an architecture-name allowlist. The current bitmap
+caps this path at 256 experts per layer. Unsupported geometry or capacity fails
+closed.
 
 Use this bounded diagnostic command on the current 8 GB test machine:
 
@@ -271,7 +283,8 @@ homogeneous schema. Do not add a redundant host L2:
     --expert-cache-exchange-r 16 `
     --expert-cache-elevator-p 16 `
     --expert-cache-l1-policy wtinylfu-w10-slru-p80 `
-    --expert-cache-roll off
+    --expert-cache-roll off `
+    --no-expert-cache-prefill
 ```
 
 Qwen3-30B-A3B used resident host tensors, top-k 8, 48 routed layers, and
@@ -287,7 +300,25 @@ same way in v0.1.3:
     --expert-cache-exchange-r 16 `
     --expert-cache-elevator-p 16 `
     --expert-cache-l1-policy wtinylfu-w10-slru-p80 `
-    --expert-cache-roll off
+    --expert-cache-roll off `
+    --no-expert-cache-prefill
+```
+
+Ornith-1.0-35B uses the same `qwen35moe` architecture family as Qwen3.6 but had
+a distinct positive resident-source result. Its retained decode bring-up point
+was K1920 (48 slots per routed layer); it is a requalification starting point,
+not a universal preset:
+
+```powershell
+& "<llama-server.exe>" -m "<ornith-1.0-35b.gguf>" `
+    -ngl 99 -ncmoe 40 -c 4096 -b 512 -ub 512 -t 12 -tb 12 `
+    --parallel 1 --expert-cache `
+    --expert-cache-l1-k 1920 `
+    --expert-cache-exchange-r 16 `
+    --expert-cache-elevator-p 16 `
+    --expert-cache-l1-policy wtinylfu-w10-slru-p80 `
+    --expert-cache-roll off `
+    --no-expert-cache-prefill
 ```
 
 Qwen3.6-35B-A3B is a no-go for the transferred K1440 topology. The retained
@@ -316,16 +347,19 @@ union and rolling are disabled because both mechanisms are DeepSeek4-specific:
     --no-expert-cache-prefill
 ```
 
-Do not add `--expert-cache-prefill`: it requires the exact 43-layer,
-256-expert, top-k-6 DeepSeek4 architecture. The prior GPT-OSS result selected
-pinned staged overlap in the research binary; it does not qualify v0.1.3 until
+Keep `--no-expert-cache-prefill` in the retained GPT-OSS gate command. The prior
+GPT-OSS result selected pinned staged overlap in the research binary; it does
+not qualify v0.1.3 until
 the same artifact passes output equivalence, source-armed telemetry, allocation
-checks, and fresh-start timing.
+checks, and fresh-start timing. Generic prefill is now capability-gated, but a
+GPT-OSS prefill trial still needs to satisfy the current expert-count and
+layer-local K bounds before it can arm.
 
 The generic schema-based L1 runtime does not architecture-block GPT-OSS. A
-manual K/R/P bring-up may therefore use serial mode and disable both DS4-only
-features: `--parallel 1`, `--expert-cache-roll off`, and
-`--no-expert-cache-prefill`. That is an experimental two-tier trial, not the
+manual K/R/P bring-up may therefore use serial mode, keep the DS4 FRONT feature
+off, and leave generic prefill disabled until separately qualified:
+`--parallel 1`, `--expert-cache-roll off`, and `--no-expert-cache-prefill`.
+That is an experimental two-tier trial, not the
 frozen L2-only gate profile or a qualified performance preset.
 
 M4 remains inconclusive and is a no-go for v0.1.3: there is no useful integrated

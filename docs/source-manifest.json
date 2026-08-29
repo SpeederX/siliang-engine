@@ -14,11 +14,11 @@
   "source": {
     "canonicalPatch": {
       "path": "patches/siliang-engine.patch",
-      "sha256": "46A95FA05D0112DF0EF751F641E45DA2E0E645DDA86F7E1826A20A5099E2EE07",
-      "gitBlob": "8ad2248cdbdb1be4052030ee7d55215dadf3f1e2"
+      "sha256": "D8F6141278E3A37B09B25AF79A6AD7DF3A11A4472AF6CFAD955CC7E0FD50DFB3",
+      "gitBlob": "c611d5db2ff4b05b54c70c9847317f2498d5bd0d"
     },
     "engineDelta": {
-      "insertions": 8967,
+      "insertions": 9070,
       "deletions": 24,
       "files": [
         {
@@ -26,7 +26,8 @@
           "status": "modified",
           "mode": "100644",
           "baseBlob": "86af0ba10a327283f2500f0bb8e48095df547017",
-          "finalBlob": "750a8ebc623dbc2eeb529c59dc28cf45ba1b23fe"
+          "finalBlob": "eb65102b7f7edd66f27aaaf683721bb19fa1d55e",
+          "previousBlob": "750a8ebc623dbc2eeb529c59dc28cf45ba1b23fe"
         },
         {
           "path": "common/common.cpp",
@@ -68,7 +69,8 @@
           "status": "modified",
           "mode": "100644",
           "baseBlob": "1cd81eeaebcdf4abcd46c87ba1a9a46e275aa12b",
-          "finalBlob": "626d752466b32d33e3629985e574ed6c42b06900"
+          "finalBlob": "74ea73681303061a0eacc332a640dd3c8ffd6b44",
+          "previousBlob": "626d752466b32d33e3629985e574ed6c42b06900"
         },
         {
           "path": "ggml/src/ggml-backend.cpp",
@@ -110,7 +112,8 @@
           "status": "modified",
           "mode": "100644",
           "baseBlob": "561ab7ac599f9e285d2a0296caee0ab0a14ea5c8",
-          "finalBlob": "944daa425e23aa6f2883bb883a797f4f4709d106"
+          "finalBlob": "23a1ae2f12586e2cab240f068bbbb49095700fda",
+          "previousBlob": "944daa425e23aa6f2883bb883a797f4f4709d106"
         },
         {
           "path": "include/llama.h",
@@ -131,7 +134,8 @@
           "status": "modified",
           "mode": "100644",
           "baseBlob": "19cca7df1e9deaafc1e8ee50d0c78ae5ffbc6cfb",
-          "finalBlob": "e41f09245ec35a3f7266b73cbfc9d0b0c473e6af"
+          "finalBlob": "c53e9f973241138d34757fbca17d21371d0518b7",
+          "previousBlob": "e41f09245ec35a3f7266b73cbfc9d0b0c473e6af"
         },
         {
           "path": "src/llama-context.h",
@@ -145,7 +149,8 @@
           "status": "modified",
           "mode": "100644",
           "baseBlob": "5018170ed85e3b82abad65e6a3c71859067c9f71",
-          "finalBlob": "9105c1a4556b72208a0db5d902d26dd894bce50c"
+          "finalBlob": "bc8a0bdaccb2e9183fc667a779cefd032dd784fe",
+          "previousBlob": "9105c1a4556b72208a0db5d902d26dd894bce50c"
         },
         {
           "path": "src/llama-graph.cpp",
@@ -201,7 +206,8 @@
           "status": "added",
           "mode": "100644",
           "baseBlob": null,
-          "finalBlob": "d0e3ae4e38c584871ae274b78e4bf58dcbde4034"
+          "finalBlob": "35ad425cc24f181969aee089a65a37f54a1f6122",
+          "previousBlob": "d0e3ae4e38c584871ae274b78e4bf58dcbde4034"
         },
         {
           "path": "src/siliang-ds4-front-slab.h",
@@ -222,14 +228,16 @@
           "status": "added",
           "mode": "100644",
           "baseBlob": null,
-          "finalBlob": "f76550a3ec32def14569d532769ae74182adcec3"
+          "finalBlob": "0890eda725e5e9ca457500f9bbcf4e01814f482b",
+          "previousBlob": "f76550a3ec32def14569d532769ae74182adcec3"
         },
         {
           "path": "src/siliang-moe-runtime.h",
           "status": "added",
           "mode": "100644",
           "baseBlob": null,
-          "finalBlob": "70549d1feb0a73d14aec5f1d7c7989c0e55aa713"
+          "finalBlob": "5bf98bd7fdaa26a64c66f8c4231ea133d6136cf6",
+          "previousBlob": "70549d1feb0a73d14aec5f1d7c7989c0e55aa713"
         },
         {
           "path": "tests/CMakeLists.txt",

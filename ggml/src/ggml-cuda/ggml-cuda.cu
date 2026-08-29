@@ -1014,6 +1014,58 @@ enum ggml_backend_cuda_siliang_status ggml_backend_cuda_siliang_h2d_async(
             : GGML_BACKEND_CUDA_SILIANG_STATUS_CUDA_ERROR;
 }
 
+enum ggml_backend_cuda_siliang_status ggml_backend_cuda_siliang_host_register_readonly(
+        ggml_backend_t backend,
+        void * buffer,
+        size_t size) {
+    if (buffer == nullptr || size == 0) {
+        return GGML_BACKEND_CUDA_SILIANG_STATUS_INVALID_ARGUMENT;
+    }
+    ggml_backend_cuda_context * context = nullptr;
+    const enum ggml_backend_cuda_siliang_status status =
+        ggml_backend_cuda_siliang_get_context(backend, &context);
+    if (status != GGML_BACKEND_CUDA_SILIANG_STATUS_SUCCESS) {
+        return status;
+    }
+
+    ggml_cuda_set_device(context->device);
+#if CUDART_VERSION >= 11010 || defined(GGML_USE_MUSA) || defined(GGML_USE_HIP)
+    const unsigned int flags = cudaHostRegisterPortable | cudaHostRegisterReadOnly;
+#else
+    const unsigned int flags = cudaHostRegisterPortable;
+#endif
+    const cudaError_t error = cudaHostRegister(buffer, size, flags);
+    if (error != cudaSuccess) {
+        (void) cudaGetLastError();
+        GGML_LOG_DEBUG("%s: failed to register %.2f MiB of host memory: %s\n", __func__,
+                size / 1024.0 / 1024.0, cudaGetErrorString(error));
+        return GGML_BACKEND_CUDA_SILIANG_STATUS_CUDA_ERROR;
+    }
+    return GGML_BACKEND_CUDA_SILIANG_STATUS_SUCCESS;
+}
+
+enum ggml_backend_cuda_siliang_status ggml_backend_cuda_siliang_host_unregister(
+        ggml_backend_t backend,
+        void * buffer) {
+    if (buffer == nullptr) {
+        return GGML_BACKEND_CUDA_SILIANG_STATUS_INVALID_ARGUMENT;
+    }
+    ggml_backend_cuda_context * context = nullptr;
+    const enum ggml_backend_cuda_siliang_status status =
+        ggml_backend_cuda_siliang_get_context(backend, &context);
+    if (status != GGML_BACKEND_CUDA_SILIANG_STATUS_SUCCESS) {
+        return status;
+    }
+
+    ggml_cuda_set_device(context->device);
+    const cudaError_t error = cudaHostUnregister(buffer);
+    if (error != cudaSuccess) {
+        (void) cudaGetLastError();
+        return GGML_BACKEND_CUDA_SILIANG_STATUS_CUDA_ERROR;
+    }
+    return GGML_BACKEND_CUDA_SILIANG_STATUS_SUCCESS;
+}
+
 static void * ggml_backend_cuda_buffer_get_base(ggml_backend_buffer_t buffer) {
     ggml_backend_cuda_buffer_context * ctx = (ggml_backend_cuda_buffer_context *)buffer->context;
     return ctx->dev_ptr;
@@ -5648,6 +5700,12 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
     }
     if (strcmp(name, "ggml_backend_cuda_siliang_h2d_async") == 0) {
         return (void *)ggml_backend_cuda_siliang_h2d_async;
+    }
+    if (strcmp(name, "ggml_backend_cuda_siliang_host_register_readonly") == 0) {
+        return (void *)ggml_backend_cuda_siliang_host_register_readonly;
+    }
+    if (strcmp(name, "ggml_backend_cuda_siliang_host_unregister") == 0) {
+        return (void *)ggml_backend_cuda_siliang_host_unregister;
     }
     if (strcmp(name, "ggml_backend_get_features") == 0) {
         return (void *)ggml_backend_cuda_get_features;

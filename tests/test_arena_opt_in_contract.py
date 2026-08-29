@@ -98,6 +98,18 @@ class ArenaOptInContractTests(unittest.TestCase):
         self.assertIn("/*.exchange_slot_first =*/ exchange_first", MOE_RUNTIME)
         self.assertIn("/*.exchange_slot_count =*/ params.exchange_r", MOE_RUNTIME)
 
+    def test_generic_l1_runtime_is_model_structure_derived(self) -> None:
+        model_info_body = function_body(
+            LLAMA_CONTEXT, "static bool siliang_moe_arena_get_model_info_impl("
+        )
+        bind_body = function_body(LLAMA_CONTEXT, "bool llama_context::siliang_moe_arena_bind(")
+        self.assertNotIn("LLM_ARCH_", MOE_RUNTIME)
+        self.assertNotIn("LLM_ARCH_", model_info_body)
+        self.assertNotIn("LLM_ARCH_", bind_body)
+        self.assertIn("same_schema", MOE_RUNTIME)
+        self.assertIn("schema_k_capacity", MOE_RUNTIME)
+        self.assertIn("physical_slot_for_policy", MOE_RUNTIME)
+
     def test_l1_arena_rejects_lora_at_bind_and_dynamic_application(self) -> None:
         bind_body = function_body(LLAMA_CONTEXT, "bool llama_context::siliang_moe_arena_bind(")
         self.assertIn("!loras || !loras->empty()", bind_body)

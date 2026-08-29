@@ -2777,7 +2777,8 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
     ).set_examples({LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
         {"--expert-cache-roll"}, "{off,deepseek4}",
-        "rolling cache mode; deepseek4 is architecture-specific (default: off)",
+        "architecture-specific static rolling mode; deepseek4 controls only the DeepSeek-V4 FRONT slab, "
+        "not the generic routed-expert K/R/P arena (default: off)",
         [](common_params & params, const std::string & value) {
             params.expert_cache.roll = parse_expert_cache_roll(value);
             params.expert_cache.tier_configured = true;
@@ -2786,8 +2787,9 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
     add_opt(common_arg(
         {"--expert-cache-prefill"},
         {"--no-expert-cache-prefill"},
-        "enable bounded DeepSeek-V4 batch-union prefill in the CUDA K arena; "
-        "the --ubatch-size route union must fit K (experimental, default: disabled)",
+        "enable bounded routed-MoE batch-union prefill in the CUDA K arena; supports up to 256 experts "
+        "per layer and the --ubatch-size route union must fit every layer-local K slice "
+        "(experimental, default: disabled)",
         [](common_params & params, bool value) {
             params.expert_cache.prefill = value;
             params.expert_cache.tier_configured = true;

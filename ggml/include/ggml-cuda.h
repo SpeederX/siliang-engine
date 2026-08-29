@@ -87,6 +87,13 @@ GGML_BACKEND_API enum ggml_backend_cuda_siliang_status ggml_backend_cuda_siliang
         const void * source,
         size_t offset,
         size_t size);
+GGML_BACKEND_API enum ggml_backend_cuda_siliang_status ggml_backend_cuda_siliang_host_register_readonly(
+        ggml_backend_t backend,
+        void * buffer,
+        size_t size);
+GGML_BACKEND_API enum ggml_backend_cuda_siliang_status ggml_backend_cuda_siliang_host_unregister(
+        ggml_backend_t backend,
+        void * buffer);
 
 GGML_BACKEND_API ggml_backend_reg_t ggml_backend_cuda_reg(void);
 

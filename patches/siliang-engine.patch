@@ -1,5 +1,5 @@
 diff --git a/common/arg.cpp b/common/arg.cpp
-index 86af0ba10a327283f2500f0bb8e48095df547017..750a8ebc623dbc2eeb529c59dc28cf45ba1b23fe 100644
+index 86af0ba10..eb65102b7 100644
 --- a/common/arg.cpp
 +++ b/common/arg.cpp
 @@ -32,6 +32,7 @@
@@ -116,7 +116,7 @@ index 86af0ba10a327283f2500f0bb8e48095df547017..750a8ebc623dbc2eeb529c59dc28cf45
      postprocess_cpu_params(params.cpuparams,       nullptr);
      postprocess_cpu_params(params.cpuparams_batch, &params.cpuparams);
  
-@@ -2620,6 +2713,104 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
+@@ -2620,6 +2713,106 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
              else { throw std::invalid_argument("invalid value"); }
          }
      ).set_env("LLAMA_ARG_LOAD_MODE"));
@@ -184,7 +184,8 @@ index 86af0ba10a327283f2500f0bb8e48095df547017..750a8ebc623dbc2eeb529c59dc28cf45
 +    ).set_examples({LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER}));
 +    add_opt(common_arg(
 +        {"--expert-cache-roll"}, "{off,deepseek4}",
-+        "rolling cache mode; deepseek4 is architecture-specific (default: off)",
++        "architecture-specific static rolling mode; deepseek4 controls only the DeepSeek-V4 FRONT slab, "
++        "not the generic routed-expert K/R/P arena (default: off)",
 +        [](common_params & params, const std::string & value) {
 +            params.expert_cache.roll = parse_expert_cache_roll(value);
 +            params.expert_cache.tier_configured = true;
@@ -193,8 +194,9 @@ index 86af0ba10a327283f2500f0bb8e48095df547017..750a8ebc623dbc2eeb529c59dc28cf45
 +    add_opt(common_arg(
 +        {"--expert-cache-prefill"},
 +        {"--no-expert-cache-prefill"},
-+        "enable bounded DeepSeek-V4 batch-union prefill in the CUDA K arena; "
-+        "the --ubatch-size route union must fit K (experimental, default: disabled)",
++        "enable bounded routed-MoE batch-union prefill in the CUDA K arena; supports up to 256 experts "
++        "per layer and the --ubatch-size route union must fit every layer-local K slice "
++        "(experimental, default: disabled)",
 +        [](common_params & params, bool value) {
 +            params.expert_cache.prefill = value;
 +            params.expert_cache.tier_configured = true;
@@ -222,7 +224,7 @@ index 86af0ba10a327283f2500f0bb8e48095df547017..750a8ebc623dbc2eeb529c59dc28cf45
          {"--numa"}, "TYPE",
          "attempt optimizations that help on some NUMA systems\n"
 diff --git a/common/common.cpp b/common/common.cpp
-index d9ce5755161edc853dbcf629819ee75971ba413d..65c2222ce3d65869c9301946580ed8bf937a77c6 100644
+index d9ce57551..65c2222ce 100644
 --- a/common/common.cpp
 +++ b/common/common.cpp
 @@ -9,6 +9,7 @@
@@ -481,7 +483,7 @@ index d9ce5755161edc853dbcf629819ee75971ba413d..65c2222ce3d65869c9301946580ed8bf
      cparams.type_v = params.cache_type_v;
  
 diff --git a/common/common.h b/common/common.h
-index 3444aa157e9b73727ea2ca6107eb0dc9f9b36a74..e785435b2ad7921e243aaf7d2ffb1c2a5ce9fb9b 100644
+index 3444aa157..e785435b2 100644
 --- a/common/common.h
 +++ b/common/common.h
 @@ -15,6 +15,7 @@
@@ -564,7 +566,7 @@ index 3444aa157e9b73727ea2ca6107eb0dc9f9b36a74..e785435b2ad7921e243aaf7d2ffb1c2a
  // model endpoint from env
  std::string common_get_model_endpoint();
 diff --git a/common/speculative.cpp b/common/speculative.cpp
-index 70dc0ac3b1b74fdd5f08b470308786c3f12411e7..3f7c5f87559b224c038b86f958557abbad2c13a4 100644
+index 70dc0ac3b..3f7c5f875 100644
 --- a/common/speculative.cpp
 +++ b/common/speculative.cpp
 @@ -2293,6 +2293,10 @@ common_params common_base_params_to_speculative(const common_params & params) {
@@ -579,7 +581,7 @@ index 70dc0ac3b1b74fdd5f08b470308786c3f12411e7..3f7c5f87559b224c038b86f958557abb
  }
  
 diff --git a/ggml/include/ggml-backend.h b/ggml/include/ggml-backend.h
-index 2924fdbe9884df40abf505fd89d277f5281a835b..d04327dbc6ca76b1831ccd1fd8571a107e4982a9 100644
+index 2924fdbe9..d04327dbc 100644
 --- a/ggml/include/ggml-backend.h
 +++ b/ggml/include/ggml-backend.h
 @@ -313,6 +313,14 @@ extern "C" {
@@ -608,7 +610,7 @@ index 2924fdbe9884df40abf505fd89d277f5281a835b..d04327dbc6ca76b1831ccd1fd8571a10
      // Meta backend
      //
 diff --git a/ggml/include/ggml-cpu.h b/ggml/include/ggml-cpu.h
-index dc6453c6eaa16667f720f987659ad42d03a403a2..11b2df581c908f8f2109e3de53e5e5bcd3a18dfb 100644
+index dc6453c6e..11b2df581 100644
 --- a/ggml/include/ggml-cpu.h
 +++ b/ggml/include/ggml-cpu.h
 @@ -22,6 +22,11 @@ extern "C" {
@@ -730,10 +732,10 @@ index dc6453c6eaa16667f720f987659ad42d03a403a2..11b2df581c908f8f2109e3de53e5e5bc
      GGML_BACKEND_API int ggml_cpu_has_avx_vnni   (void);
      GGML_BACKEND_API int ggml_cpu_has_avx2       (void);
 diff --git a/ggml/include/ggml-cuda.h b/ggml/include/ggml-cuda.h
-index 1cd81eeaebcdf4abcd46c87ba1a9a46e275aa12b..626d752466b32d33e3629985e574ed6c42b06900 100644
+index 1cd81eeae..74ea73681 100644
 --- a/ggml/include/ggml-cuda.h
 +++ b/ggml/include/ggml-cuda.h
-@@ -40,6 +40,54 @@ GGML_BACKEND_API void ggml_backend_cuda_get_device_memory(int device, size_t * f
+@@ -40,6 +40,61 @@ GGML_BACKEND_API void ggml_backend_cuda_get_device_memory(int device, size_t * f
  GGML_BACKEND_API bool ggml_backend_cuda_register_host_buffer(void * buffer, size_t size);
  GGML_BACKEND_API void ggml_backend_cuda_unregister_host_buffer(void * buffer);
  
@@ -784,12 +786,19 @@ index 1cd81eeaebcdf4abcd46c87ba1a9a46e275aa12b..626d752466b32d33e3629985e574ed6c
 +        const void * source,
 +        size_t offset,
 +        size_t size);
++GGML_BACKEND_API enum ggml_backend_cuda_siliang_status ggml_backend_cuda_siliang_host_register_readonly(
++        ggml_backend_t backend,
++        void * buffer,
++        size_t size);
++GGML_BACKEND_API enum ggml_backend_cuda_siliang_status ggml_backend_cuda_siliang_host_unregister(
++        ggml_backend_t backend,
++        void * buffer);
 +
  GGML_BACKEND_API ggml_backend_reg_t ggml_backend_cuda_reg(void);
  
  #ifdef  __cplusplus
 diff --git a/ggml/src/ggml-backend.cpp b/ggml/src/ggml-backend.cpp
-index f6fb91798ca484fd1298d7012be3ae8d73cb0ea4..4e3d46d30679d3097395409f0382bcd3ddaea2a3 100644
+index f6fb91798..4e3d46d30 100644
 --- a/ggml/src/ggml-backend.cpp
 +++ b/ggml/src/ggml-backend.cpp
 @@ -815,6 +815,9 @@ struct ggml_backend_sched {
@@ -831,7 +840,7 @@ index f6fb91798ca484fd1298d7012be3ae8d73cb0ea4..4e3d46d30679d3097395409f0382bcd3
      GGML_ASSERT(sched);
      return sched->n_splits;
 diff --git a/ggml/src/ggml-cpu/ggml-cpu-impl.h b/ggml/src/ggml-cpu/ggml-cpu-impl.h
-index 5d1ca5ffcc368b9f0249d6cf6ccc4549bb9a3ab4..509b24e675768c03d1120abb9198906f465d064e 100644
+index 5d1ca5ffc..509b24e67 100644
 --- a/ggml/src/ggml-cpu/ggml-cpu-impl.h
 +++ b/ggml/src/ggml-cpu/ggml-cpu-impl.h
 @@ -25,10 +25,47 @@ struct ggml_compute_params {
@@ -883,7 +892,7 @@ index 5d1ca5ffcc368b9f0249d6cf6ccc4549bb9a3ab4..509b24e675768c03d1120abb9198906f
  #if defined(_MSC_VER)
  
 diff --git a/ggml/src/ggml-cpu/ggml-cpu.c b/ggml/src/ggml-cpu/ggml-cpu.c
-index 491316f7491252248d6f74a60440d3efa7aa6177..a15513e7715743f5a352ef542145b51eef2a17ae 100644
+index 491316f74..a15513e77 100644
 --- a/ggml/src/ggml-cpu/ggml-cpu.c
 +++ b/ggml/src/ggml-cpu/ggml-cpu.c
 @@ -5,6 +5,7 @@
@@ -1453,7 +1462,7 @@ index 491316f7491252248d6f74a60440d3efa7aa6177..a15513e7715743f5a352ef542145b51e
      };
  
 diff --git a/ggml/src/ggml-cpu/ggml-cpu.cpp b/ggml/src/ggml-cpu/ggml-cpu.cpp
-index 16cc5116c5451787c6a1dd1988e38b761f20ef12..527506464c7209742ea256f09096b319370f4f61 100644
+index 16cc5116c..527506464 100644
 --- a/ggml/src/ggml-cpu/ggml-cpu.cpp
 +++ b/ggml/src/ggml-cpu/ggml-cpu.cpp
 @@ -107,6 +107,8 @@ struct ggml_backend_cpu_context {
@@ -1646,7 +1655,7 @@ index 16cc5116c5451787c6a1dd1988e38b761f20ef12..527506464c7209742ea256f09096b319
      if (strcmp(name, "ggml_threadpool_new") == 0) {
 diff --git a/ggml/src/ggml-cpu/siliangem_moe_cache.h b/ggml/src/ggml-cpu/siliangem_moe_cache.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..a44e39f00926be71dbd8273d24374c04711fb2cc
+index 000000000..a44e39f00
 --- /dev/null
 +++ b/ggml/src/ggml-cpu/siliangem_moe_cache.h
 @@ -0,0 +1,1859 @@
@@ -3510,7 +3519,7 @@ index 0000000000000000000000000000000000000000..a44e39f00926be71dbd8273d24374c04
 +
 +#endif /* _WIN32 */
 diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
-index 561ab7ac599f9e285d2a0296caee0ab0a14ea5c8..944daa425e23aa6f2883bb883a797f4f4709d106 100644
+index 561ab7ac5..23a1ae2f1 100644
 --- a/ggml/src/ggml-cuda/ggml-cuda.cu
 +++ b/ggml/src/ggml-cuda/ggml-cuda.cu
 @@ -83,6 +83,7 @@
@@ -3521,7 +3530,7 @@ index 561ab7ac599f9e285d2a0296caee0ab0a14ea5c8..944daa425e23aa6f2883bb883a797f4f
  #include <cstdarg>
  #include <cstdio>
  #include <cstdlib>
-@@ -745,6 +746,274 @@ static bool ggml_backend_buffer_is_cuda(ggml_backend_buffer_t buffer) {
+@@ -745,6 +746,326 @@ static bool ggml_backend_buffer_is_cuda(ggml_backend_buffer_t buffer) {
      return buffer->iface.free_buffer == ggml_backend_cuda_buffer_free_buffer;
  }
  
@@ -3793,10 +3802,62 @@ index 561ab7ac599f9e285d2a0296caee0ab0a14ea5c8..944daa425e23aa6f2883bb883a797f4f
 +            : GGML_BACKEND_CUDA_SILIANG_STATUS_CUDA_ERROR;
 +}
 +
++enum ggml_backend_cuda_siliang_status ggml_backend_cuda_siliang_host_register_readonly(
++        ggml_backend_t backend,
++        void * buffer,
++        size_t size) {
++    if (buffer == nullptr || size == 0) {
++        return GGML_BACKEND_CUDA_SILIANG_STATUS_INVALID_ARGUMENT;
++    }
++    ggml_backend_cuda_context * context = nullptr;
++    const enum ggml_backend_cuda_siliang_status status =
++        ggml_backend_cuda_siliang_get_context(backend, &context);
++    if (status != GGML_BACKEND_CUDA_SILIANG_STATUS_SUCCESS) {
++        return status;
++    }
++
++    ggml_cuda_set_device(context->device);
++#if CUDART_VERSION >= 11010 || defined(GGML_USE_MUSA) || defined(GGML_USE_HIP)
++    const unsigned int flags = cudaHostRegisterPortable | cudaHostRegisterReadOnly;
++#else
++    const unsigned int flags = cudaHostRegisterPortable;
++#endif
++    const cudaError_t error = cudaHostRegister(buffer, size, flags);
++    if (error != cudaSuccess) {
++        (void) cudaGetLastError();
++        GGML_LOG_DEBUG("%s: failed to register %.2f MiB of host memory: %s\n", __func__,
++                size / 1024.0 / 1024.0, cudaGetErrorString(error));
++        return GGML_BACKEND_CUDA_SILIANG_STATUS_CUDA_ERROR;
++    }
++    return GGML_BACKEND_CUDA_SILIANG_STATUS_SUCCESS;
++}
++
++enum ggml_backend_cuda_siliang_status ggml_backend_cuda_siliang_host_unregister(
++        ggml_backend_t backend,
++        void * buffer) {
++    if (buffer == nullptr) {
++        return GGML_BACKEND_CUDA_SILIANG_STATUS_INVALID_ARGUMENT;
++    }
++    ggml_backend_cuda_context * context = nullptr;
++    const enum ggml_backend_cuda_siliang_status status =
++        ggml_backend_cuda_siliang_get_context(backend, &context);
++    if (status != GGML_BACKEND_CUDA_SILIANG_STATUS_SUCCESS) {
++        return status;
++    }
++
++    ggml_cuda_set_device(context->device);
++    const cudaError_t error = cudaHostUnregister(buffer);
++    if (error != cudaSuccess) {
++        (void) cudaGetLastError();
++        return GGML_BACKEND_CUDA_SILIANG_STATUS_CUDA_ERROR;
++    }
++    return GGML_BACKEND_CUDA_SILIANG_STATUS_SUCCESS;
++}
++
  static void * ggml_backend_cuda_buffer_get_base(ggml_backend_buffer_t buffer) {
      ggml_backend_cuda_buffer_context * ctx = (ggml_backend_cuda_buffer_context *)buffer->context;
      return ctx->dev_ptr;
-@@ -5347,6 +5616,39 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
+@@ -5347,6 +5668,45 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
      if (strcmp(name, "ggml_backend_unregister_host_buffer") == 0) {
          return (void *)ggml_backend_cuda_unregister_host_buffer;
      }
@@ -3833,11 +3894,17 @@ index 561ab7ac599f9e285d2a0296caee0ab0a14ea5c8..944daa425e23aa6f2883bb883a797f4f
 +    if (strcmp(name, "ggml_backend_cuda_siliang_h2d_async") == 0) {
 +        return (void *)ggml_backend_cuda_siliang_h2d_async;
 +    }
++    if (strcmp(name, "ggml_backend_cuda_siliang_host_register_readonly") == 0) {
++        return (void *)ggml_backend_cuda_siliang_host_register_readonly;
++    }
++    if (strcmp(name, "ggml_backend_cuda_siliang_host_unregister") == 0) {
++        return (void *)ggml_backend_cuda_siliang_host_unregister;
++    }
      if (strcmp(name, "ggml_backend_get_features") == 0) {
          return (void *)ggml_backend_cuda_get_features;
      }
 diff --git a/include/llama.h b/include/llama.h
-index fb2ca38cee4f8ba84bb6178f1e345e066b0d07e5..d19e6c29c54af4a1d9dbb6aadfc2e0214f02d865 100644
+index fb2ca38ce..d19e6c29c 100644
 --- a/include/llama.h
 +++ b/include/llama.h
 @@ -62,6 +62,115 @@ extern "C" {
@@ -4037,7 +4104,7 @@ index fb2ca38cee4f8ba84bb6178f1e345e066b0d07e5..d19e6c29c54af4a1d9dbb6aadfc2e021
      LLAMA_API enum llama_rope_type       llama_model_rope_type(const struct llama_model * model);
  
 diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
-index 24f05cc91673217726b919229e1626b7f74a7bcb..4b620618f1304164881ac97692d397fa8152688f 100644
+index 24f05cc91..4b620618f 100644
 --- a/src/CMakeLists.txt
 +++ b/src/CMakeLists.txt
 @@ -38,6 +38,10 @@ add_library(llama
@@ -4052,7 +4119,7 @@ index 24f05cc91673217726b919229e1626b7f74a7bcb..4b620618f1304164881ac97692d397fa
              unicode.cpp
              unicode.h
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index 19cca7df1e9deaafc1e8ee50d0c78ae5ffbc6cfb..e41f09245ec35a3f7266b73cbfc9d0b0c473e6af 100644
+index 19cca7df1..c53e9f973 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
 @@ -1,6 +1,7 @@
@@ -4063,7 +4130,7 @@ index 19cca7df1e9deaafc1e8ee50d0c78ae5ffbc6cfb..e41f09245ec35a3f7266b73cbfc9d0b0
  #include "llama-arch.h"
  #include "llama-graph.h"
  #include "llama-impl.h"
-@@ -95,6 +96,72 @@ llama_context::llama_context(
+@@ -95,6 +96,73 @@ llama_context::llama_context(
  
      const auto & hparams = model.hparams;
  
@@ -4117,14 +4184,15 @@ index 19cca7df1e9deaafc1e8ee50d0c78ae5ffbc6cfb..e41f09245ec35a3f7266b73cbfc9d0b0
 +            const uint64_t maximum_route_union = std::min<uint64_t>(
 +                    static_cast<uint64_t>(configured_ubatch) * static_cast<uint64_t>(top_k),
 +                    hparams.n_expert);
-+            if (model.arch != LLM_ARCH_DEEPSEEK4 || hparams.n_layer() != 43 ||
-+                hparams.n_layer_nextn != 0 || hparams.n_expert != 256 || top_k != 6) {
++            if (hparams.n_expert == 0 ||
++                hparams.n_expert > LLAMA_SILIANG_MOE_PREFILL_MAX_EXPERTS) {
 +                throw std::runtime_error(
-+                        "Siliang expert-cache prefill requires the exact 43-layer, 256-expert, top-k-6 DeepSeek4 architecture");
++                        "Siliang expert-cache prefill currently supports routed MoE models with at most 256 experts per layer");
 +            }
 +            if (configured_ubatch == 0 || maximum_route_union > expert_cache.l1_k) {
 +                throw std::runtime_error(
-+                        "Siliang expert-cache prefill requires min(n_ubatch * top-k, expert-count) <= L1 K");
++                        "Siliang expert-cache prefill requires min(n_ubatch * top-k, expert-count) <= L1 K; "
++                        "the runtime will additionally validate each layer-local schema-bank K slice");
 +            }
 +        }
 +        LLAMA_LOG_INFO("%s: Siliang expert cache enabled: L2=%" PRIu64 " MiB K=%u R=%u P=%u roll=%d prefill=%d\n",
@@ -4136,7 +4204,7 @@ index 19cca7df1e9deaafc1e8ee50d0c78ae5ffbc6cfb..e41f09245ec35a3f7266b73cbfc9d0b0
      cparams.n_seq_max = std::max(1u, params.n_seq_max);
      if (cparams.n_seq_max > LLAMA_MAX_SEQ) {
          throw std::runtime_error("n_seq_max must be <= " + std::to_string(LLAMA_MAX_SEQ));
-@@ -138,6 +205,14 @@ llama_context::llama_context(
+@@ -138,6 +206,14 @@ llama_context::llama_context(
      cparams.cb_eval           = params.cb_eval;
      cparams.cb_eval_user_data = params.cb_eval_user_data;
  
@@ -4151,7 +4219,7 @@ index 19cca7df1e9deaafc1e8ee50d0c78ae5ffbc6cfb..e41f09245ec35a3f7266b73cbfc9d0b0
      cparams.ctx_other = nullptr;
  
      // TODO: more generic
-@@ -352,6 +427,56 @@ llama_context::llama_context(
+@@ -352,6 +428,56 @@ llama_context::llama_context(
          }
          backends.emplace_back(backend_cpu);
  
@@ -4208,7 +4276,7 @@ index 19cca7df1e9deaafc1e8ee50d0c78ae5ffbc6cfb..e41f09245ec35a3f7266b73cbfc9d0b0
          // create a list of the set_n_threads functions in the backends
          for (auto & backend : backends) {
              ggml_backend_dev_t dev = ggml_backend_get_device(backend.get());
-@@ -667,6 +792,11 @@ void llama_context::sched_reserve() {
+@@ -667,6 +793,11 @@ void llama_context::sched_reserve() {
          }
      }
  
@@ -4220,7 +4288,7 @@ index 19cca7df1e9deaafc1e8ee50d0c78ae5ffbc6cfb..e41f09245ec35a3f7266b73cbfc9d0b0
      for (size_t i = 0; i < backend_ptrs.size(); ++i) {
          ggml_backend_t             backend = backend_ptrs[i];
          ggml_backend_buffer_type_t buft    = backend_buft[i];
-@@ -842,6 +972,505 @@ float * llama_context::get_logits() {
+@@ -842,6 +973,503 @@ float * llama_context::get_logits() {
      return logits.data;
  }
  
@@ -4436,10 +4504,8 @@ index 19cca7df1e9deaafc1e8ee50d0c78ae5ffbc6cfb..e41f09245ec35a3f7266b73cbfc9d0b0
 +            static_cast<uint64_t>(cparams.n_ubatch) * static_cast<uint64_t>(model_info.top_k),
 +            static_cast<uint64_t>(model_info.expert_count));
 +    if (cparams.expert_cache.prefill &&
-+        (model.arch != LLM_ARCH_DEEPSEEK4 || model_info.layer_count != 43 ||
-+         model_info.routed_layer_count != 43 || model_info.expert_count != 256 ||
-+         model_info.top_k != 6 || !model_info.homogeneous_schema || cparams.n_ubatch == 0 ||
-+         prefill_route_capacity > cparams.expert_cache.l1_k)) {
++        (model_info.expert_count > static_cast<int32_t>(LLAMA_SILIANG_MOE_PREFILL_MAX_EXPERTS) ||
++         cparams.n_ubatch == 0 || prefill_route_capacity > cparams.expert_cache.l1_k)) {
 +        return false;
 +    }
 +
@@ -4726,7 +4792,7 @@ index 19cca7df1e9deaafc1e8ee50d0c78ae5ffbc6cfb..e41f09245ec35a3f7266b73cbfc9d0b0
  int64_t llama_context::output_resolve_row(int32_t i) const {
      int64_t j = -1;
  
-@@ -2472,9 +3101,28 @@ ggml_status llama_context::graph_compute(
+@@ -2472,9 +3100,28 @@ ggml_status llama_context::graph_compute(
          set_n_threads_fn.second(set_n_threads_fn.first, n_threads);
      }
  
@@ -4755,7 +4821,7 @@ index 19cca7df1e9deaafc1e8ee50d0c78ae5ffbc6cfb..e41f09245ec35a3f7266b73cbfc9d0b0
      }
  
      // fprintf(stderr, "splits: %d\n", ggml_backend_sched_get_n_splits(sched));
-@@ -3480,6 +4128,79 @@ void llama_context::opt_epoch(
+@@ -3480,6 +4127,79 @@ void llama_context::opt_epoch(
  // interface implementation
  //
  
@@ -4835,7 +4901,7 @@ index 19cca7df1e9deaafc1e8ee50d0c78ae5ffbc6cfb..e41f09245ec35a3f7266b73cbfc9d0b0
  llama_context_params llama_context_default_params() {
      llama_context_params result = {
          /*.n_ctx                       =*/ 512,
-@@ -3518,6 +4239,19 @@ llama_context_params llama_context_default_params() {
+@@ -3518,6 +4238,19 @@ llama_context_params llama_context_default_params() {
          /*.sampler                     =*/ nullptr,
          /*.n_sampler                   =*/ 0,
          /*.ctx_other                   =*/ nullptr,
@@ -4855,7 +4921,7 @@ index 19cca7df1e9deaafc1e8ee50d0c78ae5ffbc6cfb..e41f09245ec35a3f7266b73cbfc9d0b0
      };
  
      return result;
-@@ -3850,6 +4584,15 @@ int32_t llama_set_adapters_lora(
+@@ -3850,6 +4583,15 @@ int32_t llama_set_adapters_lora(
          GGML_ASSERT(n_adapters == 0 && "invalid llama_set_adapters_lora call");
      }
  
@@ -4872,7 +4938,7 @@ index 19cca7df1e9deaafc1e8ee50d0c78ae5ffbc6cfb..e41f09245ec35a3f7266b73cbfc9d0b0
  
      return 0;
 diff --git a/src/llama-context.h b/src/llama-context.h
-index bf91daa8b562aa66d15b08ca559b6baa09ab7855..8aae1bde38941c24120a9140cc3559c597f24689 100644
+index bf91daa8b..8aae1bde3 100644
 --- a/src/llama-context.h
 +++ b/src/llama-context.h
 @@ -102,6 +102,33 @@ struct llama_context {
@@ -4929,10 +4995,10 @@ index bf91daa8b562aa66d15b08ca559b6baa09ab7855..8aae1bde38941c24120a9140cc3559c5
      std::vector<ggml_backend_ptr> backends;
  
 diff --git a/src/llama-cparams.h b/src/llama-cparams.h
-index 5018170ed85e3b82abad65e6a3c71859067c9f71..9105c1a4556b72208a0db5d902d26dd894bce50c 100644
+index 5018170ed..bc8a0bdac 100644
 --- a/src/llama-cparams.h
 +++ b/src/llama-cparams.h
-@@ -2,11 +2,52 @@
+@@ -2,11 +2,54 @@
  
  #include "llama.h"
  
@@ -4943,6 +5009,8 @@ index 5018170ed85e3b82abad65e6a3c71859067c9f71..9105c1a4556b72208a0db5d902d26dd8
  
  #define LLAMA_MAX_SEQ 256
  
++constexpr uint32_t LLAMA_SILIANG_MOE_PREFILL_MAX_EXPERTS = 256;
++
 +struct llama_siliang_moe_arena_state;
 +
 +struct llama_siliang_moe_arena_map_call {
@@ -4985,7 +5053,7 @@ index 5018170ed85e3b82abad65e6a3c71859067c9f71..9105c1a4556b72208a0db5d902d26dd8
  struct llama_cparams {
      uint32_t n_ctx;           // context size used during inference
      uint32_t n_ctx_seq;       // context for a single sequence
-@@ -61,5 +102,15 @@ struct llama_cparams {
+@@ -61,5 +104,15 @@ struct llama_cparams {
      ggml_backend_sched_eval_callback cb_eval;
      void * cb_eval_user_data;
  
@@ -5002,7 +5070,7 @@ index 5018170ed85e3b82abad65e6a3c71859067c9f71..9105c1a4556b72208a0db5d902d26dd8
      llama_context * ctx_other;
  };
 diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
-index 2be3b75fb9825ccc9aa08cda294f46d6422c61ea..f83f0c4e7b61aab53567eae30e34a583bb92d45b 100644
+index 2be3b75fb..f83f0c4e7 100644
 --- a/src/llama-graph.cpp
 +++ b/src/llama-graph.cpp
 @@ -229,6 +229,201 @@ bool llm_graph_input_out_ids::can_reuse(const llm_graph_params & params) {
@@ -5347,7 +5415,7 @@ index 2be3b75fb9825ccc9aa08cda294f46d6422c61ea..f83f0c4e7b61aab53567eae30e34a583
      }
  
 diff --git a/src/llama-graph.h b/src/llama-graph.h
-index 32d8d395aa4546ed7e90e7d26d24218fcd37547a..08c5d6968e6fde56d207c6607fdc6834e97287ca 100644
+index 32d8d395a..08c5d6968 100644
 --- a/src/llama-graph.h
 +++ b/src/llama-graph.h
 @@ -18,6 +18,7 @@ struct ggml_tensor;
@@ -5392,7 +5460,7 @@ index 32d8d395aa4546ed7e90e7d26d24218fcd37547a..08c5d6968e6fde56d207c6607fdc6834
              gtype == other.gtype &&
              cvec  == other.cvec  &&
 diff --git a/src/llama-model-loader.cpp b/src/llama-model-loader.cpp
-index b31e92e2da7ef42eabbb47173bb1f2088c952f39..709db618f656f22e02fbcea1101db185341a8afb 100644
+index b31e92e2d..709db618f 100644
 --- a/src/llama-model-loader.cpp
 +++ b/src/llama-model-loader.cpp
 @@ -2,6 +2,7 @@
@@ -5800,7 +5868,7 @@ index b31e92e2da7ef42eabbb47173bb1f2088c952f39..709db618f656f22e02fbcea1101db185
                  ggml_backend_tensor_set(cur, data, 0, n_size);
              }
 diff --git a/src/llama-model-loader.h b/src/llama-model-loader.h
-index d6b31c2311186608f48e88d1a37c23adc7e1b0c7..aa1772d1377724450c2f3b9b3013e771607f8c3f 100644
+index d6b31c231..aa1772d13 100644
 --- a/src/llama-model-loader.h
 +++ b/src/llama-model-loader.h
 @@ -1,5 +1,7 @@
@@ -5878,7 +5946,7 @@ index d6b31c2311186608f48e88d1a37c23adc7e1b0c7..aa1772d1377724450c2f3b9b3013e771
      std::unordered_map<std::string, llama_model_kv_override> kv_overrides;
      const llama_model_tensor_buft_override * tensor_buft_overrides;
 diff --git a/src/llama-model.h b/src/llama-model.h
-index 6b9e94a0a6921745fd20f58aba38490480c36a38..f14b607ded2574b98290f9eb5e9237989e9313d6 100644
+index 6b9e94a0a..f14b607de 100644
 --- a/src/llama-model.h
 +++ b/src/llama-model.h
 @@ -1,5 +1,7 @@
@@ -5899,7 +5967,7 @@ index 6b9e94a0a6921745fd20f58aba38490480c36a38..f14b607ded2574b98290f9eb5e923798
      std::vector<std::string> classifier_labels;
  
 diff --git a/src/llama.cpp b/src/llama.cpp
-index d6e0bbfefa729329fe6b83e46e603a85dab0f2e3..3113ca8d1cacc2a8c42ef815e4aba9a6c22a88bb 100644
+index d6e0bbfef..3113ca8d1 100644
 --- a/src/llama.cpp
 +++ b/src/llama.cpp
 @@ -309,6 +309,7 @@ static std::pair<int, llama_model *> llama_model_load(struct gguf_context * meta
@@ -5911,7 +5979,7 @@ index d6e0bbfefa729329fe6b83e46e603a85dab0f2e3..3113ca8d1cacc2a8c42ef815e4aba9a6
          bool ok = llama_prepare_model_devices(params, model_ptr.get());
          if (!ok) {
 diff --git a/src/models/deepseek4.cpp b/src/models/deepseek4.cpp
-index 89cd461765adfe8c32fa2e6c6b6d2e962de4b0ac..e0ae251cb500c5eb55d6b2c8b36a24a6f6005b84 100644
+index 89cd46176..e0ae251cb 100644
 --- a/src/models/deepseek4.cpp
 +++ b/src/models/deepseek4.cpp
 @@ -15,6 +15,20 @@ static float dsv4_rope_attn_factor(float freq_scale, float ext_factor) {
@@ -5985,10 +6053,10 @@ index 89cd461765adfe8c32fa2e6c6b6d2e962de4b0ac..e0ae251cb500c5eb55d6b2c8b36a24a6
          cur = build_attention(model, inp_dsv4, cur, inp_pos, il);
 diff --git a/src/siliang-ds4-front-slab.cpp b/src/siliang-ds4-front-slab.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..d0e3ae4e38c584871ae274b78e4bf58dcbde4034
+index 000000000..35ad425cc
 --- /dev/null
 +++ b/src/siliang-ds4-front-slab.cpp
-@@ -0,0 +1,856 @@
+@@ -0,0 +1,881 @@
 +#include "siliang-ds4-front-slab.h"
 +
 +#include "ggml-cpp.h"
@@ -6007,6 +6075,16 @@ index 0000000000000000000000000000000000000000..d0e3ae4e38c584871ae274b78e4bf58d
 +#include <new>
 +#include <utility>
 +#include <vector>
++
++#if defined(_WIN32)
++#ifndef WIN32_LEAN_AND_MEAN
++#define WIN32_LEAN_AND_MEAN
++#endif
++#ifndef NOMINMAX
++#define NOMINMAX
++#endif
++#include <windows.h>
++#endif
 +
 +namespace {
 +
@@ -6126,6 +6204,8 @@ index 0000000000000000000000000000000000000000..d0e3ae4e38c584871ae274b78e4bf58d
 +    using stream_wait_fn = decltype(&ggml_backend_cuda_siliang_stream_wait_event);
 +    using main_wait_fn = decltype(&ggml_backend_cuda_siliang_main_stream_wait_event);
 +    using h2d_fn = decltype(&ggml_backend_cuda_siliang_h2d_async);
++    using host_register_fn = decltype(&ggml_backend_cuda_siliang_host_register_readonly);
++    using host_unregister_fn = decltype(&ggml_backend_cuda_siliang_host_unregister);
 +
 +    struct cuda_procs {
 +        stream_create_fn stream_create = nullptr;
@@ -6139,11 +6219,14 @@ index 0000000000000000000000000000000000000000..d0e3ae4e38c584871ae274b78e4bf58d
 +        stream_wait_fn stream_wait = nullptr;
 +        main_wait_fn main_wait = nullptr;
 +        h2d_fn h2d = nullptr;
++        host_register_fn host_register = nullptr;
++        host_unregister_fn host_unregister = nullptr;
 +
 +        bool complete() const {
 +            return stream_create && stream_destroy && stream_synchronize &&
 +                event_create && event_destroy && event_synchronize && event_record &&
-+                main_event_record && stream_wait && main_wait && h2d;
++                main_event_record && stream_wait && main_wait && h2d &&
++                host_register && host_unregister;
 +        }
 +    };
 +
@@ -6169,7 +6252,8 @@ index 0000000000000000000000000000000000000000..d0e3ae4e38c584871ae274b78e4bf58d
 +
 +    ggml_context_ptr metadata;
 +    ggml_backend_buffer_ptr gpu_buffer;
-+    ggml_backend_buffer_ptr host_buffer;
++    unsigned char * host_store = nullptr;
++    bool host_registered = false;
 +    ggml_tensor * carrier = nullptr;
 +
 +    std::array<llama_layer, k_ds4_layer_count> alternate_layers = {};
@@ -6253,6 +6337,8 @@ index 0000000000000000000000000000000000000000..d0e3ae4e38c584871ae274b78e4bf58d
 +            load_proc(reg, "ggml_backend_cuda_siliang_stream_wait_event", candidate.stream_wait);
 +            load_proc(reg, "ggml_backend_cuda_siliang_main_stream_wait_event", candidate.main_wait);
 +            load_proc(reg, "ggml_backend_cuda_siliang_h2d_async", candidate.h2d);
++            load_proc(reg, "ggml_backend_cuda_siliang_host_register_readonly", candidate.host_register);
++            load_proc(reg, "ggml_backend_cuda_siliang_host_unregister", candidate.host_unregister);
 +            if (candidate.complete()) {
 +                cuda_backend = backend;
 +                cuda = candidate;
@@ -6351,28 +6437,28 @@ index 0000000000000000000000000000000000000000..d0e3ae4e38c584871ae274b78e4bf58d
 +            return fail(FAILURE_ALLOCATION);
 +        }
 +
-+        ggml_backend_dev_t cuda_device = ggml_backend_get_device(cuda_backend);
-+        ggml_backend_buffer_type_t host_buft = cuda_device ? ggml_backend_dev_host_buffer_type(cuda_device) : nullptr;
-+        if (host_buft == nullptr) {
++#if defined(_WIN32)
++        host_store = static_cast<unsigned char *>(VirtualAlloc(
++                nullptr, host_store_size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
++        if (host_store == nullptr) {
 +            return fail(FAILURE_ALLOCATION);
 +        }
-+        host_buffer.reset(ggml_backend_buft_alloc_buffer(host_buft, host_store_size));
-+        if (!host_buffer || ggml_backend_buffer_get_type(host_buffer.get()) != host_buft) {
-+            return fail(FAILURE_ALLOCATION);
-+        }
-+        auto * host_base = static_cast<unsigned char *>(ggml_backend_buffer_get_base(host_buffer.get()));
-+        if (host_base == nullptr) {
-+            return fail(FAILURE_ALLOCATION);
-+        }
-+        std::memset(host_base, 0, host_store_size);
++#else
++        return fail(FAILURE_ALLOCATION);
++#endif
++        std::memset(host_store, 0, host_store_size);
 +        for (const layer_plan & plan : plans) {
 +            for (const segment & item : plan.segments) {
 +                std::memcpy(
-+                    host_base + plan.store_offset + item.offset,
++                    host_store + plan.store_offset + item.offset,
 +                    item.source->data,
 +                    item.payload_size);
 +            }
 +        }
++        if (!cuda_ok(cuda.host_register(cuda_backend, host_store, host_store_size))) {
++            return fail(FAILURE_ALLOCATION);
++        }
++        host_registered = true;
 +
 +        carrier = ggml_new_tensor_1d(metadata.get(), GGML_TYPE_I8, static_cast<int64_t>(bank_stride));
 +        if (carrier == nullptr) {
@@ -6425,9 +6511,8 @@ index 0000000000000000000000000000000000000000..d0e3ae4e38c584871ae274b78e4bf58d
 +
 +    bool preload_layer_zero() {
 +        const layer_plan & plan = plans[0];
-+        const auto * host_base = static_cast<const unsigned char *>(ggml_backend_buffer_get_base(host_buffer.get()));
-+        if (host_base == nullptr || !cuda_ok(cuda.h2d(
-+                copy_stream, carrier, host_base + plan.store_offset, 0, plan.span)) ||
++        if (host_store == nullptr || !cuda_ok(cuda.h2d(
++                copy_stream, carrier, host_store + plan.store_offset, 0, plan.span)) ||
 +            !cuda_ok(cuda.event_record(copy_stream, copy_done)) ||
 +            !cuda_ok(cuda.event_synchronize(copy_done))) {
 +            return fail(FAILURE_CUDA_RUNTIME);
@@ -6444,12 +6529,11 @@ index 0000000000000000000000000000000000000000..d0e3ae4e38c584871ae274b78e4bf58d
 +            return fail(FAILURE_MARKER_SEQUENCE);
 +        }
 +        const layer_plan & plan = plans[target_layer];
-+        const auto * host_base = static_cast<const unsigned char *>(ggml_backend_buffer_get_base(host_buffer.get()));
 +        const auto start = std::chrono::steady_clock::now();
-+        if (host_base == nullptr ||
++        if (host_store == nullptr ||
 +            !cuda_ok(cuda.main_event_record(cuda_backend, use_done)) ||
 +            !cuda_ok(cuda.stream_wait(copy_stream, use_done)) ||
-+            !cuda_ok(cuda.h2d(copy_stream, carrier, host_base + plan.store_offset, 0, plan.span)) ||
++            !cuda_ok(cuda.h2d(copy_stream, carrier, host_store + plan.store_offset, 0, plan.span)) ||
 +            !cuda_ok(cuda.event_record(copy_stream, copy_done))) {
 +            return fail(FAILURE_CUDA_RUNTIME);
 +        }
@@ -6608,7 +6692,16 @@ index 0000000000000000000000000000000000000000..d0e3ae4e38c584871ae274b78e4bf58d
 +        use_done = nullptr;
 +        copy_stream = nullptr;
 +        carrier = nullptr;
-+        host_buffer.reset();
++        if (host_registered && host_store != nullptr && cuda.host_unregister && cuda_backend) {
++            (void) cuda.host_unregister(cuda_backend, host_store);
++            host_registered = false;
++        }
++#if defined(_WIN32)
++        if (host_store != nullptr) {
++            VirtualFree(host_store, 0, MEM_RELEASE);
++            host_store = nullptr;
++        }
++#endif
 +        gpu_buffer.reset();
 +        metadata.reset();
 +        for (layer_plan & plan : plans) {
@@ -6847,7 +6940,7 @@ index 0000000000000000000000000000000000000000..d0e3ae4e38c584871ae274b78e4bf58d
 +}
 diff --git a/src/siliang-ds4-front-slab.h b/src/siliang-ds4-front-slab.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..a3c1052be580ed7ceecbd3d64d01350e439a5a74
+index 000000000..a3c1052be
 --- /dev/null
 +++ b/src/siliang-ds4-front-slab.h
 @@ -0,0 +1,75 @@
@@ -6928,7 +7021,7 @@ index 0000000000000000000000000000000000000000..a3c1052be580ed7ceecbd3d64d01350e
 +};
 diff --git a/src/siliang-expert-source.h b/src/siliang-expert-source.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..01b630212a342f9eb0770985995098a049734064
+index 000000000..01b630212
 --- /dev/null
 +++ b/src/siliang-expert-source.h
 @@ -0,0 +1,45 @@
@@ -6979,10 +7072,10 @@ index 0000000000000000000000000000000000000000..01b630212a342f9eb0770985995098a0
 +};
 diff --git a/src/siliang-moe-runtime.cpp b/src/siliang-moe-runtime.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..f76550a3ec32def14569d532769ae74182adcec3
+index 000000000..0890eda72
 --- /dev/null
 +++ b/src/siliang-moe-runtime.cpp
-@@ -0,0 +1,1962 @@
+@@ -0,0 +1,1969 @@
 +#include "siliang-moe-runtime.h"
 +
 +#include "llama-impl.h"
@@ -7385,12 +7478,10 @@ index 0000000000000000000000000000000000000000..f76550a3ec32def14569d532769ae741
 +                static_cast<uint64_t>(prefill_ubatch_cap) * static_cast<uint64_t>(route_width),
 +                static_cast<uint64_t>(model_info.expert_count));
 +        if (params.prefill &&
-+            (model->arch != LLM_ARCH_DEEPSEEK4 || model_info.layer_count != 43 ||
-+             model_info.routed_layer_count != 43 || model_info.expert_count != 256 ||
-+             model_info.top_k != 6 || !model_info.homogeneous_schema ||
++            (model_info.expert_count > static_cast<int32_t>(LLAMA_SILIANG_MOE_PREFILL_MAX_EXPERTS) ||
 +             prefill_ubatch_cap == 0 || prefill_route_capacity > params.l1_k)) {
 +            return fail(SILIANG_RUNTIME_FAILURE_PREFILL,
-+                    "bounded prefill requires exact homogeneous DS4 geometry and "
++                    "bounded prefill requires at most 256 experts per routed layer and "
 +                    "min(n_ubatch * top-k, expert-count) <= K");
 +        }
 +        const uint64_t double_route_width = 2ULL * route_width;
@@ -7452,15 +7543,24 @@ index 0000000000000000000000000000000000000000..f76550a3ec32def14569d532769ae741
 +        if (schemas.empty() || managed_layers.empty()) {
 +            return fail(SILIANG_RUNTIME_FAILURE_INIT, "no CPU-backed routed-expert layer is available");
 +        }
-+        if (params.prefill && schemas.size() != 1) {
-+            return fail(SILIANG_RUNTIME_FAILURE_PREFILL,
-+                    "bounded prefill requires one homogeneous routed-expert schema");
-+        }
 +        if (managed_layers.size() != static_cast<size_t>(model_info.routed_layer_count)) {
 +            return fail(SILIANG_RUNTIME_FAILURE_INIT, "only a subset of routed-expert layers is CPU-backed");
 +        }
 +
-+        if (!plan_slot_geometry() || !configure_l2_parts()) {
++        if (!plan_slot_geometry()) {
++            return false;
++        }
++        if (params.prefill) {
++            for (int32_t layer : managed_layers) {
++                const auto & descriptor = layers[static_cast<size_t>(layer)];
++                if (prefill_route_capacity > descriptor.policy_count) {
++                    return fail(SILIANG_RUNTIME_FAILURE_PREFILL,
++                            "bounded prefill route union exceeds a layer-local schema-bank K slice; "
++                            "reduce ubatch or increase K");
++                }
++            }
++        }
++        if (!configure_l2_parts()) {
 +            return false;
 +        }
 +        if (!allocate_arena() || !allocate_staging() || !create_events()) {
@@ -8947,13 +9047,14 @@ index 0000000000000000000000000000000000000000..f76550a3ec32def14569d532769ae741
 +}
 diff --git a/src/siliang-moe-runtime.h b/src/siliang-moe-runtime.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..70549d1feb0a73d14aec5f1d7c7989c0e55aa713
+index 000000000..5bf98bd7f
 --- /dev/null
 +++ b/src/siliang-moe-runtime.h
-@@ -0,0 +1,342 @@
+@@ -0,0 +1,345 @@
 +#pragma once
 +
 +#include "llama.h"
++#include "llama-cparams.h"
 +
 +#include <algorithm>
 +#include <array>
@@ -8966,6 +9067,8 @@ index 0000000000000000000000000000000000000000..70549d1feb0a73d14aec5f1d7c7989c0
 +
 +constexpr size_t route_bitmap_word_bits = 64;
 +constexpr size_t route_bitmap_word_count = 4;
++constexpr size_t route_bitmap_expert_capacity = route_bitmap_word_bits * route_bitmap_word_count;
++static_assert(route_bitmap_expert_capacity == LLAMA_SILIANG_MOE_PREFILL_MAX_EXPERTS);
 +using route_bitmap = std::array<uint64_t, route_bitmap_word_count>;
 +
 +inline uint32_t route_bitmap_count(const route_bitmap & bitmap) {
@@ -9004,7 +9107,7 @@ index 0000000000000000000000000000000000000000..70549d1feb0a73d14aec5f1d7c7989c0
 +        route_union & result) {
 +    result = {};
 +    if (!logical || count == 0 || expert_count <= 0 ||
-+        expert_count > static_cast<int32_t>(route_bitmap_word_bits * route_bitmap_word_count) || capacity == 0) {
++        expert_count > static_cast<int32_t>(route_bitmap_expert_capacity) || capacity == 0) {
 +        return false;
 +    }
 +
@@ -9294,7 +9397,7 @@ index 0000000000000000000000000000000000000000..70549d1feb0a73d14aec5f1d7c7989c0
 +
 +LLAMA_API void siliang_moe_runtime_reset_prefill_trace(struct siliang_moe_runtime * runtime);
 diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
-index 419e1eba4c2cdb465d20453004eeeca5af28037f..b66f6c8fa62a68fcc95194cf5d5689035056adc7 100644
+index 419e1eba4..b66f6c8fa 100644
 --- a/tests/CMakeLists.txt
 +++ b/tests/CMakeLists.txt
 @@ -258,6 +258,7 @@ llama_build_and_test(test-thread-safety.cpp ARGS -m "${MODEL_DEST}" -ngl 99 -p "
@@ -9306,7 +9409,7 @@ index 419e1eba4c2cdb465d20453004eeeca5af28037f..b66f6c8fa62a68fcc95194cf5d568903
  # the test serves its repos from an httplib server, and the library links it privately
  target_link_libraries(test-model-resolution PRIVATE cpp-httplib)
 diff --git a/tests/test-arg-parser.cpp b/tests/test-arg-parser.cpp
-index fd5adb740eab632505cd0a4d999fb55a093a5f84..303883ced6f6c8704c3e4b75c3391a373af61002 100644
+index fd5adb740..303883ced 100644
 --- a/tests/test-arg-parser.cpp
 +++ b/tests/test-arg-parser.cpp
 @@ -2,16 +2,170 @@
@@ -9739,7 +9842,7 @@ index fd5adb740eab632505cd0a4d999fb55a093a5f84..303883ced6f6c8704c3e4b75c3391a37
      // missing value
 diff --git a/tests/test-siliang-prefill.cpp b/tests/test-siliang-prefill.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..7d740fe1e709cf8a7985ff418124a732c3f281c8
+index 000000000..7d740fe1e
 --- /dev/null
 +++ b/tests/test-siliang-prefill.cpp
 @@ -0,0 +1,109 @@
@@ -9853,7 +9956,7 @@ index 0000000000000000000000000000000000000000..7d740fe1e709cf8a7985ff418124a732
 +    return 0;
 +}
 diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
-index 5d2798cc14e9295646bb8e570bbec166c9ecc72c..1162ccd4b1dc37d203f048d9fbe47f73e0fc997a 100644
+index 5d2798cc1..1162ccd4b 100644
 --- a/tools/server/server-context.cpp
 +++ b/tools/server/server-context.cpp
 @@ -1421,6 +1421,10 @@ private:

@@ -13,8 +13,9 @@ Its core workflow combines model-owned expert sources with a typed L2/L1 memory
 hierarchy. A bounded system-RAM L2 can serve out-of-core experts, while a CUDA
 L1 keeps K persistent experts plus R exchange slots and a bounded pinned P
   elevator. The v0.1.3 DeepSeek4 path can also roll its architecture-specific
-  FRONT set and, as an explicit experiment, reuse K for bounded prompt
-  microbatches. The GPU retains router weights; only selected expert IDs enter
+  FRONT set. Separately, the generic routed-MoE arena can, as an explicit
+  experiment, reuse K for bounded prompt microbatches when the topology and
+  layer-local capacity checks pass. The GPU retains router weights; only selected expert IDs enter
   the CPU cache-control path. Per-sweep route bitmaps measure reuse without
   enabling speculative admission. Expert-major GGUF remains the recommended source layout for DS4 and
 GPT-OSS; compatible stock MoE models can promote experts from their existing
@@ -57,7 +58,7 @@ that leaves room for Windows, the model's non-expert
 weights, KV cache, and GPU shared-memory pressure. Larger is not automatically
 better. Use `--no-expert-cache` for a deliberate control. The full DS4
 K216/R12/P12 server command, Pi endpoint, policy options, and conservative
-  DS4 prefill-microbatch experiment, Gemma4/Qwen3/Qwen3.6/GPT-OSS trial recipes are in
+  routed-MoE prefill-microbatch experiment, Gemma4/Qwen3/Qwen3.6/Ornith/GPT-OSS trial recipes are in
 [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md).
 
 ## Performance
@@ -118,8 +119,9 @@ is consistent with the [PCI-SIG bandwidth table](https://pcisig.com/how-does-pci
 
 - A typed, opt-in MoE hierarchy with managed host L2, a CUDA K policy budget,
   per-schema R exchange banks, and bounded global P staging.
-- An architecture-guarded DeepSeek4 FRONT rolling path for serial decode and
-  opt-in bounded prompt microbatches.
+- An architecture-guarded DeepSeek4 FRONT rolling path for serial decode.
+- A separate topology-gated routed-MoE bounded-prefill experiment, currently
+  limited to at most 256 experts per layer and layer-local K capacity.
 - The expert-major GGUF preparation workflow for the core and recommended
   Siliang path, plus validated arena support for compatible monolithic stock
   GGUFs.

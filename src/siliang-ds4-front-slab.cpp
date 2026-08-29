@@ -17,6 +17,16 @@
 #include <utility>
 #include <vector>
 
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 namespace {
 
 constexpr int k_ds4_layer_count = 43;
@@ -135,6 +145,8 @@ struct siliang_ds4_front_slab::impl {
     using stream_wait_fn = decltype(&ggml_backend_cuda_siliang_stream_wait_event);
     using main_wait_fn = decltype(&ggml_backend_cuda_siliang_main_stream_wait_event);
     using h2d_fn = decltype(&ggml_backend_cuda_siliang_h2d_async);
+    using host_register_fn = decltype(&ggml_backend_cuda_siliang_host_register_readonly);
+    using host_unregister_fn = decltype(&ggml_backend_cuda_siliang_host_unregister);
 
     struct cuda_procs {
         stream_create_fn stream_create = nullptr;
@@ -148,11 +160,14 @@ struct siliang_ds4_front_slab::impl {
         stream_wait_fn stream_wait = nullptr;
         main_wait_fn main_wait = nullptr;
         h2d_fn h2d = nullptr;
+        host_register_fn host_register = nullptr;
+        host_unregister_fn host_unregister = nullptr;
 
         bool complete() const {
             return stream_create && stream_destroy && stream_synchronize &&
                 event_create && event_destroy && event_synchronize && event_record &&
-                main_event_record && stream_wait && main_wait && h2d;
+                main_event_record && stream_wait && main_wait && h2d &&
+                host_register && host_unregister;
         }
     };
 
@@ -178,7 +193,8 @@ struct siliang_ds4_front_slab::impl {
 
     ggml_context_ptr metadata;
     ggml_backend_buffer_ptr gpu_buffer;
-    ggml_backend_buffer_ptr host_buffer;
+    unsigned char * host_store = nullptr;
+    bool host_registered = false;
     ggml_tensor * carrier = nullptr;
 
     std::array<llama_layer, k_ds4_layer_count> alternate_layers = {};
@@ -262,6 +278,8 @@ struct siliang_ds4_front_slab::impl {
             load_proc(reg, "ggml_backend_cuda_siliang_stream_wait_event", candidate.stream_wait);
             load_proc(reg, "ggml_backend_cuda_siliang_main_stream_wait_event", candidate.main_wait);
             load_proc(reg, "ggml_backend_cuda_siliang_h2d_async", candidate.h2d);
+            load_proc(reg, "ggml_backend_cuda_siliang_host_register_readonly", candidate.host_register);
+            load_proc(reg, "ggml_backend_cuda_siliang_host_unregister", candidate.host_unregister);
             if (candidate.complete()) {
                 cuda_backend = backend;
                 cuda = candidate;
@@ -360,28 +378,28 @@ struct siliang_ds4_front_slab::impl {
             return fail(FAILURE_ALLOCATION);
         }
 
-        ggml_backend_dev_t cuda_device = ggml_backend_get_device(cuda_backend);
-        ggml_backend_buffer_type_t host_buft = cuda_device ? ggml_backend_dev_host_buffer_type(cuda_device) : nullptr;
-        if (host_buft == nullptr) {
+#if defined(_WIN32)
+        host_store = static_cast<unsigned char *>(VirtualAlloc(
+                nullptr, host_store_size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+        if (host_store == nullptr) {
             return fail(FAILURE_ALLOCATION);
         }
-        host_buffer.reset(ggml_backend_buft_alloc_buffer(host_buft, host_store_size));
-        if (!host_buffer || ggml_backend_buffer_get_type(host_buffer.get()) != host_buft) {
-            return fail(FAILURE_ALLOCATION);
-        }
-        auto * host_base = static_cast<unsigned char *>(ggml_backend_buffer_get_base(host_buffer.get()));
-        if (host_base == nullptr) {
-            return fail(FAILURE_ALLOCATION);
-        }
-        std::memset(host_base, 0, host_store_size);
+#else
+        return fail(FAILURE_ALLOCATION);
+#endif
+        std::memset(host_store, 0, host_store_size);
         for (const layer_plan & plan : plans) {
             for (const segment & item : plan.segments) {
                 std::memcpy(
-                    host_base + plan.store_offset + item.offset,
+                    host_store + plan.store_offset + item.offset,
                     item.source->data,
                     item.payload_size);
             }
         }
+        if (!cuda_ok(cuda.host_register(cuda_backend, host_store, host_store_size))) {
+            return fail(FAILURE_ALLOCATION);
+        }
+        host_registered = true;
 
         carrier = ggml_new_tensor_1d(metadata.get(), GGML_TYPE_I8, static_cast<int64_t>(bank_stride));
         if (carrier == nullptr) {
@@ -434,9 +452,8 @@ struct siliang_ds4_front_slab::impl {
 
     bool preload_layer_zero() {
         const layer_plan & plan = plans[0];
-        const auto * host_base = static_cast<const unsigned char *>(ggml_backend_buffer_get_base(host_buffer.get()));
-        if (host_base == nullptr || !cuda_ok(cuda.h2d(
-                copy_stream, carrier, host_base + plan.store_offset, 0, plan.span)) ||
+        if (host_store == nullptr || !cuda_ok(cuda.h2d(
+                copy_stream, carrier, host_store + plan.store_offset, 0, plan.span)) ||
             !cuda_ok(cuda.event_record(copy_stream, copy_done)) ||
             !cuda_ok(cuda.event_synchronize(copy_done))) {
             return fail(FAILURE_CUDA_RUNTIME);
@@ -453,12 +470,11 @@ struct siliang_ds4_front_slab::impl {
             return fail(FAILURE_MARKER_SEQUENCE);
         }
         const layer_plan & plan = plans[target_layer];
-        const auto * host_base = static_cast<const unsigned char *>(ggml_backend_buffer_get_base(host_buffer.get()));
         const auto start = std::chrono::steady_clock::now();
-        if (host_base == nullptr ||
+        if (host_store == nullptr ||
             !cuda_ok(cuda.main_event_record(cuda_backend, use_done)) ||
             !cuda_ok(cuda.stream_wait(copy_stream, use_done)) ||
-            !cuda_ok(cuda.h2d(copy_stream, carrier, host_base + plan.store_offset, 0, plan.span)) ||
+            !cuda_ok(cuda.h2d(copy_stream, carrier, host_store + plan.store_offset, 0, plan.span)) ||
             !cuda_ok(cuda.event_record(copy_stream, copy_done))) {
             return fail(FAILURE_CUDA_RUNTIME);
         }
@@ -617,7 +633,16 @@ struct siliang_ds4_front_slab::impl {
         use_done = nullptr;
         copy_stream = nullptr;
         carrier = nullptr;
-        host_buffer.reset();
+        if (host_registered && host_store != nullptr && cuda.host_unregister && cuda_backend) {
+            (void) cuda.host_unregister(cuda_backend, host_store);
+            host_registered = false;
+        }
+#if defined(_WIN32)
+        if (host_store != nullptr) {
+            VirtualFree(host_store, 0, MEM_RELEASE);
+            host_store = nullptr;
+        }
+#endif
         gpu_buffer.reset();
         metadata.reset();
         for (layer_plan & plan : plans) {

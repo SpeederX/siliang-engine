@@ -20,8 +20,12 @@ class PrefillArenaContractTests(unittest.TestCase):
         self.assertIn("bool prefill_enabled = false;", LLAMA_CPARAMS)
         self.assertIn("prefill_ubatch_cap", LLAMA_CPARAMS)
         self.assertIn("min(n_ubatch * top-k, expert-count) <= L1 K", LLAMA_CONTEXT)
-        self.assertIn("model_info.homogeneous_schema", MOE_RUNTIME)
-        self.assertIn("schemas.size() != 1", MOE_RUNTIME)
+        self.assertIn("LLAMA_SILIANG_MOE_PREFILL_MAX_EXPERTS", LLAMA_CONTEXT)
+        self.assertIn("LLAMA_SILIANG_MOE_PREFILL_MAX_EXPERTS", MOE_RUNTIME)
+        self.assertIn("prefill_route_capacity > descriptor.policy_count", MOE_RUNTIME)
+        self.assertIn("layer-local schema-bank K slice", MOE_RUNTIME)
+        self.assertNotIn("schemas.size() != 1", MOE_RUNTIME)
+        self.assertNotIn("model->arch != LLM_ARCH_DEEPSEEK4", MOE_RUNTIME)
 
     def test_graph_accepts_only_exact_bounded_route_shapes(self) -> None:
         self.assertIn("logical_ids->ne[0] == state->top_k", LLAMA_GRAPH)

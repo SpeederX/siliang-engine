@@ -1,6 +1,7 @@
 #pragma once
 
 #include "llama.h"
+#include "llama-cparams.h"
 
 #include <algorithm>
 #include <array>
@@ -13,6 +14,8 @@ namespace siliang_moe_prefill {
 
 constexpr size_t route_bitmap_word_bits = 64;
 constexpr size_t route_bitmap_word_count = 4;
+constexpr size_t route_bitmap_expert_capacity = route_bitmap_word_bits * route_bitmap_word_count;
+static_assert(route_bitmap_expert_capacity == LLAMA_SILIANG_MOE_PREFILL_MAX_EXPERTS);
 using route_bitmap = std::array<uint64_t, route_bitmap_word_count>;
 
 inline uint32_t route_bitmap_count(const route_bitmap & bitmap) {
@@ -51,7 +54,7 @@ inline bool build_route_union(
         route_union & result) {
     result = {};
     if (!logical || count == 0 || expert_count <= 0 ||
-        expert_count > static_cast<int32_t>(route_bitmap_word_bits * route_bitmap_word_count) || capacity == 0) {
+        expert_count > static_cast<int32_t>(route_bitmap_expert_capacity) || capacity == 0) {
         return false;
     }
 

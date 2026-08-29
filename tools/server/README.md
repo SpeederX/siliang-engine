@@ -188,8 +188,8 @@ For the full list of features, please refer to [server's changelog](https://gith
 | `--expert-cache-exchange-r N` | exchange slots R per schema arena; requires K > 0 (default: 0) |
 | `--expert-cache-elevator-p N` | global pinned-host elevator slots P, sized to the largest expert schema; requires K > 0 (default: 0) |
 | `--expert-cache-l1-policy {lru,lfu,cumulative-lfu,wtinylfu,wtinylfu-w10-slru-p80}` | L1 policy; lfu is always-admit and resets its hit count on admission, cumulative-lfu uses lifetime-frequency admission/bypass, and wtinylfu is W-TinyLFU W10/SLRU-P80 (default: lru) |
-| `--expert-cache-roll {off,deepseek4}` | rolling cache mode; deepseek4 is architecture-specific (default: off) |
-| `--expert-cache-prefill, --no-expert-cache-prefill` | enable bounded DeepSeek-V4 batch-union prefill in the CUDA K arena; the ubatch route union must fit K (experimental, default: disabled) |
+| `--expert-cache-roll {off,deepseek4}` | architecture-specific static rolling mode; deepseek4 controls only the DeepSeek-V4 FRONT slab, not the generic routed-expert K/R/P arena (default: off) |
+| `--expert-cache-prefill, --no-expert-cache-prefill` | enable bounded routed-MoE batch-union prefill in the CUDA K arena; supports up to 256 experts per layer and the ubatch route union must fit every layer-local K slice (experimental, default: disabled) |
 | `--expert-cache-memory-report, --no-expert-cache-memory-report` | enable periodic expert-cache memory reporting (default: enabled) |
 | `--expert-cache-deferred-wait, --no-expert-cache-deferred-wait` | allow deferred L2 I/O waits (default: enabled) |
 | `-a, --alias STRING` | set model name aliases, comma-separated (to be used by API)<br/>(env: LLAMA_ARG_ALIAS) |

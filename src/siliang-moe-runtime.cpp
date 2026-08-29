@@ -400,12 +400,10 @@ struct siliang_moe_runtime {
                 static_cast<uint64_t>(prefill_ubatch_cap) * static_cast<uint64_t>(route_width),
                 static_cast<uint64_t>(model_info.expert_count));
         if (params.prefill &&
-            (model->arch != LLM_ARCH_DEEPSEEK4 || model_info.layer_count != 43 ||
-             model_info.routed_layer_count != 43 || model_info.expert_count != 256 ||
-             model_info.top_k != 6 || !model_info.homogeneous_schema ||
+            (model_info.expert_count > static_cast<int32_t>(LLAMA_SILIANG_MOE_PREFILL_MAX_EXPERTS) ||
              prefill_ubatch_cap == 0 || prefill_route_capacity > params.l1_k)) {
             return fail(SILIANG_RUNTIME_FAILURE_PREFILL,
-                    "bounded prefill requires exact homogeneous DS4 geometry and "
+                    "bounded prefill requires at most 256 experts per routed layer and "
                     "min(n_ubatch * top-k, expert-count) <= K");
         }
         const uint64_t double_route_width = 2ULL * route_width;
@@ -467,15 +465,24 @@ struct siliang_moe_runtime {
         if (schemas.empty() || managed_layers.empty()) {
             return fail(SILIANG_RUNTIME_FAILURE_INIT, "no CPU-backed routed-expert layer is available");
         }
-        if (params.prefill && schemas.size() != 1) {
-            return fail(SILIANG_RUNTIME_FAILURE_PREFILL,
-                    "bounded prefill requires one homogeneous routed-expert schema");
-        }
         if (managed_layers.size() != static_cast<size_t>(model_info.routed_layer_count)) {
             return fail(SILIANG_RUNTIME_FAILURE_INIT, "only a subset of routed-expert layers is CPU-backed");
         }
 
-        if (!plan_slot_geometry() || !configure_l2_parts()) {
+        if (!plan_slot_geometry()) {
+            return false;
+        }
+        if (params.prefill) {
+            for (int32_t layer : managed_layers) {
+                const auto & descriptor = layers[static_cast<size_t>(layer)];
+                if (prefill_route_capacity > descriptor.policy_count) {
+                    return fail(SILIANG_RUNTIME_FAILURE_PREFILL,
+                            "bounded prefill route union exceeds a layer-local schema-bank K slice; "
+                            "reduce ubatch or increase K");
+                }
+            }
+        }
+        if (!configure_l2_parts()) {
             return false;
         }
         if (!allocate_arena() || !allocate_staging() || !create_events()) {
