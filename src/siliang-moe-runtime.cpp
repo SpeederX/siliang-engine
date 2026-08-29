@@ -134,6 +134,12 @@ struct runtime_metrics {
     uint64_t transition_device_wait_ns = 0;
     uint64_t transition_host_copy_ns = 0;
     uint64_t transition_exposed_wait_ns = 0;
+    uint64_t demotion_reuse_l2 = 0;
+    uint64_t demotion_reuse_cold = 0;
+    uint64_t demotion_reuse_unknown = 0;
+    uint64_t demotion_reuse_pending = 0;
+    std::array<uint64_t, 5> demotion_reuse_l2_round_buckets = {};
+    std::array<uint64_t, 5> demotion_reuse_cold_round_buckets = {};
     uint64_t slfu_cold_bypasses = 0;
     uint64_t phase_invalidations = 0;
     uint64_t prefill_maps = 0;
@@ -344,6 +350,9 @@ struct siliang_moe_runtime {
     std::vector<cache_slot> slots;
     std::vector<int32_t> resident;
     std::vector<uint64_t> frequencies;
+    std::vector<uint64_t> layer_decode_round;
+    std::vector<uint64_t> demotion_start_round;
+    std::vector<uint8_t> demotion_reuse_pending;
     std::vector<siliang_moe_prefill::route_bitmap> prefill_bitmaps;
     std::vector<uint8_t> prefill_bitmap_valid;
     std::vector<route_bitmap_metrics> prefill_bitmap_layers;
@@ -696,6 +705,9 @@ struct siliang_moe_runtime {
         }
         resident.assign(key_count, -1);
         frequencies.assign(key_count, 0);
+        layer_decode_round.assign(static_cast<size_t>(model_info.layer_count), 0);
+        demotion_start_round.assign(key_count, 0);
+        demotion_reuse_pending.assign(key_count, 0);
         prefill_bitmaps.resize(static_cast<size_t>(model_info.layer_count));
         prefill_bitmap_valid.assign(static_cast<size_t>(model_info.layer_count), 0);
         prefill_bitmap_layers.resize(static_cast<size_t>(model_info.layer_count));
@@ -1170,6 +1182,50 @@ struct siliang_moe_runtime {
         return static_cast<int64_t>(layer) * model_info.expert_count + expert;
     }
 
+    static size_t demotion_reuse_round_bucket(uint64_t rounds) {
+        if (rounds <= 1) return 0;
+        if (rounds <= 4) return 1;
+        if (rounds <= 8) return 2;
+        if (rounds <= 16) return 3;
+        return 4;
+    }
+
+    void record_demotion_reuse(
+            int32_t layer,
+            const std::vector<int64_t> & route_keys,
+            const l2_prepare_counts & l2) {
+        if (!params.route_stats || !params.demote_k_hot || !l2.exact ||
+            layer < 0 || static_cast<size_t>(layer) >= layer_decode_round.size()) {
+            return;
+        }
+        const uint64_t current_round = layer_decode_round[static_cast<size_t>(layer)];
+        for (int64_t key : route_keys) {
+            if (key < 0 || static_cast<size_t>(key) >= demotion_reuse_pending.size() ||
+                !demotion_reuse_pending[static_cast<size_t>(key)]) {
+                continue;
+            }
+            const int32_t expert = static_cast<int32_t>(key % model_info.expert_count);
+            const bool l2_hit = std::find(l2.hit_experts.begin(), l2.hit_experts.end(), expert) != l2.hit_experts.end();
+            const bool cold = std::find(l2.miss_experts.begin(), l2.miss_experts.end(), expert) != l2.miss_experts.end();
+            const uint64_t start_round = demotion_start_round[static_cast<size_t>(key)];
+            const uint64_t distance = current_round > start_round ? current_round - start_round : 1;
+            const size_t bucket = demotion_reuse_round_bucket(distance);
+            if (l2_hit) {
+                ++metrics.demotion_reuse_l2;
+                ++metrics.demotion_reuse_l2_round_buckets[bucket];
+            } else if (cold) {
+                ++metrics.demotion_reuse_cold;
+                ++metrics.demotion_reuse_cold_round_buckets[bucket];
+            } else {
+                ++metrics.demotion_reuse_unknown;
+            }
+            demotion_reuse_pending[static_cast<size_t>(key)] = 0;
+            if (metrics.demotion_reuse_pending > 0) {
+                --metrics.demotion_reuse_pending;
+            }
+        }
+    }
+
     bool policy_bounds(int32_t layer, uint32_t & first, uint32_t & last) const {
         if (layer < 0 || static_cast<size_t>(layer) >= layers.size()) {
             return false;
@@ -1556,13 +1612,15 @@ struct siliang_moe_runtime {
                     " L1=%" PRIu64 "(%.2f%%) L2=%" PRIu64 "(%.2f%%) uncached=%" PRIu64 "(%.2f%%)"
                     " K_hit=%" PRIu64 " K_admit=%" PRIu64 " R=%" PRIu64 " CPU=%" PRIu64
                     " L1_evict=%" PRIu64 " L2_evict=%" PRIu64 " L2_reject=%" PRIu64
-                    " demotions=%" PRIu64 " unknown=%" PRIu64 "\n",
+                    " demotions=%" PRIu64 " D_reuse_L2=%" PRIu64 " D_reuse_cold=%" PRIu64
+                    " D_pending=%" PRIu64 " unknown=%" PRIu64 "\n",
                     generated_tokens, stats.routes, stats.selections,
                     stats.state_l1, 100.0 * static_cast<double>(stats.state_l1) / denom,
                     stats.state_l2, 100.0 * static_cast<double>(stats.state_l2) / denom,
                     stats.state_uncached, 100.0 * static_cast<double>(stats.state_uncached) / denom,
                     stats.exec_gpu_k_hit, stats.exec_gpu_k_admit, stats.exec_gpu_r, stats.exec_cpu,
                     metrics.k_evictions, l2_evictions, l2_rejections, metrics.l2_demotions,
+                    metrics.demotion_reuse_l2, metrics.demotion_reuse_cold, metrics.demotion_reuse_pending,
                     stats.state_unknown + stats.exec_unknown);
             std::fflush(stderr);
             ++route_stats_checkpoint_index;
@@ -2036,6 +2094,17 @@ struct siliang_moe_runtime {
             slots[policy_slot].segment = slot_segment::none;
             slots[policy_slot].frequency = 1;
             resident[static_cast<size_t>(transition.candidate_key)] = transition.policy_slot;
+            if (params.route_stats && params.demote_k_hot) {
+                const size_t victim_index = static_cast<size_t>(transition.victim_key);
+                const size_t victim_layer = static_cast<size_t>(transition.victim_key / model_info.expert_count);
+                if (victim_index < demotion_reuse_pending.size() && victim_layer < layer_decode_round.size()) {
+                    if (!demotion_reuse_pending[victim_index]) {
+                        demotion_reuse_pending[victim_index] = 1;
+                        ++metrics.demotion_reuse_pending;
+                    }
+                    demotion_start_round[victim_index] = layer_decode_round[victim_layer];
+                }
+            }
             ++metrics.l2_releases;
             ++metrics.k_admissions;
             ++metrics.k_evictions;
@@ -2162,6 +2231,11 @@ struct siliang_moe_runtime {
         if (prefill) {
             return map_prefill(layer, logical, physical, count);
         }
+        if (static_cast<size_t>(layer) >= layer_decode_round.size() ||
+            layer_decode_round[static_cast<size_t>(layer)] == std::numeric_limits<uint64_t>::max()) {
+            return fail(SILIANG_RUNTIME_FAILURE_ROUTE, "decode layer-round counter overflow");
+        }
+        ++layer_decode_round[static_cast<size_t>(layer)];
         std::vector<int64_t> route_keys(count);
         std::vector<int32_t> needed;
         needed.reserve(count);
@@ -2190,6 +2264,7 @@ struct siliang_moe_runtime {
         if (!needed.empty() && (!acquire_staging_bank() || !prepare_l2(layer, needed, &route_l2))) {
             return false;
         }
+        record_demotion_reuse(layer, route_keys, route_l2);
 
         bool copied = false;
         bool exchange_used = false;
@@ -2479,6 +2554,8 @@ struct siliang_moe_runtime {
                     " demotions=%" PRIu64 " demotion_failures=%" PRIu64
                     " D2H_ops=%" PRIu64 " D2H_bytes=%" PRIu64
                     " D2D_ops=%" PRIu64 " D2D_bytes=%" PRIu64
+                    " reuse_L2=%" PRIu64 " reuse_cold=%" PRIu64
+                    " reuse_pending=%" PRIu64 " reuse_unknown=%" PRIu64
                     " submit_ms=%.3f device_wait_ms=%.3f host_copy_ms=%.3f exposed_wait_ms=%.3f\n",
                     params.admit_k_cold ? "on" : "off", params.demote_k_hot ? "on" : "off",
                     metrics.slfu_cold_bypasses, metrics.k_deferred_promotions,
@@ -2486,10 +2563,22 @@ struct siliang_moe_runtime {
                     metrics.l2_demotions, metrics.l2_demotion_failures,
                     metrics.demotion_d2h_ops, metrics.demotion_d2h_bytes,
                     metrics.promotion_d2d_ops, metrics.promotion_d2d_bytes,
+                    metrics.demotion_reuse_l2, metrics.demotion_reuse_cold,
+                    metrics.demotion_reuse_pending, metrics.demotion_reuse_unknown,
                     static_cast<double>(metrics.transition_submit_ns) / 1e6,
                     static_cast<double>(metrics.transition_device_wait_ns) / 1e6,
                     static_cast<double>(metrics.transition_host_copy_ns) / 1e6,
                     static_cast<double>(metrics.transition_exposed_wait_ns) / 1e6);
+            std::fprintf(
+                    stderr,
+                    "siliang_moe_runtime: route_stats demotion_reuse_rounds"
+                    " L2=[1:%" PRIu64 ",2-4:%" PRIu64 ",5-8:%" PRIu64 ",9-16:%" PRIu64 ",17+:%" PRIu64 "]"
+                    " cold=[1:%" PRIu64 ",2-4:%" PRIu64 ",5-8:%" PRIu64 ",9-16:%" PRIu64 ",17+:%" PRIu64 "]\n",
+                    metrics.demotion_reuse_l2_round_buckets[0], metrics.demotion_reuse_l2_round_buckets[1],
+                    metrics.demotion_reuse_l2_round_buckets[2], metrics.demotion_reuse_l2_round_buckets[3],
+                    metrics.demotion_reuse_l2_round_buckets[4], metrics.demotion_reuse_cold_round_buckets[0],
+                    metrics.demotion_reuse_cold_round_buckets[1], metrics.demotion_reuse_cold_round_buckets[2],
+                    metrics.demotion_reuse_cold_round_buckets[3], metrics.demotion_reuse_cold_round_buckets[4]);
         }
 
         const size_t top_k = static_cast<size_t>(model_info.top_k);

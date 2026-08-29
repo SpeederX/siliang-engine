@@ -341,3 +341,46 @@ The three configurations retained for longer natural runs are therefore:
 3. `L2=W-TinyLFU, L1=SLFU, admit-k-cold=on, demote-k-hot=on`.
 
 The next stage extends these cells with fresh three-replica natural runs and reads cumulative checkpoints from each uninterrupted generation rather than restarting the cache at each checkpoint.
+
+## 13. Natural 256-token three-replica extension
+
+The three SLFU/W-TinyLFU-L2 finalists from the 64-token screen were extended with **three new fresh-process natural runs each** to 256 requested decode tokens. Each uninterrupted generation emitted cumulative 32/64/128/256 checkpoints from one continuously evolving cache. Default sampler behavior was retained; no frozen route, replay/oracle, temperature override, top-k override, or fixed seed was used.
+
+### Cumulative state at 256 tokens
+
+| Configuration | Rep 1 L1/L2/cold | Rep 2 | Rep 3 | Median L1 | Median L2 | Median cold | Generation median |
+|---|---|---|---|---:|---:|---:|---:|
+| **SLFU cold=on, demote=off** | 29.07 / 37.05 / 33.88 | 28.59 / 36.70 / 34.71 | 29.31 / 35.49 / 35.19 | **29.07%** | **36.70%** | **34.71%** | **1.9 tok/s** |
+| SLFU cold=off, demote=on | 27.26 / 35.87 / 36.87 | 29.40 / 34.97 / 35.63 | 29.40 / 36.82 / 33.78 | **29.40%** | 35.87% | 35.63% | 1.9 tok/s |
+| SLFU cold=on, demote=on | 29.21 / 34.10 / 36.68 | 28.02 / 36.32 / 35.66 | 27.98 / 36.07 / 35.95 | 28.02% | 36.07% | 35.95% | 1.9 tok/s |
+
+The median of each column is reported independently, so L1+L2 medians should not be treated as the exact median of a per-run combined-hit scalar. The robust ordering is driven mainly by cold share and confirmed again by the late-window view below.
+
+### Window-only state: generated tokens 129-256
+
+Subtracting the cumulative 128 checkpoint from 256 isolates the later 128-token window and removes most of the cold-start weight:
+
+| Configuration | Rep 1 L1/L2/cold | Rep 2 | Rep 3 | Median L1 | Median L2 | Median cold |
+|---|---|---|---|---:|---:|---:|
+| **SLFU cold=on, demote=off** | 30.76 / 38.26 / 30.98 | 30.73 / 38.79 / 30.48 | 31.21 / 37.78 / 31.00 | **30.76%** | **38.26%** | **30.98%** |
+| SLFU cold=off, demote=on | 27.79 / 37.38 / 34.83 | 31.56 / 36.15 / 32.28 | 30.47 / 38.38 / 31.15 | 30.47% | 37.38% | 32.28% |
+| SLFU cold=on, demote=on | 28.80 / 35.35 / 35.85 | 29.45 / 38.02 / 32.53 | 28.07 / 37.05 / 34.89 | 28.80% | 37.05% | 34.89% |
+
+The simpler **cold=on / demote=off** cell is the clear 256-token winner: its late window converges around 31% L1, 38% L2, and 31% cold. `cold=off / demote=on` remains second; the corrected demotion mechanism is cheap enough that its loss is policy-driven rather than transport-driven.
+
+For `cold=off / demote=on`, the three 256-token runs committed 620/663/640 real swaps with zero transition failures. Next-router exposed wait was approximately **0.0338 / 0.1026 / 0.0185 ms per swap** (median ~0.0338 ms/swap), while D2H/D2D and host-L2 commit work ran behind the persistent worker. Thus real K<->L2 demotion is mechanically viable, but in this workload delaying first-use cold admission sacrifices more locality than the demotion recovers by 256 tokens.
+
+The three cells are retained for one fresh natural 1024-token run each to test whether their ranking changes at a longer horizon.
+
+### Demotion reuse lifecycle telemetry
+
+Before long-horizon qualification, `--expert-cache-route-stats` was extended to measure whether a real K->L2 demotion is useful before the demoted expert is needed again. Each demoted `(layer, expert)` opens one lifecycle episode. On its first later selection, the existing L2 prepare result classifies the episode without any extra cache query:
+
+- `reuse_L2`: the demoted expert is still an L2 hit at its next selection;
+- `reuse_cold`: it has been evicted from L2 before its next selection and is cold again;
+- `reuse_pending`: it has not been selected again yet by the current checkpoint/end of run;
+- `reuse_unknown`: the existing L2 classification was not exact.
+
+Reuse distance is measured in subsequent visits to the victim's own layer, not raw global route calls, with buckets `1`, `2-4`, `5-8`, `9-16`, and `17+`. This handles global-K victims from both earlier and later layers correctly. No per-expert logging or additional L2 lookup is performed; the metric reuses `prepare_l2`'s existing per-route hit/miss classification.
+
+A 4-token mechanical smoke on L2 W-TinyLFU + L1 SLFU, `admit-k-cold=off`, `demote-k-hot=on` closed exactly: 44 demotions = 3 `reuse_L2` + 0 `reuse_cold` + 41 pending + 0 unknown. All three resolved useful reuses were in the first same-layer revisit bucket. This smoke is a telemetry gate only, not a performance result.
