@@ -1836,6 +1836,7 @@ struct llama_context_params common_context_params_to_llama(const common_params &
         LLAMA_SILIANG_EXPERT_CACHE_ROLL_DEEPSEEK4 : LLAMA_SILIANG_EXPERT_CACHE_ROLL_NONE;
     cparams.expert_cache.prefill       = params.expert_cache.prefill;
     cparams.expert_cache.memory_report = params.expert_cache.memory_report;
+    cparams.expert_cache.route_stats   = params.expert_cache.route_stats;
     cparams.expert_cache.deferred_wait = params.expert_cache.deferred_wait;
 
     cparams.type_k = params.cache_type_k;

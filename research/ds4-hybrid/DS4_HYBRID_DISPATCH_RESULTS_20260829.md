@@ -211,3 +211,43 @@ For six real misses into a full 8-GiB L2:
 - resulting routed/source component path: about **14.73 ms/layer**.
 
 The 2.6872 ms is actual routed expert matrix compute after the expert bytes are resident. It is not scheduling, copying or cache preparation.
+
+## 10. Natural non-frozen route telemetry
+
+A research-only console flag was added on this branch:
+
+`--expert-cache-route-stats`
+
+It is default-off, requires the L1 K/R/P runtime, emits only aggregate shutdown statistics (no per-token/per-layer spam), and writes the explicitly requested telemetry to stderr independently of ordinary INFO log filtering. It separates two different axes:
+
+- **residency before dispatch:** L1/K hit, L2 hit, or uncached/cold L2 miss;
+- **execution in the current runtime:** existing K, newly admitted K, transient R, or CPU.
+
+It also reports route-composition histograms, so costs can later be weighted by actual route states instead of only aggregate hit percentages.
+
+Three fresh natural runs were executed with no route replay/oracle and different prompts (factual, technical, creative). Configuration was held fixed: DS4 expert-major, L2=8 GiB LRU, K216/R12/P12 cumulative-LFU, full registered FRONT, bounded-prefill arena disabled, 32 requested decode tokens. Each retained 1,333 decode route calls / 7,998 selections.
+
+| Workload | L1 | L2 | Cold | Generation |
+|---|---:|---:|---:|---:|
+| factual | 30.06% | 36.47% | 33.47% | 2.0 tok/s |
+| technical | 32.30% | 37.97% | 29.73% | 2.1 tok/s |
+| creative | 29.18% | 34.93% | 35.88% | 1.9 tok/s |
+
+Across all three runs (3,999 route calls / 23,994 selections):
+
+- L1/K resident: **7,321 = 30.51%**;
+- L2 resident but not K: **8,748 = 36.46%**;
+- uncached/cold at route time: **7,925 = 33.03%**;
+- unknown classifications: **0**.
+
+Current execution placement for the same selections was:
+
+- existing K hit: **7,321 = 30.51%**;
+- newly admitted to K: **1,778 = 7.41%**;
+- transient R execution: **14,895 = 62.08%**;
+- CPU routed execution: **0**;
+- unknown execution: **0**.
+
+The most common pre-dispatch route composition was `L1=2, L2=2, cold=2` (361 routes, **9.03%**). Other common mixed states were `3/2/1` (6.83%), `2/3/1` (6.80%), `1/3/2` (6.78%), and `3/1/2` (5.50%). This directly shows that mixed same-layer states are central rather than edge cases.
+
+The current execution policy is correspondingly R-heavy: the most frequent execution compositions were `2 K-hit + 4 R` (20.51%), `1 K-hit + 5 R` (16.43%), `3 K-hit + 3 R` (15.40%), and `0 K-hit + 6 R` (13.93%). This makes the direct-register/hybrid CPU-GPU question quantitatively relevant to natural decode, not just to frozen micro-assays.

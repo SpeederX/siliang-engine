@@ -469,6 +469,7 @@ struct common_params_expert_cache {
     bool prefill = false;
 
     bool memory_report = true;
+    bool route_stats = false;
     bool deferred_wait = true;
 
     // Parser-only presence marker: explicit tier options require --expert-cache.

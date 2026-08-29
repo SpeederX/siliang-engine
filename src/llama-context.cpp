@@ -4249,6 +4249,7 @@ llama_context_params llama_context_default_params() {
             /*.enabled       =*/ false,
             /*.prefill       =*/ false,
             /*.memory_report =*/ false,
+            /*.route_stats   =*/ false,
             /*.deferred_wait =*/ true,
         },
     };

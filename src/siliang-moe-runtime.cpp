@@ -11,6 +11,7 @@
 #include <array>
 #include <atomic>
 #include <cinttypes>
+#include <cstdio>
 #include <cstring>
 #include <exception>
 #include <limits>
@@ -50,6 +51,30 @@ struct runtime_layer {
     uint32_t policy_first = 0;
     uint32_t policy_count = 0;
     uint32_t physical_first = 0;
+};
+
+struct route_stats_metrics {
+    uint64_t routes = 0;
+    uint64_t exact_routes = 0;
+    uint64_t unknown_routes = 0;
+    uint64_t selections = 0;
+    uint64_t state_l1 = 0;
+    uint64_t state_l2 = 0;
+    uint64_t state_uncached = 0;
+    uint64_t state_unknown = 0;
+    uint64_t exec_gpu_k_hit = 0;
+    uint64_t exec_gpu_k_admit = 0;
+    uint64_t exec_gpu_r = 0;
+    uint64_t exec_cpu = 0;
+    uint64_t exec_unknown = 0;
+    std::vector<uint64_t> compositions;
+    std::vector<uint64_t> execution_compositions;
+};
+
+struct l2_prepare_counts {
+    uint32_t hits = 0;
+    uint32_t misses = 0;
+    bool exact = true;
 };
 
 struct runtime_metrics {
@@ -302,6 +327,7 @@ struct siliang_moe_runtime {
     size_t active_staging_bank = 0;
 
     runtime_metrics metrics;
+    route_stats_metrics route_stats_metrics;
     std::atomic<int32_t> failure {0};
     std::mutex mutex;
     bool bound = false;
@@ -395,6 +421,11 @@ struct siliang_moe_runtime {
             return fail(SILIANG_RUNTIME_FAILURE_INIT, "model geometry or L1 policy is invalid");
         }
         const uint32_t route_width = static_cast<uint32_t>(model_info.top_k);
+        if (params.route_stats) {
+            const size_t side = static_cast<size_t>(route_width) + 1;
+            route_stats_metrics.compositions.assign(side * side, 0);
+            route_stats_metrics.execution_compositions.assign(side * side * side, 0);
+        }
         const uint32_t prefill_ubatch_cap = llama_n_ubatch(ctx);
         const uint64_t prefill_route_capacity = std::min<uint64_t>(
                 static_cast<uint64_t>(prefill_ubatch_cap) * static_cast<uint64_t>(route_width),
@@ -1148,8 +1179,19 @@ struct siliang_moe_runtime {
         return true;
     }
 
-    bool prepare_l2(int32_t layer, const std::vector<int32_t> & needed) {
-        if (!l2_enabled || needed.empty()) {
+    bool prepare_l2(int32_t layer, const std::vector<int32_t> & needed, l2_prepare_counts * counts = nullptr) {
+        l2_prepare_counts local = {};
+        if (needed.empty()) {
+            if (counts) {
+                *counts = local;
+            }
+            return true;
+        }
+        if (!l2_enabled) {
+            local.misses = static_cast<uint32_t>(needed.size());
+            if (counts) {
+                *counts = local;
+            }
             return true;
         }
         std::vector<int32_t> order(needed.size(), -1);
@@ -1172,11 +1214,16 @@ struct siliang_moe_runtime {
             ++metrics.l2_async_prepares;
             metrics.l2_hits += hits;
             metrics.l2_misses += misses;
+            local.hits = hits;
+            local.misses = misses;
             if (misses > 0) {
                 if (!cpu_wait(cpu)) {
                     return fail(SILIANG_RUNTIME_FAILURE_L2, "L2 deferred read wait failed");
                 }
                 ++metrics.l2_waits;
+            }
+            if (counts) {
+                *counts = local;
             }
             return true;
         }
@@ -1185,8 +1232,95 @@ struct siliang_moe_runtime {
             logged_sync_l2 = true;
         }
         ++metrics.l2_sync_prepares;
-        return cpu_prepare(cpu, static_cast<uint32_t>(layer), needed.data(), static_cast<uint32_t>(needed.size())) != 0 ||
-            fail(SILIANG_RUNTIME_FAILURE_L2, "L2 blocking prepare failed");
+
+        ggml_siliangem_cache_info before = {};
+        ggml_siliangem_cache_info after = {};
+        before.struct_size = sizeof(before);
+        after.struct_size = sizeof(after);
+        const bool have_before = cpu_query && cpu_query(cpu, &before) != 0;
+        if (!cpu_prepare(cpu, static_cast<uint32_t>(layer), needed.data(), static_cast<uint32_t>(needed.size()))) {
+            return fail(SILIANG_RUNTIME_FAILURE_L2, "L2 blocking prepare failed");
+        }
+        const bool have_after = have_before && cpu_query && cpu_query(cpu, &after) != 0;
+        if (have_after && after.hits >= before.hits && after.misses >= before.misses) {
+            const uint64_t sync_hits = after.hits - before.hits;
+            const uint64_t sync_misses = after.misses - before.misses;
+            if (sync_hits + sync_misses == needed.size() &&
+                sync_hits <= std::numeric_limits<uint32_t>::max() && sync_misses <= std::numeric_limits<uint32_t>::max()) {
+                local.hits = static_cast<uint32_t>(sync_hits);
+                local.misses = static_cast<uint32_t>(sync_misses);
+                metrics.l2_hits += sync_hits;
+                metrics.l2_misses += sync_misses;
+            } else {
+                local.exact = false;
+            }
+        } else {
+            local.exact = false;
+        }
+        if (counts) {
+            *counts = local;
+        }
+        return true;
+    }
+
+    void record_route_stats(
+            size_t count,
+            uint64_t l1_hits,
+            const l2_prepare_counts & l2,
+            uint64_t k_admissions,
+            uint64_t r_bypasses) {
+        if (!params.route_stats) {
+            return;
+        }
+        auto & stats = route_stats_metrics;
+        ++stats.routes;
+        stats.selections += count;
+        stats.state_l1 += l1_hits;
+        stats.exec_gpu_k_hit += l1_hits;
+        stats.exec_gpu_k_admit += k_admissions;
+        stats.exec_gpu_r += r_bypasses;
+
+        const uint64_t executed_gpu = l1_hits + k_admissions + r_bypasses;
+        if (executed_gpu <= count) {
+            stats.exec_cpu += count - executed_gpu;
+        } else {
+            stats.exec_unknown += count;
+        }
+
+        const size_t top_k = static_cast<size_t>(model_info.top_k);
+        const size_t side = top_k + 1;
+        if (count == top_k && executed_gpu <= count) {
+            const size_t exec_cpu = static_cast<size_t>(count - executed_gpu);
+            const size_t exec_index =
+                (static_cast<size_t>(l1_hits) * side + static_cast<size_t>(k_admissions)) * side +
+                static_cast<size_t>(r_bypasses);
+            if (exec_index < stats.execution_compositions.size() &&
+                static_cast<size_t>(l1_hits + k_admissions + r_bypasses) + exec_cpu == top_k) {
+                ++stats.execution_compositions[exec_index];
+            } else {
+                stats.exec_unknown += count;
+            }
+        } else if (count != top_k) {
+            stats.exec_unknown += count;
+        }
+
+        const uint64_t classified = l1_hits + l2.hits + l2.misses;
+        if (!l2.exact || classified != count || count != top_k) {
+            ++stats.unknown_routes;
+            stats.state_unknown += count >= l1_hits ? count - l1_hits : count;
+            return;
+        }
+
+        ++stats.exact_routes;
+        stats.state_l2 += l2.hits;
+        stats.state_uncached += l2.misses;
+        const size_t index = static_cast<size_t>(l1_hits) * side + static_cast<size_t>(l2.hits);
+        if (index < stats.compositions.size()) {
+            ++stats.compositions[index];
+        } else {
+            ++stats.unknown_routes;
+            --stats.exact_routes;
+        }
     }
 
     bool copy_expert(int32_t layer, int32_t expert, int32_t physical, size_t staging_lane, bool release_l2) {
@@ -1663,7 +1797,8 @@ struct siliang_moe_runtime {
                 needed.push_back(logical[index]);
             }
         }
-        if (!needed.empty() && (!acquire_staging_bank() || !prepare_l2(layer, needed))) {
+        l2_prepare_counts route_l2 = {};
+        if (!needed.empty() && (!acquire_staging_bank() || !prepare_l2(layer, needed, &route_l2))) {
             return false;
         }
 
@@ -1770,6 +1905,7 @@ struct siliang_moe_runtime {
             ++metrics.ready_events;
         }
         ++metrics.map_calls;
+        record_route_stats(count, route_hits, route_l2, route_admissions, route_bypasses);
         if (!logged_first_route) {
             LLAMA_LOG_INFO(
                     "siliang_moe_runtime: serving decode route map=1 layer=%d K_hits=%" PRIu64
@@ -1849,6 +1985,73 @@ struct siliang_moe_runtime {
         return "invalid";
     }
 
+    void print_route_stats() const {
+        if (!params.route_stats || route_stats_metrics.routes == 0) {
+            return;
+        }
+        const auto & stats = route_stats_metrics;
+        const double denom = stats.selections == 0 ? 1.0 : static_cast<double>(stats.selections);
+        const uint64_t gpu_total = stats.exec_gpu_k_hit + stats.exec_gpu_k_admit + stats.exec_gpu_r;
+        std::fprintf(
+                stderr,
+                "siliang_moe_runtime: route_stats routes=%" PRIu64 " exact_routes=%" PRIu64
+                " unknown_routes=%" PRIu64 " selections=%" PRIu64
+                " residency_L1=%" PRIu64 "(%.2f%%) residency_L2=%" PRIu64 "(%.2f%%)"
+                " residency_uncached=%" PRIu64 "(%.2f%%) residency_unknown=%" PRIu64 "(%.2f%%)\n",
+                stats.routes, stats.exact_routes, stats.unknown_routes, stats.selections,
+                stats.state_l1, 100.0 * static_cast<double>(stats.state_l1) / denom,
+                stats.state_l2, 100.0 * static_cast<double>(stats.state_l2) / denom,
+                stats.state_uncached, 100.0 * static_cast<double>(stats.state_uncached) / denom,
+                stats.state_unknown, 100.0 * static_cast<double>(stats.state_unknown) / denom);
+        std::fprintf(
+                stderr,
+                "siliang_moe_runtime: route_stats execution GPU_K_hit=%" PRIu64
+                " GPU_K_admit=%" PRIu64 " GPU_R_transient=%" PRIu64
+                " GPU_total=%" PRIu64 " CPU=%" PRIu64 " unknown=%" PRIu64 "\n",
+                stats.exec_gpu_k_hit, stats.exec_gpu_k_admit, stats.exec_gpu_r,
+                gpu_total, stats.exec_cpu, stats.exec_unknown);
+
+        const size_t top_k = static_cast<size_t>(model_info.top_k);
+        const size_t side = top_k + 1;
+        for (size_t l1 = 0; l1 <= top_k; ++l1) {
+            for (size_t l2 = 0; l2 + l1 <= top_k; ++l2) {
+                const size_t index = l1 * side + l2;
+                if (index >= stats.compositions.size() || stats.compositions[index] == 0) {
+                    continue;
+                }
+                const size_t uncached = top_k - l1 - l2;
+                const double route_share = stats.exact_routes == 0 ? 0.0 :
+                    100.0 * static_cast<double>(stats.compositions[index]) /
+                        static_cast<double>(stats.exact_routes);
+                std::fprintf(
+                        stderr,
+                        "siliang_moe_runtime: route_stats residency_composition L1=%zu L2=%zu uncached=%zu"
+                        " routes=%" PRIu64 " share=%.2f%%\n",
+                        l1, l2, uncached, stats.compositions[index], route_share);
+            }
+        }
+        for (size_t k_hit = 0; k_hit <= top_k; ++k_hit) {
+            for (size_t k_admit = 0; k_admit + k_hit <= top_k; ++k_admit) {
+                for (size_t r = 0; r + k_admit + k_hit <= top_k; ++r) {
+                    const size_t index = (k_hit * side + k_admit) * side + r;
+                    if (index >= stats.execution_compositions.size() || stats.execution_compositions[index] == 0) {
+                        continue;
+                    }
+                    const size_t cpu = top_k - k_hit - k_admit - r;
+                    const double route_share = stats.routes == 0 ? 0.0 :
+                        100.0 * static_cast<double>(stats.execution_compositions[index]) /
+                            static_cast<double>(stats.routes);
+                    std::fprintf(
+                            stderr,
+                            "siliang_moe_runtime: route_stats execution_composition K_hit=%zu K_admit=%zu"
+                            " R=%zu CPU=%zu routes=%" PRIu64 " share=%.2f%%\n",
+                            k_hit, k_admit, r, cpu, stats.execution_compositions[index], route_share);
+                }
+            }
+        }
+        std::fflush(stderr);
+    }
+
     void print_summary() {
         if (!model || (!bound && metrics.map_calls == 0 && failure.load(std::memory_order_acquire) == 0)) {
             return;
@@ -1885,6 +2088,7 @@ struct siliang_moe_runtime {
                 metrics.prefill_k_misses, metrics.prefill_k_admissions, metrics.prefill_k_evictions,
                 metrics.prefill_p_waves, metrics.prefill_h2d_ops, metrics.prefill_h2d_bytes,
                 metrics.prefill_compute_waits, failure.load(std::memory_order_acquire));
+        print_route_stats();
         if (metrics.prefill_bitmap_sweeps != 0 || metrics.prefill_bitmap_incomplete != 0) {
             const double coverage = metrics.prefill_bitmap_needed == 0 ? 0.0 :
                 100.0 * static_cast<double>(metrics.prefill_bitmap_overlap) /

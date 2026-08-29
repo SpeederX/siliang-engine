@@ -23,6 +23,7 @@ path without hidden session state.
 | `--expert-cache-roll MODE` | Static rolling mode: `off` or `deepseek4`. `deepseek4` controls only the architecture-specific FRONT slab; it is independent of the generic routed-expert K/R/P arena. |
 | `--expert-cache-prefill` / `--no-expert-cache-prefill` | Enable or disable experimental routed-MoE batch-union prompt processing in K. The current bitmap supports up to 256 experts per layer and the worst-case union must fit every layer-local K slice. Disabled by default. |
 | `--expert-cache-memory-report` / `--no-expert-cache-memory-report` | Enable or suppress periodic host-memory reporting. |
+| `--expert-cache-route-stats` / `--no-expert-cache-route-stats` | Emit aggregate decode-route residency/execution statistics at shutdown, including L1/L2/uncached and K/R/CPU execution composition histograms. Requires L1 K/R/P. The explicit telemetry is written to stderr even at normal CLI verbosity. Disabled by default. |
 | `--expert-cache-deferred-wait` / `--no-expert-cache-deferred-wait` | Enable or disable deferred L2 I/O waits. |
 
 L1 does not exist as a standalone K allocation. If K is nonzero, both R and P

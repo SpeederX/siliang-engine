@@ -894,9 +894,10 @@ static bool common_params_parse_ex(int argc, char ** argv, common_params_context
     }
     if (expert_cache.l1_k == 0 &&
         (expert_cache.exchange_r != 0 || expert_cache.elevator_p != 0 ||
-         expert_cache.roll != COMMON_EXPERT_CACHE_ROLL_OFF || expert_cache.prefill)) {
+         expert_cache.roll != COMMON_EXPERT_CACHE_ROLL_OFF || expert_cache.prefill ||
+         expert_cache.route_stats)) {
         throw std::invalid_argument(
-            "error: expert-cache R, P, roll, and prefill require --expert-cache-l1-k > 0\n");
+            "error: expert-cache R, P, roll, prefill, and route stats require --expert-cache-l1-k > 0\n");
     }
     if (static_cast<uint64_t>(expert_cache.l1_k) + expert_cache.exchange_r >
         std::numeric_limits<uint32_t>::max()) {
@@ -2801,6 +2802,16 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         "enable periodic expert-cache memory reporting (default: enabled)",
         [](common_params & params, bool value) {
             params.expert_cache.memory_report = value;
+            params.expert_cache.tier_configured = true;
+        }
+    ).set_examples({LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--expert-cache-route-stats"},
+        {"--no-expert-cache-route-stats"},
+        "emit aggregate decode-route residency/execution statistics at shutdown; no per-layer/token logging "
+        "(experimental, default: disabled)",
+        [](common_params & params, bool value) {
+            params.expert_cache.route_stats = value;
             params.expert_cache.tier_configured = true;
         }
     ).set_examples({LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER}));

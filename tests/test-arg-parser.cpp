@@ -252,8 +252,12 @@ static void test(void) {
         assert(expert_defaults.expert_cache.l1_policy == COMMON_EXPERT_CACHE_POLICY_LRU);
         assert(expert_defaults.expert_cache.roll == COMMON_EXPERT_CACHE_ROLL_OFF);
         assert(expert_defaults.expert_cache.memory_report == true);
+        assert(expert_defaults.expert_cache.route_stats == false);
         assert(expert_defaults.expert_cache.deferred_wait == true);
         assert(expert_defaults.expert_cache.tier_configured == false);
+        const auto llama_defaults = llama_context_default_params();
+        assert(llama_defaults.expert_cache.route_stats == false);
+        assert(llama_defaults.expert_cache.deferred_wait == true);
 
         auto find_option = [](common_params_context & ctx, const std::string & arg) -> const common_arg * {
             for (const common_arg & opt : ctx.options) {
@@ -280,6 +284,8 @@ static void test(void) {
             "--no-expert-cache-prefill",
             "--expert-cache-memory-report",
             "--no-expert-cache-memory-report",
+            "--expert-cache-route-stats",
+            "--no-expert-cache-route-stats",
             "--expert-cache-deferred-wait",
             "--no-expert-cache-deferred-wait",
         };
@@ -333,6 +339,7 @@ static void test(void) {
             "--expert-cache-prefill",
             "--ubatch-size", "8",
             "--no-expert-cache-memory-report",
+            "--expert-cache-route-stats",
             "--no-expert-cache-deferred-wait",
             "--parallel", "1",
         }, expert_params));
@@ -347,9 +354,11 @@ static void test(void) {
         assert(expert_params.expert_cache.prefill == true);
         assert(expert_params.n_ubatch == 8);
         assert(expert_params.expert_cache.memory_report == false);
+        assert(expert_params.expert_cache.route_stats == true);
         assert(expert_params.expert_cache.deferred_wait == false);
         const auto context_params = common_context_params_to_llama(expert_params);
         assert(context_params.expert_cache.l1_policy == LLAMA_SILIANG_EXPERT_CACHE_POLICY_CUMULATIVE_LFU_ADMISSION);
+        assert(context_params.expert_cache.route_stats == true);
     }
     {
         common_params expert_params;

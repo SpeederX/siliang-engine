@@ -93,6 +93,7 @@ extern "C" {
         bool enabled;
         bool prefill;
         bool memory_report;
+        bool route_stats;
         bool deferred_wait;
     };
 

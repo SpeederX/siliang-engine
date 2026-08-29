@@ -68,6 +68,7 @@ class ArenaOptInContractTests(unittest.TestCase):
             "--expert-cache-prefill",
             "--no-expert-cache-prefill",
             "--expert-cache-memory-report",
+            "--expert-cache-route-stats",
             "--expert-cache-deferred-wait",
         ):
             self.assertIn(option, ARG_SOURCE)

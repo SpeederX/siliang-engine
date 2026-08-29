@@ -175,6 +175,7 @@
 | `--expert-cache-roll {off,deepseek4}` | architecture-specific static rolling mode; deepseek4 controls only the DeepSeek-V4 FRONT slab, not the generic routed-expert K/R/P arena (default: off) |
 | `--expert-cache-prefill, --no-expert-cache-prefill` | enable bounded routed-MoE batch-union prefill in the CUDA K arena; supports up to 256 experts per layer and the ubatch route union must fit every layer-local K slice (experimental, default: disabled) |
 | `--expert-cache-memory-report, --no-expert-cache-memory-report` | enable periodic expert-cache memory reporting (default: enabled) |
+| `--expert-cache-route-stats, --no-expert-cache-route-stats` | emit aggregate decode-route L1/L2/uncached residency plus K/R/CPU execution composition statistics at shutdown; requires L1 K/R/P and writes explicit telemetry to stderr (experimental, default: disabled) |
 | `--expert-cache-deferred-wait, --no-expert-cache-deferred-wait` | allow deferred L2 I/O waits (default: enabled) |
 | `-o, --output, --output-file FNAME` | output file (default: '') |
 | `--chat-template-kwargs STRING` | sets additional params for the json template parser, must be a valid json object string, e.g. '{"key1":"value1","key2":"value2"}'<br/>(env: LLAMA_ARG_CHAT_TEMPLATE_KWARGS) |
