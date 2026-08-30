@@ -1616,7 +1616,7 @@ struct siliang_moe_runtime {
                     " K_hit=%" PRIu64 " K_admit=%" PRIu64 " R=%" PRIu64 " CPU=%" PRIu64
                     " L1_evict=%" PRIu64 " L2_evict=%" PRIu64 " L2_reject=%" PRIu64
                     " demotions=%" PRIu64 " D_reuse_L2=%" PRIu64 " D_reuse_cold=%" PRIu64
-                    " D_pending=%" PRIu64 " unknown=%" PRIu64 "\n",
+                    " D_pending=%" PRIu64 " D_exposed_ms=%.3f unknown=%" PRIu64 "\n",
                     generated_tokens, stats.routes, stats.selections,
                     stats.state_l1, 100.0 * static_cast<double>(stats.state_l1) / denom,
                     stats.state_l2, 100.0 * static_cast<double>(stats.state_l2) / denom,
@@ -1624,6 +1624,7 @@ struct siliang_moe_runtime {
                     stats.exec_gpu_k_hit, stats.exec_gpu_k_admit, stats.exec_gpu_r, stats.exec_cpu,
                     metrics.k_evictions, l2_evictions, l2_rejections, metrics.l2_demotions,
                     metrics.demotion_reuse_l2, metrics.demotion_reuse_cold, metrics.demotion_reuse_pending,
+                    static_cast<double>(metrics.transition_exposed_wait_ns) / 1e6,
                     stats.state_unknown + stats.exec_unknown);
             std::fflush(stderr);
             ++route_stats_checkpoint_index;
