@@ -707,9 +707,11 @@ struct siliang_moe_runtime {
         }
         resident.assign(key_count, -1);
         frequencies.assign(key_count, 0);
-        layer_decode_round.assign(static_cast<size_t>(model_info.layer_count), 0);
-        demotion_start_round.assign(key_count, 0);
-        demotion_reuse_pending.assign(key_count, 0);
+        if (params.route_stats && params.demote_k_hot) {
+            layer_decode_round.assign(static_cast<size_t>(model_info.layer_count), 0);
+            demotion_start_round.assign(key_count, 0);
+            demotion_reuse_pending.assign(key_count, 0);
+        }
         prefill_bitmaps.resize(static_cast<size_t>(model_info.layer_count));
         prefill_bitmap_valid.assign(static_cast<size_t>(model_info.layer_count), 0);
         prefill_bitmap_layers.resize(static_cast<size_t>(model_info.layer_count));
@@ -2235,11 +2237,13 @@ struct siliang_moe_runtime {
         if (prefill) {
             return map_prefill(layer, logical, physical, count);
         }
-        if (static_cast<size_t>(layer) >= layer_decode_round.size() ||
-            layer_decode_round[static_cast<size_t>(layer)] == std::numeric_limits<uint64_t>::max()) {
-            return fail(SILIANG_RUNTIME_FAILURE_ROUTE, "decode layer-round counter overflow");
+        if (params.route_stats && params.demote_k_hot) {
+            if (static_cast<size_t>(layer) >= layer_decode_round.size() ||
+                layer_decode_round[static_cast<size_t>(layer)] == std::numeric_limits<uint64_t>::max()) {
+                return fail(SILIANG_RUNTIME_FAILURE_ROUTE, "decode layer-round counter overflow");
+            }
+            ++layer_decode_round[static_cast<size_t>(layer)];
         }
-        ++layer_decode_round[static_cast<size_t>(layer)];
         std::vector<int64_t> route_keys(count);
         std::vector<int32_t> needed;
         needed.reserve(count);

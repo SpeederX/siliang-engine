@@ -231,11 +231,6 @@ if (LLAMA_BUILD_APP)
     add_subdirectory(app)
 endif()
 
-option(SILIANG_DS4_HYBRID_RESEARCH "Build local-only DS4 hybrid dispatch research assays" OFF)
-if (SILIANG_DS4_HYBRID_RESEARCH)
-    add_subdirectory(research/ds4-hybrid)
-endif()
-
 # Standalone libmtmd build without pulling in the rest of the tools/ tree.
 # Useful when packaging just the mtmd library for language bindings (e.g. an
 # Apple XCFramework, or a WASM build). When the full tools build is enabled,
