@@ -47,6 +47,15 @@ class ArenaOptInContractTests(unittest.TestCase):
         self.assertIn("siliangem_tls_state->capacity_mib == 0", body)
         self.assertNotIn("getenv(", body)
 
+    def test_ds4_front_single_bank_overwrite_has_full_cuda_fence(self) -> None:
+        front = (REPOSITORY_ROOT / "src/siliang-ds4-front-slab.cpp").read_text(encoding="utf-8")
+        issue = function_body(front, "bool issue_layer(int32_t target_layer)")
+        fence = "ggml_backend_synchronize(cuda_backend);"
+        copy = "cuda.h2d(copy_stream, carrier, host_store + plan.store_offset, 0, plan.span)"
+        self.assertIn(fence, issue)
+        self.assertIn(copy, issue)
+        self.assertLess(issue.index(fence), issue.index(copy))
+
     def test_public_cpu_api_uses_typed_configuration(self) -> None:
         self.assertIn("struct ggml_siliangem_cache_config", CPU_HEADER)
         self.assertIn("uint32_t capacity_mib;", CPU_HEADER)

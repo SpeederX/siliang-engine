@@ -471,6 +471,12 @@ struct siliang_ds4_front_slab::impl {
         }
         const layer_plan & plan = plans[target_layer];
         const auto start = std::chrono::steady_clock::now();
+
+        // A single FRONT bank must not be overwritten until every CUDA consumer
+        // from the preceding scheduler split has completed. A stream-0 event is
+        // insufficient because graph execution may use additional backend streams.
+        ggml_backend_synchronize(cuda_backend);
+
         if (host_store == nullptr ||
             !cuda_ok(cuda.main_event_record(cuda_backend, use_done)) ||
             !cuda_ok(cuda.stream_wait(copy_stream, use_done)) ||

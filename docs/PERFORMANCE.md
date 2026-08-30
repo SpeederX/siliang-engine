@@ -41,6 +41,41 @@ same physical NVMe device for both GGUF files. The older rows were measured on
 this workstation, but their retained summaries do not contain an equally
 complete build packet.
 
+## v0.1.3 release-candidate qualification (2026-08-31)
+
+This section records the final multi-model Windows CUDA release-candidate gate.
+It is separate from the historical benchmark sections below. The server cells
+used fresh processes, greedy 256-token decode (`temperature=0`, `top-k=1`, seed
+42), and three repetitions per path.
+
+| Model / path | Median decode | Range | Output consistency |
+| --- | ---: | ---: | --- |
+| Gemma4 26B-A4B, K1440/R16/P16 | **21.651 tok/s** | 21.253-21.672 | one token hash across 3/3 |
+| Qwen3 30B-A3B, K1440/R16/P16 | **19.261 tok/s** | 17.360-20.164 | one token hash across 3/3 |
+| Qwen3.6 35B-A3B, K1440/R16/P16 | **9.279 tok/s** | 7.549-9.534 | one token hash across 3/3 |
+| Qwen3.6 35B-A3B, no expert cache | **11.011 tok/s** | 10.210-11.392 | one token hash across 3/3 |
+| Ornith 1.0 35B, K1920/R16/P16 | **13.967 tok/s** | 13.948-14.004 | one token hash across 3/3 |
+| GPT-OSS 120B, 18 GiB managed L2 | **3.344 tok/s** | 3.335-3.356 | one token hash across 3/3; host-memory pressure in every rep |
+
+The Qwen3.6 matched control is the important decision result: the no-cache path
+was about 18.7% faster at the median than K1440, so v0.1.3 does not recommend
+K1440 for that model even though the path is correct.
+
+### DeepSeek4 FRONT determinism closure
+
+The initial v0.1.3 FRONT rolling candidate produced different greedy outputs
+across fresh starts. Isolation showed that the model/backend, managed L2, and
+K216/L2/R/P were deterministic when FRONT rolling was disabled. The single
+rolling FRONT bank therefore received a completion fence before overwrite.
+With the fence, three fresh 64-token runs produced one identical token hash at
+**1.936-1.983 tok/s**.
+
+**2,048-token release gate:** one complete current-profile run generated all 2,048 tokens at **1.94436 tok/s** (514.31 ms/token), after reaching route-stat checkpoints at 32, 64, 128, 256, 512, 1,024, 1,512, and 2,048 tokens with no runtime failure. Host-memory headroom was low during the run, so the number is retained as depth/stability evidence rather than an isolated performance ceiling.
+
+The historical DS4 and GPT-OSS results below remain valid evidence for their
+original runtime revisions and protocols. They are not silently replaced by
+this release-candidate matrix.
+
 ## DeepSeek4 prompt-processing observation (2026-08-27)
 
 One interactive request on the same workstation completed 1,854 prompt tokens

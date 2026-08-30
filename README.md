@@ -69,15 +69,33 @@ while the arena comparisons use an explicit mmap control. Raw measurements,
 settings, calculations, and evidence limitations are in
 [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md).
 
-These rows describe the earlier host-arena implementation and remain historical
-evidence. They do not qualify the new v0.1.3 K/R/P or DeepSeek4 FRONT paths.
-The transferred DS4 2,000-token observations and their single-start limitation
-are recorded in [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md#deepseek4-requalification-prototype).
-  One current two-token v0.1.3 smoke verified the typed DS4 L2/K/R/P/FRONT wiring
-  and OpenAI-compatible server route; it is not throughput evidence. Before the
-  opt-in prefill path existed, separate interactive prompts measured 1.87 tok/s
-  with two batch threads and 4.57 tok/s with twelve. They are observational
-  controls with different prompts, not a matched A/B result.
+These rows describe earlier runtime revisions and remain **historical evidence**.
+They are not v0.1.3 throughput claims. The current release-candidate qualification
+for Gemma4, Qwen3, Qwen3.6, Ornith, GPT-OSS, and DeepSeek4 is recorded in
+[`docs/releases/v0.1.3.md`](docs/releases/v0.1.3.md) and
+[`docs/PERFORMANCE.md`](docs/PERFORMANCE.md#v013-release-candidate-qualification-2026-08-31).
+The historical DS4 2,000-token capacity observations remain documented separately
+in [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md#historical-ds4-capacity-observations).
+
+### v0.1.3 qualification snapshot
+
+Fresh `llama-server` release-candidate qualification on the reference Windows
+CUDA workstation produced the following 3-start 256-token decode medians. These
+are release evidence, not universal presets:
+
+| Model / v0.1.3 path | Median decode | Range |
+| --- | ---: | ---: |
+| Gemma4 26B-A4B, K1440/R16/P16 | **21.651 tok/s** | 21.253-21.672 |
+| Qwen3 30B-A3B, K1440/R16/P16 | **19.261 tok/s** | 17.360-20.164 |
+| Qwen3.6 35B-A3B, no expert cache | **11.011 tok/s** | 10.210-11.392 |
+| Ornith 1.0 35B, K1920/R16/P16 | **13.967 tok/s** | 13.948-14.004 |
+| GPT-OSS 120B, 18 GiB managed L2 | **3.344 tok/s** | 3.335-3.356 (host-memory pressure) |
+| DeepSeek V4 Flash, 8 GiB L2 + K216/R12/P12 + FRONT | **1.944 tok/s** | one complete 2,048-token decode; low host-memory headroom |
+
+Qwen3.6 K1440 was also correct but slower (9.279 tok/s median), so the release
+recommendation remains the matched no-cache path. DeepSeek4 also passed a separate 3-start 64-token determinism gate after the FRONT completion fence was added; all three runs produced the same token hash. The 2,048-token row above is a depth/stability result, not a replacement for the historical 18 GiB benchmark.
+
+### Historical performance evidence
 
 | Model | Baseline path | Siliang path | Speedup | Evidence |
 | --- | --- | --- | ---: | --- |

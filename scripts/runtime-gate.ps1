@@ -10,13 +10,13 @@ param(
 
     [string]$PythonExecutable = 'python',
     [string]$ResultsRoot,
-    [ValidateRange(1, 1048576)][int]$DeepSeekExpertCacheL2MiB = 12288,
+    [ValidateRange(1, 1048576)][int]$DeepSeekExpertCacheL2MiB = 8192,
     [ValidateRange(1, 1048576)][int]$GptOssExpertCacheL2MiB = 18432,
     [ValidateRange(1024, 65535)][int]$DeepSeekPort = 8140,
     [ValidateRange(1024, 65535)][int]$GptOssPort = 8141,
     [string[]]$DeepSeekServerArguments = @(
         '-ngl', '99', '-ncmoe', '43', '-nkvo', '--no-op-offload',
-        '-c', '8192', '-b', '512', '-ub', '512', '-t', '2', '-tb', '2'
+        '-c', '4096', '-b', '512', '-ub', '512', '-t', '2', '-tb', '2'
     ),
     [string[]]$GptOssServerArguments = @(
         '-ngl', '99', '-ncmoe', '36', '-nkvo', '--no-op-offload',
@@ -197,11 +197,13 @@ function Get-CellExpertCacheArguments {
     )
     if ($Profile -eq 'DeepSeek4') {
         return $arguments + @(
-            '--expert-cache-l2-policy', 'lfu',
+            '--expert-cache-l2-policy', 'lru',
             '--expert-cache-l1-k', '216',
             '--expert-cache-exchange-r', '12',
             '--expert-cache-elevator-p', '12',
-            '--expert-cache-l1-policy', 'cumulative-lfu',
+            '--expert-cache-l1-policy', 'slfu',
+            '--admit-k-cold', 'on',
+            '--demote-k-hot', 'on',
             '--expert-cache-roll', 'deepseek4'
         )
     }
@@ -660,7 +662,7 @@ function Assert-ArenaEvidence {
                 [int]$armedMatch.Groups['k'].Value -ne 216 -or
                 [int]$armedMatch.Groups['r'].Value -ne 12 -or
                 [int]$armedMatch.Groups['p'].Value -ne 12 -or
-                [string]$armedMatch.Groups['policy'].Value -cne 'cumulative-lfu' -or
+                [string]$armedMatch.Groups['policy'].Value -cne 'slfu' -or
                 [string]$armedMatch.Groups['source'].Value -cne 'host-l2' -or
                 [int64]$routeMatch.Groups['h2d'].Value -le 0 -or
                 [int64]$frontArmMatch.Groups['bank'].Value -le 0 -or
@@ -1291,11 +1293,13 @@ $configuration = [ordered]@{
     expertCache = [ordered]@{
         deepSeek4 = [ordered]@{
             l2MiB = $DeepSeekExpertCacheL2MiB
-            l2Policy = 'lfu'
+            l2Policy = 'lru'
             l1K = 216
             exchangeR = 12
             elevatorP = 12
-            l1Policy = 'cumulative-lfu'
+            l1Policy = 'slfu'
+            admitKCold = $true
+            demoteKHot = $true
             roll = 'deepseek4'
         }
         gptOss = [ordered]@{

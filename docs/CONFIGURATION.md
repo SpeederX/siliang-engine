@@ -62,72 +62,62 @@ routed layer after schema-bank partitioning. Unsupported capacities fail closed.
 This does not make prefill a performance-qualified preset for every supported
 model; it only removes the DeepSeek-only implementation constraint.
 
-## DeepSeek4 requalification prototype
+## DeepSeek4 v0.1.3 profile
 
-This is the configuration transferred from the bounded P12 research path:
+The release profile uses the smaller 8 GiB managed L2 together with K216/R12/P12
+and SLFU turnover:
 
 ```powershell
-& "<build-directory>\bin\Release\llama-server.exe" `
+& "<build-directory>in\Release\llama-server.exe" `
     -m "<deepseek4-expert-major.gguf>" `
     -ngl 99 -ncmoe 43 -nkvo --no-op-offload `
-    -c 8192 -b 512 -ub 512 -t 2 -tb 2 `
+    -c 4096 -b 512 -ub 512 -t 2 -tb 2 `
     --parallel 1 `
     --expert-cache `
-    --expert-cache-l2-mib 12288 `
-    --expert-cache-l2-policy lfu `
+    --expert-cache-l2-mib 8192 `
+    --expert-cache-l2-policy lru `
     --expert-cache-l1-k 216 `
     --expert-cache-exchange-r 12 `
     --expert-cache-elevator-p 12 `
-    --expert-cache-l1-policy cumulative-lfu `
+    --expert-cache-l1-policy slfu `
+    --admit-k-cold on `
+    --demote-k-hot on `
     --expert-cache-roll deepseek4 `
-    --reasoning off --reasoning-format deepseek `
+    --no-expert-cache-prefill `
     --host 127.0.0.1 --port 8080
 ```
 
-The 12, 14, and 16 GiB L2 choices are `12288`, `14336`, and `16384` MiB.
-Under the source research runtime, one complete natural 2,000-token start per
-capacity measured 2.12587, 2.20073, and 2.28674 tok/s respectively. Those are
-reliable completed observations, but not a newly qualified v0.1.3 ranking:
-each arm has one start and the generated work differed. The port has passed the
-minimal wiring smoke below, but still needs longer deterministic validation and
-fresh interleaved timing before those capacities are compared.
+`--expert-cache-route-stats` may be added for aggregate qualification telemetry;
+it is not required for normal use.
 
-### Current v0.1.3 port smoke
+### FRONT determinism gate
 
-On 2026-08-26, a local Windows CUDA control/candidate smoke used greedy
-two-token generation, `-c 2048`, L2=2048 MiB, K216/R12/P12, L2 LFU, the L1
-cumulative-LFU admission/bypass policy then spelled `lfu`, and `deepseek4`
-rolling. The candidate produced the same rendered two-token
-continuation as `--no-expert-cache`. Its telemetry resolved the typed
-configuration, armed all 43 routed layers and the FRONT slab, served route
-uploads and a compute wait, recorded FRONT copy/wait activity, and reported
-zero path failures.
+Release qualification found that the earlier asynchronous single-bank FRONT
+overwrite could change greedy output across fresh starts. The underlying DS4
+model was deterministic with `--no-expert-cache`, and both L2-only and
+K216/L2/R/P were deterministic when FRONT was disabled. The release candidate
+therefore fences each FRONT overwrite behind completion of preceding CUDA
+consumers. With that fence, three fresh 64-token starts produced an identical
+token hash at 1.936-1.983 tok/s.
 
-The runtime log reached the configured token limit. A controller disconnect
-prevented retention of the CLI wrapper exit code. This is wiring and
-correctness-path smoke evidence only: the two-token timings are not a
-benchmark, 2048 MiB is not a recommended capacity, and this run does not
-requalify the 12, 14, or 16 GiB research observations.
+A 2,048-token release gate is recorded in the v0.1.3 release notes once complete.
 
-For a CLI smoke, use the same cache and placement options with `llama-cli`:
+### Historical DS4 capacity observations
 
-```powershell
-& "<build-directory>\bin\Release\llama-cli.exe" `
-    -m "<deepseek4-expert-major.gguf>" `
-    -ngl 99 -ncmoe 43 -nkvo --no-op-offload `
-    -c 8192 -b 512 -ub 512 -t 2 -tb 2 `
-    --expert-cache `
-    --expert-cache-l2-mib 12288 `
-    --expert-cache-l2-policy lfu `
-    --expert-cache-l1-k 216 `
-    --expert-cache-exchange-r 12 `
-    --expert-cache-elevator-p 12 `
-    --expert-cache-l1-policy cumulative-lfu `
-    --expert-cache-roll deepseek4 `
-    -p "<prompt>" -n 128
-```
+Earlier source-research runs used a different runtime revision and larger L2
+capacities. One complete natural 2,000-token start per capacity measured:
 
-Use `--no-expert-cache` for the explicit control. Do not add tier options to a
+| L2 | Decode throughput |
+| ---: | ---: |
+| 12 GiB | 2.12587 tok/s |
+| 14 GiB | 2.20073 tok/s |
+| 16 GiB | 2.28674 tok/s |
+
+These remain historical research evidence; they are not v0.1.3 performance
+claims and should not be compared directly with the current 8 GiB profile.
+
+For a CLI smoke, use the same cache and placement options with `llama-cli`. Use
+`--no-expert-cache` for the explicit control; do not add tier options to a
 disabled command.
 
 ## Experimental routed-MoE microbatch prefill
@@ -202,7 +192,9 @@ Use this bounded diagnostic command on the current 8 GB test machine:
     --expert-cache-l1-k 216 `
     --expert-cache-exchange-r 12 `
     --expert-cache-elevator-p 12 `
-    --expert-cache-l1-policy cumulative-lfu `
+    --expert-cache-l1-policy slfu `
+    --admit-k-cold on `
+    --demote-k-hot on `
     --expert-cache-roll deepseek4 `
     --expert-cache-prefill `
     --no-warmup `
@@ -267,108 +259,96 @@ multi-slot parallelism before model loading when L1 is requested. Separate
 contexts or processes each allocate their own L2/K/R/P hierarchy; budget them
 independently.
 
-## Cross-model trial configurations
+## Cross-model v0.1.3 qualification configurations
 
-These commands transfer measured research settings into the new interface.
-They are starting points for correctness and allocation checks, not universal
-presets. Run a `--no-expert-cache` control first, preserve the exact model hash
-and generated tokens, and do not publish a speed claim without at least three
-fresh interleaved starts per arm.
+These are the configurations used by the final Windows CUDA release-candidate
+qualification. The throughput values are medians of three fresh server starts
+with greedy 256-token decode. They are machine-specific evidence, not universal
+presets.
 
-Gemma4 26B-A4B QAT used resident host tensors, top-k 8, 30 routed layers, and a
-homogeneous schema. Do not add a redundant host L2:
+| Model / path | Median decode | Range |
+| --- | ---: | ---: |
+| Gemma4 26B-A4B K1440 | 21.651 tok/s | 21.253-21.672 |
+| Qwen3 30B-A3B K1440 | 19.261 tok/s | 17.360-20.164 |
+| Qwen3.6 35B-A3B K1440 | 9.279 tok/s | 7.549-9.534 |
+| Qwen3.6 35B-A3B no-cache | 11.011 tok/s | 10.210-11.392 |
+| Ornith 1.0 35B K1920 | 13.967 tok/s | 13.948-14.004 |
+| GPT-OSS 120B managed L2 | 3.344 tok/s | 3.335-3.356 |
+
+Gemma4 26B-A4B QAT:
 
 ```powershell
 & "<llama-server.exe>" -m "<gemma4-26b-a4b.gguf>" `
-    -ngl 99 -ncmoe 30 -c 2048 -b 512 -ub 512 -t 4 -tb 4 `
+    -ngl 99 -ncmoe 30 -c 32768 -b 512 -ub 512 -t 4 -tb 4 `
     --parallel 1 --expert-cache `
     --expert-cache-l1-k 1440 `
     --expert-cache-exchange-r 16 `
     --expert-cache-elevator-p 16 `
     --expert-cache-l1-policy wtinylfu-w10-slru-p80 `
     --expert-cache-roll off `
-    --no-expert-cache-prefill
+    --expert-cache-prefill
 ```
 
-Qwen3-30B-A3B used resident host tensors, top-k 8, 48 routed layers, and
-heterogeneous schema banks. K1440 is the conservative transfer point; the
-research-only bank-local K1968 result must not be assumed to fit or perform the
-same way in v0.1.3:
+Qwen3-30B-A3B:
 
 ```powershell
 & "<llama-server.exe>" -m "<qwen3-30b-a3b.gguf>" `
-    -ngl 99 -ncmoe 48 -c 4096 -b 512 -ub 512 -t 12 -tb 12 `
+    -ngl 99 -ncmoe 48 -c 32768 -b 512 -ub 3 -t 12 -tb 12 `
     --parallel 1 --expert-cache `
     --expert-cache-l1-k 1440 `
     --expert-cache-exchange-r 16 `
     --expert-cache-elevator-p 16 `
     --expert-cache-l1-policy wtinylfu-w10-slru-p80 `
     --expert-cache-roll off `
-    --no-expert-cache-prefill
+    --expert-cache-prefill
 ```
 
-Ornith-1.0-35B uses the same `qwen35moe` architecture family as Qwen3.6 but had
-a distinct positive resident-source result. Its retained decode bring-up point
-was K1920 (48 slots per routed layer); it is a requalification starting point,
-not a universal preset:
+Ornith-1.0-35B:
 
 ```powershell
 & "<llama-server.exe>" -m "<ornith-1.0-35b.gguf>" `
-    -ngl 99 -ncmoe 40 -c 4096 -b 512 -ub 512 -t 12 -tb 12 `
+    -ngl 99 -ncmoe 40 -c 32768 -b 512 -ub 6 -t 12 -tb 12 `
     --parallel 1 --expert-cache `
     --expert-cache-l1-k 1920 `
     --expert-cache-exchange-r 16 `
     --expert-cache-elevator-p 16 `
     --expert-cache-l1-policy wtinylfu-w10-slru-p80 `
     --expert-cache-roll off `
-    --no-expert-cache-prefill
+    --expert-cache-prefill
 ```
 
-Qwen3.6-35B-A3B is a no-go for the transferred K1440 topology. The retained
-three-start observation was slower than its stock control, and the model has
-heterogeneous expert schemas. Keep it as a control in v0.1.3:
+Qwen3.6-35B-A3B remains supported, but K1440 is not the recommended v0.1.3
+performance path. The matched current control was about 18.7% faster at the
+median, so use the explicit no-cache configuration unless re-tuning on another
+machine:
 
 ```powershell
 & "<llama-server.exe>" -m "<qwen3.6-35b-a3b.gguf>" `
-    -ngl 99 -ncmoe 40 -c 4096 -b 512 -ub 512 -t 12 -tb 12 `
+    -ngl 99 -ncmoe 40 -c 32768 -b 512 -ub 4 -t 12 -tb 12 `
     --parallel 1 --no-expert-cache
 ```
 
 GPT-OSS 120B uses the bounded managed host source rather than a redundant copy
-of resident tensors. The v0.1.3 runtime gate keeps it as an L2-only diagnostic;
-the prior K216 transport study does not qualify the generic L1 path. Prompt
-union and rolling are disabled because both mechanisms are DeepSeek4-specific:
+of resident tensors:
 
 ```powershell
 & "<llama-server.exe>" -m "<gpt-oss-120b-expert-major.gguf>" `
     -ngl 99 -ncmoe 36 -nkvo --no-op-offload `
-    -c 4096 -b 512 -ub 512 -t 12 -tb 12 `
-    --expert-cache `
+    -c 8192 -b 512 -ub 512 -t 12 -tb 12 `
+    --parallel 1 --expert-cache `
     --expert-cache-l2-mib 18432 `
     --expert-cache-l2-policy lru `
     --expert-cache-roll off `
     --no-expert-cache-prefill
 ```
 
-Keep `--no-expert-cache-prefill` in the retained GPT-OSS gate command. The prior
-GPT-OSS result selected pinned staged overlap in the research binary; it does
-not qualify v0.1.3 until
-the same artifact passes output equivalence, source-armed telemetry, allocation
-checks, and fresh-start timing. Generic prefill is now capability-gated, but a
-GPT-OSS prefill trial still needs to satisfy the current expert-count and
-layer-local K bounds before it can arm.
+All three GPT-OSS qualification runs completed with stable throughput but low
+host-memory headroom. Keep the historical GPT-OSS benchmark in PERFORMANCE.md
+as historical evidence rather than replacing it with the pressure-qualified
+3.344 tok/s release receipt.
 
-The generic schema-based L1 runtime does not architecture-block GPT-OSS. A
-manual K/R/P bring-up may therefore use serial mode, keep the DS4 FRONT feature
-off, and leave generic prefill disabled until separately qualified:
-`--parallel 1`, `--expert-cache-roll off`, and `--no-expert-cache-prefill`.
-That is an experimental two-tier trial, not the
-frozen L2-only gate profile or a qualified performance preset.
-
-M4 remains inconclusive and is a no-go for v0.1.3: there is no useful integrated
-implementation of that architecture to transfer. DirectStorage rolling,
-whole-L2 CUDA registration, route replay/oracles as product inputs, and pre-bake
-also remain outside this release.
+M4 remains inconclusive/no-go for v0.1.3 because there is no useful integrated
+architecture path to claim.
 
 ## Memory sizing
 

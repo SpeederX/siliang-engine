@@ -470,7 +470,7 @@ struct common_params_expert_cache {
 
     bool memory_report = true;
     bool route_stats = false;
-    // SLFU research controls. admit_k_cold=true permits a first-use cold
+    // SLFU controls. admit_k_cold=true permits a first-use cold
     // candidate to compete for K. demote_k_hot performs an exclusive post-compute
     // K victim -> L2 / candidate -> K turnover; no persistent tier duplication.
     bool admit_k_cold = true;

@@ -31,7 +31,7 @@ POWERSHELL_FUNCTIONS = (
 class RuntimeGateContractTests(unittest.TestCase):
     def test_declared_l1_policy_matches_deepseek_profile(self) -> None:
         source = RUNTIME_GATE.read_text(encoding="utf-8")
-        self.assertIn("l1Policy = 'cumulative-lfu'", source)
+        self.assertIn("l1Policy = 'slfu'", source)
         self.assertNotIn("l1Policy = 'lfu'", source)
 
     def run_powershell(self, body: str, *, environment: dict[str, str] | None = None) -> None:
@@ -188,7 +188,7 @@ if (-not $deceptiveRejected) {
     def test_typed_expert_cache_argument_and_log_contracts(self) -> None:
         self.run_powershell(
             r"""
-$script:DeepSeekExpertCacheL2MiB = 12288
+$script:DeepSeekExpertCacheL2MiB = 8192
 $script:GptOssExpertCacheL2MiB = 18432
 $script:AllowMemoryPressure = $false
 
@@ -205,10 +205,10 @@ if ($disabled.armed -or -not $disabled.explicitlyDisabled) {
 $deepSeekArguments = @(Get-CellExpertCacheArguments -ArenaState Arena -Profile DeepSeek4)
 $deepSeekText = $deepSeekArguments -join ' '
 foreach ($expected in @(
-    '--expert-cache', '--expert-cache-l2-mib 12288', '--expert-cache-l2-policy lfu',
+    '--expert-cache', '--expert-cache-l2-mib 8192', '--expert-cache-l2-policy lru',
     '--expert-cache-l1-k 216', '--expert-cache-exchange-r 12',
-    '--expert-cache-elevator-p 12', '--expert-cache-l1-policy cumulative-lfu',
-    '--expert-cache-roll deepseek4', '--expert-cache-memory-report',
+    '--expert-cache-elevator-p 12', '--expert-cache-l1-policy slfu',
+    '--admit-k-cold on', '--demote-k-hot on', '--expert-cache-roll deepseek4', '--expert-cache-memory-report',
     '--expert-cache-deferred-wait'
 )) {
     if (-not $deepSeekText.Contains($expected)) {
@@ -235,9 +235,9 @@ if (-not $loader.loaderInfoMarkerPresent) {
 }
 
 $arenaLog = @'
-llama_context: Siliang expert cache enabled: L2=12288 MiB K=216 R=12 P=12 roll=1
+llama_context: Siliang expert cache enabled: L2=8192 MiB K=216 R=12 P=12 roll=1
 siliangem: source 2x2 experts, 1.000 MiB each, cache 4 slots (0.004 GiB), policy 1, unbuffered+overlapped, deferred-wait ON
-siliang_moe_runtime: armed decode-only arena layers=43/43 schemas=1 layout=global experts=256 top_k=6 K=216 R=12 P=12 policy=cumulative-lfu source=host-l2 transport=private-stream-staged arena=1536 MiB pinned=81 MiB
+siliang_moe_runtime: armed decode-only arena layers=43/43 schemas=1 layout=global experts=256 top_k=6 K=216 R=12 P=12 policy=slfu source=host-l2 transport=private-stream-staged arena=1536 MiB pinned=81 MiB
 expert cache: DeepSeek-V4 FRONT slab armed bank=64 MiB host=2752 MiB resident_layer=0
 siliang_moe_runtime: serving decode route map=1 layer=0 K_hits=0 K_misses=6 admissions=6 R_bypass=0 H2D_ops=6 failure=0
 siliang_moe_runtime: serving decode compute_wait=1 layer=0 failure=0
@@ -312,7 +312,7 @@ if (-not $retiredMarkersRejected) {
         self.assertNotIn(f"$env:{retired_prefetch_prefix}", source)
         self.assertIn("Get-CellExpertCacheArguments", source)
         self.assertIn("'--parallel', '1'", source)
-        self.assertIn("'-c', '8192', '-b', '512', '-ub', '512', '-t', '2', '-tb', '2'", source)
+        self.assertIn("'-c', '4096', '-b', '512', '-ub', '512', '-t', '2', '-tb', '2'", source)
         self.assertIn("'-ngl', '99', '-ncmoe', '36'", source)
 
     def test_runtime_identity_covers_executable_and_adjacent_dlls(self) -> None:

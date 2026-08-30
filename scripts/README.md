@@ -96,16 +96,14 @@ fallback; use a separate legacy harness for historical binaries.
     -DeepSeekModel "<deepseek-expert-major.gguf>" `
     -GptOssModel "<gpt-oss-expert-major.gguf>" `
     -GptOssMaxDeviceModelBufferMiB "<measured-limit>" `
-    -DeepSeekExpertCacheL2MiB 12288 `
+    -DeepSeekExpertCacheL2MiB 8192 `
     -GptOssExpertCacheL2MiB 18432 `
     -ResultsRoot "<results-root>"
 ```
 
 The gate records executable and adjacent-DLL identities, effective runtime
 configuration, exact CLI arguments, output evidence, cache activity, teardown
-state, and memory pressure. Its DeepSeek4 arena cells use K216/R12/P12,
-cumulative-LFU admission/bypass, FRONT rolling, and `--parallel 1`; GPT-OSS remains a separate L2-only diagnostic
-profile. If `-AllowMemoryPressure` is deliberately used, the pressure counts
+state, and memory pressure. Its DeepSeek4 arena cells use 8 GiB L2, K216/R12/P12, SLFU with cold admission and post-compute demotion, FRONT rolling, and `--parallel 1`; GPT-OSS remains a separate L2-only diagnostic profile. If `-AllowMemoryPressure` is deliberately used, the pressure counts
 remain in `summary.json` and must be disclosed with the result.
 
 A passing process launch or model load is not enough. Publish a performance

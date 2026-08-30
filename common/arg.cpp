@@ -922,7 +922,7 @@ static bool common_params_parse_ex(int argc, char ** argv, common_params_context
         expert_cache.l1_policy != COMMON_EXPERT_CACHE_POLICY_CUMULATIVE_LFU_ADMISSION &&
         (!expert_cache.admit_k_cold || expert_cache.demote_k_hot)) {
         throw std::invalid_argument(
-            "error: --admit-k-cold off and --demote-k-hot on are SLFU-only research controls\n");
+            "error: --admit-k-cold off and --demote-k-hot on are SLFU-only controls\n");
     }
     if (expert_cache.l1_k > 0 &&
         (!expert_cache.admit_k_cold || expert_cache.demote_k_hot) && expert_cache.l2_mib == 0) {
