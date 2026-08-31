@@ -991,7 +991,7 @@ index 5d1ca5ffcc368b9f0249d6cf6ccc4549bb9a3ab4..97a2a0b1b72df88a9af3cb6ab825ee4b
  #if defined(_MSC_VER)
  
 diff --git a/ggml/src/ggml-cpu/ggml-cpu.c b/ggml/src/ggml-cpu/ggml-cpu.c
-index 491316f7491252248d6f74a60440d3efa7aa6177..e09fa142ae1a1c188a34bcf420606383fb9921b8 100644
+index 491316f7491252248d6f74a60440d3efa7aa6177..83518e829c9f9a72a606514cef178260d3f73a37 100644
 --- a/ggml/src/ggml-cpu/ggml-cpu.c
 +++ b/ggml/src/ggml-cpu/ggml-cpu.c
 @@ -5,6 +5,7 @@
@@ -1002,7 +1002,7 @@ index 491316f7491252248d6f74a60440d3efa7aa6177..e09fa142ae1a1c188a34bcf420606383
  #include "ggml-impl.h"
  #include "quants.h"
  #include "ggml-threading.h"
-@@ -1531,10 +1532,534 @@ static void * incr_ptr_aligned(void ** p, size_t size, size_t align) {
+@@ -1531,10 +1532,571 @@ static void * incr_ptr_aligned(void ** p, size_t size, size_t align) {
      return ptr;
  }
  
@@ -1340,15 +1340,48 @@ index 491316f7491252248d6f74a60440d3efa7aa6177..e09fa142ae1a1c188a34bcf420606383
 +int ggml_siliangem_cache_state_store_cached_expert_at_slot(
 +        struct ggml_siliangem_cache_state * state, uint32_t layer, uint32_t expert, uint32_t slot,
 +        const void * const * parts, const size_t * part_sizes, uint32_t part_count) {
-+    if (!state || !parts || !part_sizes) return 0;
++    if (!state || !parts || !part_sizes) {
++        fprintf(stderr, "siliangem: store_cached_expert reject reason=args layer=%u expert=%u slot=%u\n", layer, expert, slot);
++        return 0;
++    }
 +    siliangem_bind_state(state);
-+    if (!g_siliangem.ready || layer >= g_siliangem.n_layers || expert >= g_siliangem.n_experts ||
-+        slot >= g_siliangem.nslots || g_siliangem.slots[slot].key != SILIANGEM_EMPTY ||
-+        g_siliangem.slots[slot].leases != 0 || g_siliangem.n_pending != 0) return 0;
++    if (!g_siliangem.ready) {
++        fprintf(stderr, "siliangem: store_cached_expert reject reason=not-ready layer=%u expert=%u slot=%u\n", layer, expert, slot);
++        return 0;
++    }
++    if (layer >= g_siliangem.n_layers || expert >= g_siliangem.n_experts || slot >= g_siliangem.nslots) {
++        fprintf(stderr, "siliangem: store_cached_expert reject reason=bounds layer=%u/%u expert=%u/%u slot=%u/%u\n",
++                layer, g_siliangem.n_layers, expert, g_siliangem.n_experts, slot, g_siliangem.nslots);
++        return 0;
++    }
++    if (g_siliangem.slots[slot].key != SILIANGEM_EMPTY) {
++        fprintf(stderr, "siliangem: store_cached_expert reject reason=slot-owned layer=%u expert=%u slot=%u slot_key=%u\n",
++                layer, expert, slot, g_siliangem.slots[slot].key);
++        return 0;
++    }
++    if (g_siliangem.slots[slot].leases != 0) {
++        fprintf(stderr, "siliangem: store_cached_expert reject reason=slot-leased layer=%u expert=%u slot=%u leases=%u\n",
++                layer, expert, slot, g_siliangem.slots[slot].leases);
++        return 0;
++    }
++    if (g_siliangem.n_pending != 0) {
++        fprintf(stderr, "siliangem: store_cached_expert reject reason=pending-io layer=%u expert=%u slot=%u pending=%d\n",
++                layer, expert, slot, g_siliangem.n_pending);
++        return 0;
++    }
 +    const uint32_t expected_parts = g_siliangem.em ? (uint32_t) g_siliangem.em_nparts : 3u;
-+    if (part_count != expected_parts) return 0;
++    if (part_count != expected_parts) {
++        fprintf(stderr, "siliangem: store_cached_expert reject reason=part-count layer=%u expert=%u slot=%u got=%u expected=%u\n",
++                layer, expert, slot, part_count, expected_parts);
++        return 0;
++    }
 +    const uint32_t key = (layer << 16) | expert;
-+    if (siliangem_lookup(key) != SILIANGEM_EMPTY) return 0;
++    const uint32_t existing_slot = siliangem_lookup(key);
++    if (existing_slot != SILIANGEM_EMPTY) {
++        fprintf(stderr, "siliangem: store_cached_expert reject reason=duplicate-resident layer=%u expert=%u slot=%u existing_slot=%u\n",
++                layer, expert, slot, existing_slot);
++        return 0;
++    }
 +
 +    uint8_t * destination = g_siliangem.arena + (size_t) slot * g_siliangem.expert_bytes;
 +    for (uint32_t part = 0; part < part_count; ++part) {
@@ -1363,7 +1396,11 @@ index 491316f7491252248d6f74a60440d3efa7aa6177..e09fa142ae1a1c188a34bcf420606383
 +            bytes = g_siliangem.part_bytes[part];
 +        }
 +        if (!parts[part] || bytes == 0 || part_sizes[part] != bytes ||
-+            offset > g_siliangem.expert_bytes || bytes > g_siliangem.expert_bytes - offset) return 0;
++            offset > g_siliangem.expert_bytes || bytes > g_siliangem.expert_bytes - offset) {
++            fprintf(stderr, "siliangem: store_cached_expert reject reason=part-shape layer=%u expert=%u slot=%u part=%u ptr=%p got=%zu expected=%u offset=%u expert_bytes=%u\n",
++                    layer, expert, slot, part, parts[part], part_sizes[part], bytes, offset, g_siliangem.expert_bytes);
++            return 0;
++        }
 +        memcpy(destination + offset, parts[part], bytes);
 +    }
 +
@@ -1537,7 +1574,7 @@ index 491316f7491252248d6f74a60440d3efa7aa6177..e09fa142ae1a1c188a34bcf420606383
      const struct ggml_tensor * src0 = dst->src[0];
      const struct ggml_tensor * src1 = dst->src[1];
      const struct ggml_tensor * ids = dst->src[2];
-@@ -1644,14 +2169,86 @@ static void ggml_compute_forward_mul_mat_id(
+@@ -1644,14 +2206,86 @@ static void ggml_compute_forward_mul_mat_id(
  
      ggml_barrier(params->threadpool);
  
@@ -1625,7 +1662,7 @@ index 491316f7491252248d6f74a60440d3efa7aa6177..e09fa142ae1a1c188a34bcf420606383
          const void * wdata = (src1->type == vec_dot_type) ? src1->data : params->wdata;
          const size_t row_size = ggml_row_size(vec_dot_type, ne10);
  
-@@ -3076,6 +3673,7 @@ static thread_ret_t ggml_graph_compute_thread(void * data) {
+@@ -3076,6 +3710,7 @@ static thread_ret_t ggml_graph_compute_thread(void * data) {
          /*.wsize      =*/ cplan->work_size,
          /*.wdata      =*/ cplan->work_data,
          /*.threadpool =*/ tp,
@@ -7617,10 +7654,10 @@ index 0000000000000000000000000000000000000000..01b630212a342f9eb0770985995098a0
 +};
 diff --git a/src/siliang-moe-runtime.cpp b/src/siliang-moe-runtime.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..fff1b5a60f4f59a044b0e82c99ed2b98e1b6c14a
+index 0000000000000000000000000000000000000000..6cf14959d265c2f97b7ed3846d057bffcead8944
 --- /dev/null
 +++ b/src/siliang-moe-runtime.cpp
-@@ -0,0 +1,2773 @@
+@@ -0,0 +1,2835 @@
 +#include "siliang-moe-runtime.h"
 +
 +#include "llama-impl.h"
@@ -7714,7 +7751,7 @@ index 0000000000000000000000000000000000000000..fff1b5a60f4f59a044b0e82c99ed2b98
 +    int32_t policy_slot = -1;
 +    int32_t k_physical = -1;
 +    int64_t victim_key = -1;
-+    uint32_t released_l2_slot = 0;
++    uint32_t released_l2_slot = std::numeric_limits<uint32_t>::max();
 +};
 +
 +struct runtime_metrics {
@@ -8006,6 +8043,10 @@ index 0000000000000000000000000000000000000000..fff1b5a60f4f59a044b0e82c99ed2b98
 +    bool transition_worker_job_pending = false;
 +    bool transition_worker_done = true;
 +    int32_t transition_worker_error = 0;
++    std::string transition_worker_error_stage;
++    int32_t transition_worker_error_layer = -1;
++    int32_t transition_worker_error_expert = -1;
++    uint32_t transition_worker_error_slot = std::numeric_limits<uint32_t>::max();
 +    uint64_t transition_worker_device_wait_ns = 0;
 +    uint64_t transition_worker_host_copy_ns = 0;
 +    size_t next_exchange_bank = 0;
@@ -8055,13 +8096,29 @@ index 0000000000000000000000000000000000000000..fff1b5a60f4f59a044b0e82c99ed2b98
 +            const auto device_wait_end = std::chrono::steady_clock::now();
 +
 +            const auto host_copy_start = device_wait_end;
++            std::string error_stage;
++            int32_t error_layer = -1;
++            int32_t error_expert = -1;
++            uint32_t error_slot = std::numeric_limits<uint32_t>::max();
++
++            // The CPU cache may still own overlapped reads issued while the preceding
++            // graph was executing. The K/L2 swap mutates persistent slot ownership, so
++            // it must begin from a quiescent L2 state rather than racing those reads.
++            if (error == 0 && (!cpu_wait || !cpu_wait(cpu))) {
++                error = SILIANG_RUNTIME_FAILURE_L2;
++                error_stage = "quiesce";
++            }
++
 +            if (error == 0) {
 +                for (auto & transition : pending_transitions) {
-+                    uint32_t released_slot = 0;
++                    uint32_t released_slot = std::numeric_limits<uint32_t>::max();
 +                    if (!cpu_release(
 +                            cpu, static_cast<uint32_t>(transition.layer),
 +                            static_cast<uint32_t>(transition.candidate_expert), &released_slot)) {
 +                        error = SILIANG_RUNTIME_FAILURE_L2;
++                        error_stage = "candidate-release";
++                        error_layer = transition.layer;
++                        error_expert = transition.candidate_expert;
 +                        break;
 +                    }
 +                    transition.released_l2_slot = released_slot;
@@ -8093,11 +8150,34 @@ index 0000000000000000000000000000000000000000..fff1b5a60f4f59a044b0e82c99ed2b98
 +                        parts[static_cast<size_t>(part.l2_part)] = slot_base + part.staging_offset;
 +                        part_sizes[static_cast<size_t>(part.l2_part)] = part.bytes;
 +                    }
-+                    if (std::any_of(parts.begin(), parts.end(), [](const void * ptr) { return ptr == nullptr; }) ||
-+                        !cpu_store(
++                    if (std::any_of(parts.begin(), parts.end(), [](const void * ptr) { return ptr == nullptr; })) {
++                        error = SILIANG_RUNTIME_FAILURE_L2;
++                        error_stage = "victim-descriptor";
++                        error_layer = static_cast<int32_t>(victim_layer);
++                        error_expert = static_cast<int32_t>(victim_expert);
++                        error_slot = transition.released_l2_slot;
++                        break;
++                    }
++                    const int victim_l2_location = cpu_location
++                        ? cpu_location(cpu, victim_layer, victim_expert)
++                        : GGML_SILIANGEM_EXPERT_LOCATION_NONE;
++                    if (victim_l2_location == GGML_SILIANGEM_EXPERT_LOCATION_RESIDENT) {
++                        // With K-prefill disabled, a later CPU prompt pass may legitimately
++                        // repopulate L2 for an expert that is still warm in K from the previous
++                        // request. The demotion is already represented in L2, so rewriting the
++                        // victim into the candidate's released slot would create a duplicate.
++                        // Reuse the existing L2 copy and let the normal K commit remove the
++                        // temporary cross-tier duplication.
++                        continue;
++                    }
++                    if (!cpu_store(
 +                            cpu, victim_layer, victim_expert, transition.released_l2_slot,
 +                            parts.data(), part_sizes.data(), source.n_parts)) {
 +                        error = SILIANG_RUNTIME_FAILURE_L2;
++                        error_stage = "victim-store";
++                        error_layer = static_cast<int32_t>(victim_layer);
++                        error_expert = static_cast<int32_t>(victim_expert);
++                        error_slot = transition.released_l2_slot;
 +                        break;
 +                    }
 +                }
@@ -8107,6 +8187,10 @@ index 0000000000000000000000000000000000000000..fff1b5a60f4f59a044b0e82c99ed2b98
 +            {
 +                std::lock_guard<std::mutex> lock(transition_worker_mutex);
 +                transition_worker_error = error;
++                transition_worker_error_stage = std::move(error_stage);
++                transition_worker_error_layer = error_layer;
++                transition_worker_error_expert = error_expert;
++                transition_worker_error_slot = error_slot;
 +                transition_worker_device_wait_ns = static_cast<uint64_t>(
 +                    std::chrono::duration_cast<std::chrono::nanoseconds>(device_wait_end - device_wait_start).count());
 +                transition_worker_host_copy_ns = static_cast<uint64_t>(
@@ -9688,12 +9772,20 @@ index 0000000000000000000000000000000000000000..fff1b5a60f4f59a044b0e82c99ed2b98
 +
 +        const auto exposed_wait_start = std::chrono::steady_clock::now();
 +        int32_t worker_error = 0;
++        std::string worker_error_stage;
++        int32_t worker_error_layer = -1;
++        int32_t worker_error_expert = -1;
++        uint32_t worker_error_slot = std::numeric_limits<uint32_t>::max();
 +        uint64_t device_wait_ns = 0;
 +        uint64_t host_copy_ns = 0;
 +        {
 +            std::unique_lock<std::mutex> lock(transition_worker_mutex);
 +            transition_worker_cv.wait(lock, [this] { return transition_worker_done; });
 +            worker_error = transition_worker_error;
++            worker_error_stage = transition_worker_error_stage;
++            worker_error_layer = transition_worker_error_layer;
++            worker_error_expert = transition_worker_error_expert;
++            worker_error_slot = transition_worker_error_slot;
 +            device_wait_ns = transition_worker_device_wait_ns;
 +            host_copy_ns = transition_worker_host_copy_ns;
 +        }
@@ -9705,11 +9797,14 @@ index 0000000000000000000000000000000000000000..fff1b5a60f4f59a044b0e82c99ed2b98
 +
 +        if (worker_error != 0) {
 +            ++metrics.l2_demotion_failures;
-+            return fail(
-+                worker_error == SILIANG_RUNTIME_FAILURE_EVENT ? SILIANG_RUNTIME_FAILURE_EVENT : SILIANG_RUNTIME_FAILURE_L2,
-+                worker_error == SILIANG_RUNTIME_FAILURE_EVENT ?
-+                    "K/L2 transition worker CUDA wait failed" :
-+                    "K/L2 transition worker L2 swap failed");
++            if (worker_error == SILIANG_RUNTIME_FAILURE_EVENT) {
++                return fail(SILIANG_RUNTIME_FAILURE_EVENT, "K/L2 transition worker CUDA wait failed");
++            }
++            LLAMA_LOG_ERROR(
++                    "siliang_moe_runtime: K/L2 transition worker L2 swap failed stage=%s layer=%d expert=%d slot=%u\n",
++                    worker_error_stage.empty() ? "unknown" : worker_error_stage.c_str(),
++                    worker_error_layer, worker_error_expert, worker_error_slot);
++            return fail(SILIANG_RUNTIME_FAILURE_L2, "K/L2 transition worker L2 swap failed");
 +        }
 +
 +        for (auto & transition : pending_transitions) {
@@ -9815,6 +9910,10 @@ index 0000000000000000000000000000000000000000..fff1b5a60f4f59a044b0e82c99ed2b98
 +                return fail(SILIANG_RUNTIME_FAILURE_EVENT, "SLFU transition worker state is busy or unavailable");
 +            }
 +            transition_worker_error = 0;
++            transition_worker_error_stage.clear();
++            transition_worker_error_layer = -1;
++            transition_worker_error_expert = -1;
++            transition_worker_error_slot = std::numeric_limits<uint32_t>::max();
 +            transition_worker_device_wait_ns = 0;
 +            transition_worker_host_copy_ns = 0;
 +            transition_worker_done = false;

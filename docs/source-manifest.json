@@ -14,11 +14,11 @@
   "source": {
     "canonicalPatch": {
       "path": "patches/siliang-engine.patch",
-      "sha256": "CA01BF59463ABA472DA5E7A095C79B31829C9CBC4464540DD371712FCD8486C7",
-      "gitBlob": "63367d7c47967c80b78c5a25d6c1fe38b448beac"
+      "sha256": "F857F01F180724BDEA2A25303BA61774533890085456C3D7E5E41D1EEA16CF20",
+      "gitBlob": "1ad533211c33348b109ec9bf3d5497e4ac4c6b2b"
     },
     "engineDelta": {
-      "insertions": 10449,
+      "insertions": 10548,
       "deletions": 24,
       "files": [
         {
@@ -89,7 +89,8 @@
           "status": "modified",
           "mode": "100644",
           "baseBlob": "491316f7491252248d6f74a60440d3efa7aa6177",
-          "finalBlob": "e09fa142ae1a1c188a34bcf420606383fb9921b8"
+          "finalBlob": "83518e829c9f9a72a606514cef178260d3f73a37",
+          "previousBlob": "e09fa142ae1a1c188a34bcf420606383fb9921b8"
         },
         {
           "path": "ggml/src/ggml-cpu/ggml-cpu.cpp",
@@ -222,8 +223,8 @@
           "status": "added",
           "mode": "100644",
           "baseBlob": null,
-          "finalBlob": "fff1b5a60f4f59a044b0e82c99ed2b98e1b6c14a",
-          "previousBlob": "c4acde9e88b47e43238bd50e7db371591050c40e"
+          "finalBlob": "6cf14959d265c2f97b7ed3846d057bffcead8944",
+          "previousBlob": "fff1b5a60f4f59a044b0e82c99ed2b98e1b6c14a"
         },
         {
           "path": "src/siliang-moe-runtime.h",

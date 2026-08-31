@@ -13,11 +13,11 @@ SCRIPTS_README = ROOT / "scripts" / "README.md"
 
 
 class ReleasePackagingContractTests(unittest.TestCase):
-    def test_v013_packages_ship_cli_configuration_without_environment_helper(self) -> None:
+    def test_release_packages_ship_cli_configuration_without_environment_helper(self) -> None:
         ci_text = WORKFLOW.read_text(encoding="utf-8")
         publish_text = PUBLISH_WORKFLOW.read_text(encoding="utf-8")
 
-        self.assertIn('default: "v0.1.3"', publish_text)
+        self.assertIn('default: "v0.1.4"', publish_text)
         for text in (ci_text, publish_text):
             self.assertIn("'.\\docs\\CONFIGURATION.md'", text)
             self.assertIn('$releaseNotesPath = ".\\docs\\releases\\$tag.md"', text)

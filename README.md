@@ -12,7 +12,7 @@ large models can make better use of limited workstation memory.
 Its core workflow combines model-owned expert sources with a typed L2/L1 memory
 hierarchy. A bounded system-RAM L2 can serve out-of-core experts, while a CUDA
 L1 keeps K persistent experts plus R exchange slots and a bounded pinned P
-  elevator. The v0.1.3 DeepSeek4 path can also roll its architecture-specific
+  elevator. The v0.1.4 DeepSeek4 path can also roll its architecture-specific
   FRONT set. Separately, the generic routed-MoE arena can, as an explicit
   experiment, reuse K for bounded prompt microbatches when the topology and
   layer-local capacity checks pass. The GPU retains router weights; only selected expert IDs enter
@@ -70,8 +70,9 @@ settings, calculations, and evidence limitations are in
 [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md).
 
 These rows describe earlier runtime revisions and remain **historical evidence**.
-They are not v0.1.3 throughput claims. The current release-candidate qualification
-for Gemma4, Qwen3, Qwen3.6, Ornith, GPT-OSS, and DeepSeek4 is recorded in
+They are not v0.1.4 throughput claims. v0.1.4 is a correctness/packaging hotfix;
+the broader model qualification for Gemma4, Qwen3, Qwen3.6, Ornith, GPT-OSS,
+and DeepSeek4 remains the v0.1.3 evidence recorded in
 [`docs/releases/v0.1.3.md`](docs/releases/v0.1.3.md) and
 [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md#v013-release-candidate-qualification-2026-08-31).
 The historical DS4 2,000-token capacity observations remain documented separately
@@ -249,7 +250,7 @@ builds the release packages on Windows. The downloadable artifacts are:
 
 Actions retains the verified packages for 30 days. Maintainers review them before
 attaching them to the corresponding [GitHub Release](https://github.com/SpeederX/siliang-engine/releases).
-For v0.1.3, see the [release notes](docs/releases/v0.1.3.md).
+For v0.1.4, see the [release notes](docs/releases/v0.1.4.md); the broader performance qualification remains in [v0.1.3](docs/releases/v0.1.3.md).
 
 ## License
 

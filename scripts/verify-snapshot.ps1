@@ -29,9 +29,9 @@ $expected = [ordered]@{
     upstreamTag = 'b10270'
     upstreamRootTree = '46f77bf060878e2b3b9d7c43b4d8a3a566ba3384'
     patchPath = 'patches/siliang-engine.patch'
-    patchSha256 = 'CA01BF59463ABA472DA5E7A095C79B31829C9CBC4464540DD371712FCD8486C7'
-    patchGitBlob = '63367d7c47967c80b78c5a25d6c1fe38b448beac'
-    patchInsertions = 10449
+    patchSha256 = 'F857F01F180724BDEA2A25303BA61774533890085456C3D7E5E41D1EEA16CF20'
+    patchGitBlob = '1ad533211c33348b109ec9bf3d5497e4ac4c6b2b'
+    patchInsertions = 10548
     patchDeletions = 24
 }
 
@@ -66,7 +66,7 @@ $expectedFiles = @(
     New-ExpectedEngineFile 'ggml/include/ggml-cuda.h' '1cd81eeaebcdf4abcd46c87ba1a9a46e275aa12b' '9377ba5b12d4ce22025852ecef7b5f15b3cab6cc'
     New-ExpectedEngineFile 'ggml/src/ggml-backend.cpp' 'f6fb91798ca484fd1298d7012be3ae8d73cb0ea4' '4e3d46d30679d3097395409f0382bcd3ddaea2a3'
     New-ExpectedEngineFile 'ggml/src/ggml-cpu/ggml-cpu-impl.h' '5d1ca5ffcc368b9f0249d6cf6ccc4549bb9a3ab4' '97a2a0b1b72df88a9af3cb6ab825ee4b474a40ae'
-    New-ExpectedEngineFile 'ggml/src/ggml-cpu/ggml-cpu.c' '491316f7491252248d6f74a60440d3efa7aa6177' 'e09fa142ae1a1c188a34bcf420606383fb9921b8'
+    New-ExpectedEngineFile 'ggml/src/ggml-cpu/ggml-cpu.c' '491316f7491252248d6f74a60440d3efa7aa6177' '83518e829c9f9a72a606514cef178260d3f73a37' 'e09fa142ae1a1c188a34bcf420606383fb9921b8'
     New-ExpectedEngineFile 'ggml/src/ggml-cpu/ggml-cpu.cpp' '16cc5116c5451787c6a1dd1988e38b761f20ef12' 'f39002fc95a5f793e2f2ed68187bfa8b3df8201a'
     New-ExpectedEngineFile 'ggml/src/ggml-cpu/siliangem_moe_cache.h' $null 'f0d97e499332959d836ec8d97aa4f63f13b5629d'
     New-ExpectedEngineFile 'ggml/src/ggml-cuda/ggml-cuda.cu' '561ab7ac599f9e285d2a0296caee0ab0a14ea5c8' 'd3d2cb63b8ec6a9e9621d29a44af510b607423ca'
@@ -85,7 +85,7 @@ $expectedFiles = @(
     New-ExpectedEngineFile 'src/siliang-ds4-front-slab.cpp' $null '8068e77bc74bc1198b79c80deb50431551a03c32'
     New-ExpectedEngineFile 'src/siliang-ds4-front-slab.h' $null 'a3c1052be580ed7ceecbd3d64d01350e439a5a74'
     New-ExpectedEngineFile 'src/siliang-expert-source.h' $null '01b630212a342f9eb0770985995098a049734064'
-    New-ExpectedEngineFile 'src/siliang-moe-runtime.cpp' $null 'fff1b5a60f4f59a044b0e82c99ed2b98e1b6c14a' 'c4acde9e88b47e43238bd50e7db371591050c40e'
+    New-ExpectedEngineFile 'src/siliang-moe-runtime.cpp' $null '6cf14959d265c2f97b7ed3846d057bffcead8944' 'fff1b5a60f4f59a044b0e82c99ed2b98e1b6c14a'
     New-ExpectedEngineFile 'src/siliang-moe-runtime.h' $null '5bf98bd7fdaa26a64c66f8c4231ea133d6136cf6'
     New-ExpectedEngineFile 'tests/CMakeLists.txt' '419e1eba4c2cdb465d20453004eeeca5af28037f' 'b66f6c8fa62a68fcc95194cf5d5689035056adc7'
     New-ExpectedEngineFile 'tests/test-arg-parser.cpp' 'fd5adb740eab632505cd0a4d999fb55a093a5f84' 'd1c58a368d236b6ded05c7353b6108405e1ec6df'
