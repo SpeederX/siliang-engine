@@ -390,7 +390,7 @@ struct siliang_moe_runtime {
     size_t active_staging_bank = 0;
 
     runtime_metrics metrics;
-    route_stats_metrics route_stats_metrics;
+    route_stats_metrics route_stats_data;
     size_t route_stats_checkpoint_index = 0;
     std::atomic<int32_t> failure {0};
     std::mutex mutex;
@@ -602,8 +602,8 @@ struct siliang_moe_runtime {
         const uint32_t route_width = static_cast<uint32_t>(model_info.top_k);
         if (params.route_stats) {
             const size_t side = static_cast<size_t>(route_width) + 1;
-            route_stats_metrics.compositions.assign(side * side, 0);
-            route_stats_metrics.execution_compositions.assign(side * side * side, 0);
+            route_stats_data.compositions.assign(side * side, 0);
+            route_stats_data.execution_compositions.assign(side * side * side, 0);
         }
         const uint32_t prefill_ubatch_cap = llama_n_ubatch(ctx);
         const uint64_t prefill_route_capacity = std::min<uint64_t>(
@@ -1535,7 +1535,7 @@ struct siliang_moe_runtime {
         if (!params.route_stats) {
             return;
         }
-        auto & stats = route_stats_metrics;
+        auto & stats = route_stats_data;
         ++stats.routes;
         stats.selections += count;
         stats.state_l1 += l1_hits;
@@ -1595,10 +1595,10 @@ struct siliang_moe_runtime {
         while (route_stats_checkpoint_index < SILIANG_ROUTE_STATS_TOKEN_CHECKPOINTS.size()) {
             const uint64_t generated_tokens = SILIANG_ROUTE_STATS_TOKEN_CHECKPOINTS[route_stats_checkpoint_index];
             const uint64_t target_routes = (generated_tokens - 1) * static_cast<uint64_t>(model_info.routed_layer_count);
-            if (route_stats_metrics.routes < target_routes) {
+            if (route_stats_data.routes < target_routes) {
                 return;
             }
-            const auto & stats = route_stats_metrics;
+            const auto & stats = route_stats_data;
             const double denom = stats.selections == 0 ? 1.0 : static_cast<double>(stats.selections);
             uint64_t l2_evictions = 0;
             uint64_t l2_rejections = 0;
@@ -2534,10 +2534,10 @@ struct siliang_moe_runtime {
     }
 
     void print_route_stats() const {
-        if (!params.route_stats || route_stats_metrics.routes == 0) {
+        if (!params.route_stats || route_stats_data.routes == 0) {
             return;
         }
-        const auto & stats = route_stats_metrics;
+        const auto & stats = route_stats_data;
         const double denom = stats.selections == 0 ? 1.0 : static_cast<double>(stats.selections);
         const uint64_t gpu_total = stats.exec_gpu_k_hit + stats.exec_gpu_k_admit + stats.exec_gpu_r;
         uint64_t l2_admissions = 0;

@@ -14,8 +14,8 @@
   "source": {
     "canonicalPatch": {
       "path": "patches/siliang-engine.patch",
-      "sha256": "652C5C6E799FC9222C573D5F103E50BD0067E0A12EA4BC52F819CD1FC546A187",
-      "gitBlob": "b30f4ff72e8b01c871e83636a67c9a829660b9d1"
+      "sha256": "CA01BF59463ABA472DA5E7A095C79B31829C9CBC4464540DD371712FCD8486C7",
+      "gitBlob": "63367d7c47967c80b78c5a25d6c1fe38b448beac"
     },
     "engineDelta": {
       "insertions": 10449,
@@ -26,8 +26,7 @@
           "status": "modified",
           "mode": "100644",
           "baseBlob": "86af0ba10a327283f2500f0bb8e48095df547017",
-          "finalBlob": "21881e865fd7f870b4f25c0cbeeb7b1e707df7dc",
-          "previousBlob": "0ca0e05206dc0fbef21e810c63c06b7383cb297d"
+          "finalBlob": "21881e865fd7f870b4f25c0cbeeb7b1e707df7dc"
         },
         {
           "path": "common/common.cpp",
@@ -41,8 +40,7 @@
           "status": "modified",
           "mode": "100644",
           "baseBlob": "3444aa157e9b73727ea2ca6107eb0dc9f9b36a74",
-          "finalBlob": "86bbf4a9c35e7abc35e0cd1521a6557d41602ca9",
-          "previousBlob": "45e60ea73bd563ac658e7a88df5b3f75e754a4de"
+          "finalBlob": "86bbf4a9c35e7abc35e0cd1521a6557d41602ca9"
         },
         {
           "path": "common/speculative.cpp",
@@ -203,8 +201,7 @@
           "status": "added",
           "mode": "100644",
           "baseBlob": null,
-          "finalBlob": "8068e77bc74bc1198b79c80deb50431551a03c32",
-          "previousBlob": "35ad425cc24f181969aee089a65a37f54a1f6122"
+          "finalBlob": "8068e77bc74bc1198b79c80deb50431551a03c32"
         },
         {
           "path": "src/siliang-ds4-front-slab.h",
@@ -225,7 +222,8 @@
           "status": "added",
           "mode": "100644",
           "baseBlob": null,
-          "finalBlob": "c4acde9e88b47e43238bd50e7db371591050c40e"
+          "finalBlob": "fff1b5a60f4f59a044b0e82c99ed2b98e1b6c14a",
+          "previousBlob": "c4acde9e88b47e43238bd50e7db371591050c40e"
         },
         {
           "path": "src/siliang-moe-runtime.h",

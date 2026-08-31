@@ -26,8 +26,8 @@ canonical engine-only delta from the pinned upstream base.
 
 | Identity | Value |
 | --- | --- |
-| SHA-256 | `652C5C6E799FC9222C573D5F103E50BD0067E0A12EA4BC52F819CD1FC546A187` |
-| Git blob | `b30f4ff72e8b01c871e83636a67c9a829660b9d1` |
+| SHA-256 | `CA01BF59463ABA472DA5E7A095C79B31829C9CBC4464540DD371712FCD8486C7` |
+| Git blob | `63367d7c47967c80b78c5a25d6c1fe38b448beac` |
 
 The patch uses full Git object IDs and LF line endings. It contains exactly
 **10,449 insertions and 24 deletions** across 34 paths.
@@ -73,7 +73,7 @@ patch.
 | `src/siliang-ds4-front-slab.cpp` | absent | `8068e77bc74bc1198b79c80deb50431551a03c32` |
 | `src/siliang-ds4-front-slab.h` | absent | `a3c1052be580ed7ceecbd3d64d01350e439a5a74` |
 | `src/siliang-expert-source.h` | absent | `01b630212a342f9eb0770985995098a049734064` |
-| `src/siliang-moe-runtime.cpp` | absent | `c4acde9e88b47e43238bd50e7db371591050c40e` |
+| `src/siliang-moe-runtime.cpp` | absent | `fff1b5a60f4f59a044b0e82c99ed2b98e1b6c14a` |
 | `src/siliang-moe-runtime.h` | absent | `5bf98bd7fdaa26a64c66f8c4231ea133d6136cf6` |
 | `tests/CMakeLists.txt` | `419e1eba4c2cdb465d20453004eeeca5af28037f` | `b66f6c8fa62a68fcc95194cf5d5689035056adc7` |
 | `tests/test-arg-parser.cpp` | `fd5adb740eab632505cd0a4d999fb55a093a5f84` | `d1c58a368d236b6ded05c7353b6108405e1ec6df` |
