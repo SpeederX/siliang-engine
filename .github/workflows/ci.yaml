@@ -459,19 +459,42 @@ jobs:
               if ($LASTEXITCODE -ne 0) {
                   throw "llama-cli.exe --list-devices failed from the assembled package with exit code $LASTEXITCODE."
               }
-              foreach ($dispatchLine in @($dispatchOutput | ForEach-Object { $_.ToString() })) {
-                  if ($dispatchLine -match 'loaded CPU backend from .*[\\/](ggml-cpu-[A-Za-z0-9._-]+\.dll)\s*$') {
-                      if ($null -ne $selectedCpuVariant -and $selectedCpuVariant -cne $Matches[1]) {
-                          throw "Runtime loaded more than one CPU variant: $selectedCpuVariant and $($Matches[1])."
-                      }
-                      $selectedCpuVariant = $Matches[1]
-                  }
-                  if ($dispatchLine -match 'loaded CUDA backend from .*[\\/](ggml-cuda\.dll)\s*$') {
-                      if ($null -ne $loadedCudaBackend) {
-                          throw 'Runtime reported the packaged CUDA backend more than once.'
-                      }
-                      $loadedCudaBackend = $Matches[1]
-                  }
+              $dispatchLines = @($dispatchOutput | ForEach-Object { $_.ToString() })
+              $dispatchText = $dispatchLines -join "`n"
+
+              # Native stderr can acquire ANSI/reset suffixes or PowerShell formatting on
+              # hosted runners. Match the semantic backend path instead of requiring the
+              # DLL name to be the final bytes of a captured line.
+              $cpuBackendMatches = [regex]::Matches(
+                  $dispatchText,
+                  '(?im)loaded CPU backend from .*?(ggml-cpu-[A-Za-z0-9._-]+[.]dll)'
+              )
+              $cpuBackendNames = @(
+                  $cpuBackendMatches |
+                      ForEach-Object { $_.Groups[1].Value } |
+                      Sort-Object -Unique
+              )
+              if ($cpuBackendNames.Count -gt 1) {
+                  throw "Runtime loaded more than one CPU variant: $($cpuBackendNames -join ', ')."
+              }
+              if ($cpuBackendNames.Count -eq 1) {
+                  $selectedCpuVariant = $cpuBackendNames[0]
+              }
+
+              $cudaBackendMatches = [regex]::Matches(
+                  $dispatchText,
+                  '(?im)loaded CUDA backend from .*?(ggml-cuda[.]dll)'
+              )
+              $cudaBackendNames = @(
+                  $cudaBackendMatches |
+                      ForEach-Object { $_.Groups[1].Value } |
+                      Sort-Object -Unique
+              )
+              if ($cudaBackendNames.Count -gt 1) {
+                  throw "Runtime reported more than one CUDA backend: $($cudaBackendNames -join ', ')."
+              }
+              if ($cudaBackendNames.Count -eq 1) {
+                  $loadedCudaBackend = $cudaBackendNames[0]
               }
           } finally {
               $env:PATH = $originalPath
@@ -479,6 +502,10 @@ jobs:
           }
           if ([string]::IsNullOrWhiteSpace($selectedCpuVariant) -or
               -not (Test-Path -LiteralPath (Join-Path $binTarget $selectedCpuVariant) -PathType Leaf)) {
+              Write-Host 'llama-cli.exe --verbose --list-devices output:'
+              foreach ($dispatchLine in $dispatchLines) {
+                  Write-Host $dispatchLine
+              }
               throw 'Runtime CPU dispatch did not select exactly one packaged CPU backend variant.'
           }
           if ('${{ matrix.backend }}' -eq 'Cuda') {
