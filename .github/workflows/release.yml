@@ -98,6 +98,39 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
 
+          function Invoke-PackagedNative {
+              param(
+                  [Parameter(Mandatory = $true)][string]$FilePath,
+                  [string[]]$Arguments = @()
+              )
+
+              $startInfo = [Diagnostics.ProcessStartInfo]::new()
+              $startInfo.FileName = $FilePath
+              $startInfo.UseShellExecute = $false
+              $startInfo.RedirectStandardOutput = $true
+              $startInfo.RedirectStandardError = $true
+              foreach ($argument in $Arguments) {
+                  [void]$startInfo.ArgumentList.Add($argument)
+              }
+
+              $process = [Diagnostics.Process]::new()
+              $process.StartInfo = $startInfo
+              if (-not $process.Start()) {
+                  throw "Failed to start packaged executable: $FilePath"
+              }
+              $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+              $stderrTask = $process.StandardError.ReadToEndAsync()
+              $process.WaitForExit()
+              $stdout = $stdoutTask.GetAwaiter().GetResult()
+              $stderr = $stderrTask.GetAwaiter().GetResult()
+              return [pscustomobject]@{
+                  ExitCode = $process.ExitCode
+                  Stdout = $stdout
+                  Stderr = $stderr
+                  Text = ($stdout + $stderr)
+              }
+          }
+
           $tag = '${{ inputs.tag }}'
 
           if ($tag -notmatch '^v[0-9A-Za-z][0-9A-Za-z._-]*$') {
@@ -308,17 +341,18 @@ jobs:
               )
 
               foreach ($executableName in @('llama-server.exe', 'llama-cli.exe')) {
-                  & (Join-Path $binTarget $executableName) --version
-
-                  if ($LASTEXITCODE -ne 0) {
-                      throw "$executableName --version failed from the assembled package with exit code $LASTEXITCODE."
+                  $executablePath = Join-Path $binTarget $executableName
+                  $versionResult = Invoke-PackagedNative -FilePath $executablePath -Arguments @('--version')
+                  if ($versionResult.ExitCode -ne 0) {
+                      throw "$executableName --version failed from the assembled package with exit code $($versionResult.ExitCode)."
                   }
+                  Write-Host $versionResult.Text.TrimEnd()
 
-                  $helpText = @(& (Join-Path $binTarget $executableName) --help 2>&1) -join "`n"
-
-                  if ($LASTEXITCODE -ne 0) {
-                      throw "$executableName --help failed from the assembled package with exit code $LASTEXITCODE."
+                  $helpResult = Invoke-PackagedNative -FilePath $executablePath -Arguments @('--help')
+                  if ($helpResult.ExitCode -ne 0) {
+                      throw "$executableName --help failed from the assembled package with exit code $($helpResult.ExitCode)."
                   }
+                  $helpText = $helpResult.Text
 
                   foreach ($option in $requiredExpertCacheOptions) {
                       $helpPattern = '(?m)(?<![A-Za-z0-9-])' + [regex]::Escape($option) + '(?![A-Za-z0-9-])'

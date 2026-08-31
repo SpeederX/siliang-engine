@@ -227,6 +227,40 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+
+          function Invoke-PackagedNative {
+              param(
+                  [Parameter(Mandatory = $true)][string]$FilePath,
+                  [string[]]$Arguments = @()
+              )
+
+              $startInfo = [Diagnostics.ProcessStartInfo]::new()
+              $startInfo.FileName = $FilePath
+              $startInfo.UseShellExecute = $false
+              $startInfo.RedirectStandardOutput = $true
+              $startInfo.RedirectStandardError = $true
+              foreach ($argument in $Arguments) {
+                  [void]$startInfo.ArgumentList.Add($argument)
+              }
+
+              $process = [Diagnostics.Process]::new()
+              $process.StartInfo = $startInfo
+              if (-not $process.Start()) {
+                  throw "Failed to start packaged executable: $FilePath"
+              }
+              $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+              $stderrTask = $process.StandardError.ReadToEndAsync()
+              $process.WaitForExit()
+              $stdout = $stdoutTask.GetAwaiter().GetResult()
+              $stderr = $stderrTask.GetAwaiter().GetResult()
+              return [pscustomobject]@{
+                  ExitCode = $process.ExitCode
+                  Stdout = $stdout
+                  Stderr = $stderr
+                  Text = ($stdout + $stderr)
+              }
+          }
+
           $tag = $env:GITHUB_REF_NAME
           if ($tag -notmatch '^v[0-9A-Za-z][0-9A-Za-z._-]*$') {
               throw "Release tag is not safe for an artifact name: $tag"
@@ -455,12 +489,14 @@ jobs:
                   }
               }
 
-              $dispatchOutput = @(& (Join-Path $binTarget 'llama-cli.exe') --verbose --list-devices 2>&1)
-              if ($LASTEXITCODE -ne 0) {
-                  throw "llama-cli.exe --list-devices failed from the assembled package with exit code $LASTEXITCODE."
+              $dispatchResult = Invoke-PackagedNative `
+                  -FilePath (Join-Path $binTarget 'llama-cli.exe') `
+                  -Arguments @('--verbose', '--list-devices')
+              if ($dispatchResult.ExitCode -ne 0) {
+                  throw "llama-cli.exe --list-devices failed from the assembled package with exit code $($dispatchResult.ExitCode)."
               }
-              $dispatchLines = @($dispatchOutput | ForEach-Object { $_.ToString() })
-              $dispatchText = $dispatchLines -join "`n"
+              $dispatchText = $dispatchResult.Text
+              $dispatchLines = @($dispatchText -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
 
               # Native stderr can acquire ANSI/reset suffixes or PowerShell formatting on
               # hosted runners. Match the semantic backend path instead of requiring the
@@ -580,19 +616,23 @@ jobs:
                   '--no-expert-cache-deferred-wait'
               )
               foreach ($executableName in @('llama-server.exe', 'llama-cli.exe')) {
-                  & (Join-Path $binTarget $executableName) --version
-                  if ($LASTEXITCODE -ne 0) {
-                      throw "$executableName --version failed from the assembled package with exit code $LASTEXITCODE."
+                  $executablePath = Join-Path $binTarget $executableName
+                  $versionResult = Invoke-PackagedNative -FilePath $executablePath -Arguments @('--version')
+                  if ($versionResult.ExitCode -ne 0) {
+                      throw "$executableName --version failed from the assembled package with exit code $($versionResult.ExitCode)."
                   }
-                  $helpText = @(& (Join-Path $binTarget $executableName) --help 2>&1) -join "`n"
-                  if ($LASTEXITCODE -ne 0) {
-                      throw "$executableName --help failed from the assembled package with exit code $LASTEXITCODE."
+                  Write-Host $versionResult.Text.TrimEnd()
+
+                  $helpResult = Invoke-PackagedNative -FilePath $executablePath -Arguments @('--help')
+                  if ($helpResult.ExitCode -ne 0) {
+                      throw "$executableName --help failed from the assembled package with exit code $($helpResult.ExitCode)."
                   }
+                  $helpText = $helpResult.Text
                   foreach ($option in $requiredExpertCacheOptions) {
-                  $helpPattern = '(?m)(?<![A-Za-z0-9-])' + [regex]::Escape($option) + '(?![A-Za-z0-9-])'
-                  if (-not [regex]::IsMatch($helpText, $helpPattern)) {
-                      throw "$executableName --help does not contain $option."
-                  }
+                      $helpPattern = '(?m)(?<![A-Za-z0-9-])' + [regex]::Escape($option) + '(?![A-Za-z0-9-])'
+                      if (-not [regex]::IsMatch($helpText, $helpPattern)) {
+                          throw "$executableName --help does not contain $option."
+                      }
                   }
               }
           } finally {

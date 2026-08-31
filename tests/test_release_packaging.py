@@ -125,7 +125,13 @@ class ReleasePackagingContractTests(unittest.TestCase):
         self.assertIn("$expectedCacheEntries", text)
         self.assertIn("--verbose --list-devices", text)
         self.assertIn("loaded CPU backend from", text)
-        self.assertIn('$dispatchText = $dispatchLines -join "`n"', text)
+        self.assertIn("function Invoke-PackagedNative", text)
+        self.assertIn("[Diagnostics.ProcessStartInfo]::new()", text)
+        self.assertIn("RedirectStandardOutput = $true", text)
+        self.assertIn("RedirectStandardError = $true", text)
+        self.assertIn("$dispatchResult = Invoke-PackagedNative", text)
+        self.assertIn("$dispatchText = $dispatchResult.Text", text)
+        self.assertNotIn("$dispatchOutput = @(&", text)
         self.assertIn("$cpuBackendMatches = [regex]::Matches(", text)
         self.assertIn("loaded CPU backend from .*?(ggml-cpu-[A-Za-z0-9._-]+[.]dll)", text)
         self.assertIn("loaded CUDA backend from .*?(ggml-cuda[.]dll)", text)
@@ -138,6 +144,17 @@ class ReleasePackagingContractTests(unittest.TestCase):
         self.assertIn("cpu_dispatch=runtime-selected", text)
         self.assertIn("cpu_dispatch_build_host_selection=$selectedCpuVariant", text)
         self.assertIn("Copy-Item -LiteralPath $buildReceiptPath -Destination $provenanceTarget", text)
+
+    def test_publish_workflow_uses_native_process_capture_for_package_smoke(self) -> None:
+        text = PUBLISH_WORKFLOW.read_text(encoding="utf-8")
+
+        self.assertIn("function Invoke-PackagedNative", text)
+        self.assertIn("[Diagnostics.ProcessStartInfo]::new()", text)
+        self.assertIn("RedirectStandardOutput = $true", text)
+        self.assertIn("RedirectStandardError = $true", text)
+        self.assertIn("$versionResult = Invoke-PackagedNative", text)
+        self.assertIn("$helpResult = Invoke-PackagedNative", text)
+        self.assertNotIn("$helpText = @(&", text)
 
     def test_cuda_package_requires_exact_runtime_set_and_loads_it_isolated(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
