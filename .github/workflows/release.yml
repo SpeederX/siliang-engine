@@ -1,6 +1,9 @@
 name: Publish Siliang Release
 
 on:
+  push:
+    tags:
+      - 'v*'
   workflow_dispatch:
     inputs:
       tag:
@@ -10,7 +13,7 @@ on:
         type: string
 
 concurrency:
-  group: siliang-release-${{ inputs.tag }}
+  group: siliang-release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -38,7 +41,7 @@ jobs:
       - name: Checkout release tag
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag }}
+          ref: ${{ inputs.tag || github.ref_name }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -47,8 +50,8 @@ jobs:
         run: |
           $actual = (& git describe --tags --exact-match HEAD).Trim()
 
-          if ($actual -cne '${{ inputs.tag }}') {
-              throw "Expected tag '${{ inputs.tag }}', got '$actual'"
+          if ($actual -cne '${{ inputs.tag || github.ref_name }}') {
+              throw "Expected tag '${{ inputs.tag || github.ref_name }}', got '$actual'"
           }
 
           Write-Host "Packaging tag: $actual"
@@ -131,7 +134,7 @@ jobs:
               }
           }
 
-          $tag = '${{ inputs.tag }}'
+          $tag = '${{ inputs.tag || github.ref_name }}'
 
           if ($tag -notmatch '^v[0-9A-Za-z][0-9A-Za-z._-]*$') {
               throw "Unsafe release tag: $tag"
@@ -417,7 +420,7 @@ jobs:
       - name: Download packages
         uses: actions/download-artifact@v4
         with:
-          pattern: siliang-engine-${{ inputs.tag }}-windows-x64-*
+          pattern: siliang-engine-${{ inputs.tag || github.ref_name }}-windows-x64-*
           path: packages
           merge-multiple: true
 
@@ -434,7 +437,7 @@ jobs:
       - name: Upload SHA256SUMS
         uses: actions/upload-artifact@v4
         with:
-          name: siliang-engine-${{ inputs.tag }}-SHA256SUMS
+          name: siliang-engine-${{ inputs.tag || github.ref_name }}-SHA256SUMS
           path: packages/SHA256SUMS
           if-no-files-found: error
           retention-days: 30
@@ -451,13 +454,13 @@ jobs:
       - name: Checkout release tag
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag }}
+          ref: ${{ inputs.tag || github.ref_name }}
           fetch-depth: 0
 
       - name: Download release assets
         uses: actions/download-artifact@v4
         with:
-          pattern: siliang-engine-${{ inputs.tag }}-*
+          pattern: siliang-engine-${{ inputs.tag || github.ref_name }}-*
           path: release-assets
           merge-multiple: true
 
@@ -466,21 +469,21 @@ jobs:
           ls -lah release-assets
 
           test -f \
-            "release-assets/siliang-engine-${{ inputs.tag }}-windows-x64-cpu.zip"
+            "release-assets/siliang-engine-${{ inputs.tag || github.ref_name }}-windows-x64-cpu.zip"
 
           test -f \
-            "release-assets/siliang-engine-${{ inputs.tag }}-windows-x64-cuda-13.2.zip"
+            "release-assets/siliang-engine-${{ inputs.tag || github.ref_name }}-windows-x64-cuda-13.2.zip"
 
           test -f \
             "release-assets/SHA256SUMS"
 
           test -f \
-            "docs/releases/${{ inputs.tag }}.md"
+            "docs/releases/${{ inputs.tag || github.ref_name }}.md"
 
       - name: Create draft release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ inputs.tag }}
+          TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           gh release create "$TAG" \
             "release-assets/siliang-engine-$TAG-windows-x64-cpu.zip" \

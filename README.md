@@ -248,9 +248,12 @@ builds the release packages on Windows. The downloadable artifacts are:
 - `siliang-engine-<tag>-windows-x64-cuda-13.2.zip`
 - `SHA256SUMS`
 
-Actions retains the verified packages for 30 days. Maintainers review them before
-attaching them to the corresponding [GitHub Release](https://github.com/SpeederX/siliang-engine/releases).
-For v0.1.4, see the [release notes](docs/releases/v0.1.4.md); the broader performance qualification remains in [v0.1.3](docs/releases/v0.1.3.md).
+Actions retains the verified packages for 30 days. A `v*` tag also runs the
+publisher, which rebuilds the packages and creates the corresponding
+[GitHub Release](https://github.com/SpeederX/siliang-engine/releases) as a draft
+prerelease for maintainer review; the same publisher remains manually dispatchable.
+For v0.1.4, see the [release notes](docs/releases/v0.1.4.md); the broader
+performance qualification remains in [v0.1.3](docs/releases/v0.1.3.md).
 
 ## License
 

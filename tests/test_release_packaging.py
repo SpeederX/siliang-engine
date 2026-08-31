@@ -18,6 +18,8 @@ class ReleasePackagingContractTests(unittest.TestCase):
         publish_text = PUBLISH_WORKFLOW.read_text(encoding="utf-8")
 
         self.assertIn('default: "v0.1.4"', publish_text)
+        self.assertIn("      - 'v*'", publish_text)
+        self.assertIn("inputs.tag || github.ref_name", publish_text)
         for text in (ci_text, publish_text):
             self.assertIn("'.\\docs\\CONFIGURATION.md'", text)
             self.assertIn('$releaseNotesPath = ".\\docs\\releases\\$tag.md"', text)
