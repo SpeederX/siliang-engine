@@ -1866,15 +1866,48 @@ int ggml_siliangem_cache_state_release_cached_expert(
 int ggml_siliangem_cache_state_store_cached_expert_at_slot(
         struct ggml_siliangem_cache_state * state, uint32_t layer, uint32_t expert, uint32_t slot,
         const void * const * parts, const size_t * part_sizes, uint32_t part_count) {
-    if (!state || !parts || !part_sizes) return 0;
+    if (!state || !parts || !part_sizes) {
+        fprintf(stderr, "siliangem: store_cached_expert reject reason=args layer=%u expert=%u slot=%u\n", layer, expert, slot);
+        return 0;
+    }
     siliangem_bind_state(state);
-    if (!g_siliangem.ready || layer >= g_siliangem.n_layers || expert >= g_siliangem.n_experts ||
-        slot >= g_siliangem.nslots || g_siliangem.slots[slot].key != SILIANGEM_EMPTY ||
-        g_siliangem.slots[slot].leases != 0 || g_siliangem.n_pending != 0) return 0;
+    if (!g_siliangem.ready) {
+        fprintf(stderr, "siliangem: store_cached_expert reject reason=not-ready layer=%u expert=%u slot=%u\n", layer, expert, slot);
+        return 0;
+    }
+    if (layer >= g_siliangem.n_layers || expert >= g_siliangem.n_experts || slot >= g_siliangem.nslots) {
+        fprintf(stderr, "siliangem: store_cached_expert reject reason=bounds layer=%u/%u expert=%u/%u slot=%u/%u\n",
+                layer, g_siliangem.n_layers, expert, g_siliangem.n_experts, slot, g_siliangem.nslots);
+        return 0;
+    }
+    if (g_siliangem.slots[slot].key != SILIANGEM_EMPTY) {
+        fprintf(stderr, "siliangem: store_cached_expert reject reason=slot-owned layer=%u expert=%u slot=%u slot_key=%u\n",
+                layer, expert, slot, g_siliangem.slots[slot].key);
+        return 0;
+    }
+    if (g_siliangem.slots[slot].leases != 0) {
+        fprintf(stderr, "siliangem: store_cached_expert reject reason=slot-leased layer=%u expert=%u slot=%u leases=%u\n",
+                layer, expert, slot, g_siliangem.slots[slot].leases);
+        return 0;
+    }
+    if (g_siliangem.n_pending != 0) {
+        fprintf(stderr, "siliangem: store_cached_expert reject reason=pending-io layer=%u expert=%u slot=%u pending=%d\n",
+                layer, expert, slot, g_siliangem.n_pending);
+        return 0;
+    }
     const uint32_t expected_parts = g_siliangem.em ? (uint32_t) g_siliangem.em_nparts : 3u;
-    if (part_count != expected_parts) return 0;
+    if (part_count != expected_parts) {
+        fprintf(stderr, "siliangem: store_cached_expert reject reason=part-count layer=%u expert=%u slot=%u got=%u expected=%u\n",
+                layer, expert, slot, part_count, expected_parts);
+        return 0;
+    }
     const uint32_t key = (layer << 16) | expert;
-    if (siliangem_lookup(key) != SILIANGEM_EMPTY) return 0;
+    const uint32_t existing_slot = siliangem_lookup(key);
+    if (existing_slot != SILIANGEM_EMPTY) {
+        fprintf(stderr, "siliangem: store_cached_expert reject reason=duplicate-resident layer=%u expert=%u slot=%u existing_slot=%u\n",
+                layer, expert, slot, existing_slot);
+        return 0;
+    }
 
     uint8_t * destination = g_siliangem.arena + (size_t) slot * g_siliangem.expert_bytes;
     for (uint32_t part = 0; part < part_count; ++part) {
@@ -1889,7 +1922,11 @@ int ggml_siliangem_cache_state_store_cached_expert_at_slot(
             bytes = g_siliangem.part_bytes[part];
         }
         if (!parts[part] || bytes == 0 || part_sizes[part] != bytes ||
-            offset > g_siliangem.expert_bytes || bytes > g_siliangem.expert_bytes - offset) return 0;
+            offset > g_siliangem.expert_bytes || bytes > g_siliangem.expert_bytes - offset) {
+            fprintf(stderr, "siliangem: store_cached_expert reject reason=part-shape layer=%u expert=%u slot=%u part=%u ptr=%p got=%zu expected=%u offset=%u expert_bytes=%u\n",
+                    layer, expert, slot, part, parts[part], part_sizes[part], bytes, offset, g_siliangem.expert_bytes);
+            return 0;
+        }
         memcpy(destination + offset, parts[part], bytes);
     }
 

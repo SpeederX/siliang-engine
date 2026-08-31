@@ -91,7 +91,7 @@ struct pending_k_transition {
     int32_t policy_slot = -1;
     int32_t k_physical = -1;
     int64_t victim_key = -1;
-    uint32_t released_l2_slot = 0;
+    uint32_t released_l2_slot = std::numeric_limits<uint32_t>::max();
 };
 
 struct runtime_metrics {
@@ -383,6 +383,10 @@ struct siliang_moe_runtime {
     bool transition_worker_job_pending = false;
     bool transition_worker_done = true;
     int32_t transition_worker_error = 0;
+    std::string transition_worker_error_stage;
+    int32_t transition_worker_error_layer = -1;
+    int32_t transition_worker_error_expert = -1;
+    uint32_t transition_worker_error_slot = std::numeric_limits<uint32_t>::max();
     uint64_t transition_worker_device_wait_ns = 0;
     uint64_t transition_worker_host_copy_ns = 0;
     size_t next_exchange_bank = 0;
@@ -432,13 +436,29 @@ struct siliang_moe_runtime {
             const auto device_wait_end = std::chrono::steady_clock::now();
 
             const auto host_copy_start = device_wait_end;
+            std::string error_stage;
+            int32_t error_layer = -1;
+            int32_t error_expert = -1;
+            uint32_t error_slot = std::numeric_limits<uint32_t>::max();
+
+            // The CPU cache may still own overlapped reads issued while the preceding
+            // graph was executing. The K/L2 swap mutates persistent slot ownership, so
+            // it must begin from a quiescent L2 state rather than racing those reads.
+            if (error == 0 && (!cpu_wait || !cpu_wait(cpu))) {
+                error = SILIANG_RUNTIME_FAILURE_L2;
+                error_stage = "quiesce";
+            }
+
             if (error == 0) {
                 for (auto & transition : pending_transitions) {
-                    uint32_t released_slot = 0;
+                    uint32_t released_slot = std::numeric_limits<uint32_t>::max();
                     if (!cpu_release(
                             cpu, static_cast<uint32_t>(transition.layer),
                             static_cast<uint32_t>(transition.candidate_expert), &released_slot)) {
                         error = SILIANG_RUNTIME_FAILURE_L2;
+                        error_stage = "candidate-release";
+                        error_layer = transition.layer;
+                        error_expert = transition.candidate_expert;
                         break;
                     }
                     transition.released_l2_slot = released_slot;
@@ -470,11 +490,34 @@ struct siliang_moe_runtime {
                         parts[static_cast<size_t>(part.l2_part)] = slot_base + part.staging_offset;
                         part_sizes[static_cast<size_t>(part.l2_part)] = part.bytes;
                     }
-                    if (std::any_of(parts.begin(), parts.end(), [](const void * ptr) { return ptr == nullptr; }) ||
-                        !cpu_store(
+                    if (std::any_of(parts.begin(), parts.end(), [](const void * ptr) { return ptr == nullptr; })) {
+                        error = SILIANG_RUNTIME_FAILURE_L2;
+                        error_stage = "victim-descriptor";
+                        error_layer = static_cast<int32_t>(victim_layer);
+                        error_expert = static_cast<int32_t>(victim_expert);
+                        error_slot = transition.released_l2_slot;
+                        break;
+                    }
+                    const int victim_l2_location = cpu_location
+                        ? cpu_location(cpu, victim_layer, victim_expert)
+                        : GGML_SILIANGEM_EXPERT_LOCATION_NONE;
+                    if (victim_l2_location == GGML_SILIANGEM_EXPERT_LOCATION_RESIDENT) {
+                        // With K-prefill disabled, a later CPU prompt pass may legitimately
+                        // repopulate L2 for an expert that is still warm in K from the previous
+                        // request. The demotion is already represented in L2, so rewriting the
+                        // victim into the candidate's released slot would create a duplicate.
+                        // Reuse the existing L2 copy and let the normal K commit remove the
+                        // temporary cross-tier duplication.
+                        continue;
+                    }
+                    if (!cpu_store(
                             cpu, victim_layer, victim_expert, transition.released_l2_slot,
                             parts.data(), part_sizes.data(), source.n_parts)) {
                         error = SILIANG_RUNTIME_FAILURE_L2;
+                        error_stage = "victim-store";
+                        error_layer = static_cast<int32_t>(victim_layer);
+                        error_expert = static_cast<int32_t>(victim_expert);
+                        error_slot = transition.released_l2_slot;
                         break;
                     }
                 }
@@ -484,6 +527,10 @@ struct siliang_moe_runtime {
             {
                 std::lock_guard<std::mutex> lock(transition_worker_mutex);
                 transition_worker_error = error;
+                transition_worker_error_stage = std::move(error_stage);
+                transition_worker_error_layer = error_layer;
+                transition_worker_error_expert = error_expert;
+                transition_worker_error_slot = error_slot;
                 transition_worker_device_wait_ns = static_cast<uint64_t>(
                     std::chrono::duration_cast<std::chrono::nanoseconds>(device_wait_end - device_wait_start).count());
                 transition_worker_host_copy_ns = static_cast<uint64_t>(
@@ -2065,12 +2112,20 @@ struct siliang_moe_runtime {
 
         const auto exposed_wait_start = std::chrono::steady_clock::now();
         int32_t worker_error = 0;
+        std::string worker_error_stage;
+        int32_t worker_error_layer = -1;
+        int32_t worker_error_expert = -1;
+        uint32_t worker_error_slot = std::numeric_limits<uint32_t>::max();
         uint64_t device_wait_ns = 0;
         uint64_t host_copy_ns = 0;
         {
             std::unique_lock<std::mutex> lock(transition_worker_mutex);
             transition_worker_cv.wait(lock, [this] { return transition_worker_done; });
             worker_error = transition_worker_error;
+            worker_error_stage = transition_worker_error_stage;
+            worker_error_layer = transition_worker_error_layer;
+            worker_error_expert = transition_worker_error_expert;
+            worker_error_slot = transition_worker_error_slot;
             device_wait_ns = transition_worker_device_wait_ns;
             host_copy_ns = transition_worker_host_copy_ns;
         }
@@ -2082,11 +2137,14 @@ struct siliang_moe_runtime {
 
         if (worker_error != 0) {
             ++metrics.l2_demotion_failures;
-            return fail(
-                worker_error == SILIANG_RUNTIME_FAILURE_EVENT ? SILIANG_RUNTIME_FAILURE_EVENT : SILIANG_RUNTIME_FAILURE_L2,
-                worker_error == SILIANG_RUNTIME_FAILURE_EVENT ?
-                    "K/L2 transition worker CUDA wait failed" :
-                    "K/L2 transition worker L2 swap failed");
+            if (worker_error == SILIANG_RUNTIME_FAILURE_EVENT) {
+                return fail(SILIANG_RUNTIME_FAILURE_EVENT, "K/L2 transition worker CUDA wait failed");
+            }
+            LLAMA_LOG_ERROR(
+                    "siliang_moe_runtime: K/L2 transition worker L2 swap failed stage=%s layer=%d expert=%d slot=%u\n",
+                    worker_error_stage.empty() ? "unknown" : worker_error_stage.c_str(),
+                    worker_error_layer, worker_error_expert, worker_error_slot);
+            return fail(SILIANG_RUNTIME_FAILURE_L2, "K/L2 transition worker L2 swap failed");
         }
 
         for (auto & transition : pending_transitions) {
@@ -2192,6 +2250,10 @@ struct siliang_moe_runtime {
                 return fail(SILIANG_RUNTIME_FAILURE_EVENT, "SLFU transition worker state is busy or unavailable");
             }
             transition_worker_error = 0;
+            transition_worker_error_stage.clear();
+            transition_worker_error_layer = -1;
+            transition_worker_error_expert = -1;
+            transition_worker_error_slot = std::numeric_limits<uint32_t>::max();
             transition_worker_device_wait_ns = 0;
             transition_worker_host_copy_ns = 0;
             transition_worker_done = false;

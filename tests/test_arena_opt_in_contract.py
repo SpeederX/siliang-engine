@@ -122,6 +122,29 @@ class ArenaOptInContractTests(unittest.TestCase):
         self.assertIn("schema_k_capacity", MOE_RUNTIME)
         self.assertIn("physical_slot_for_policy", MOE_RUNTIME)
 
+    def test_k_l2_transition_worker_quiesces_l2_before_slot_swap(self) -> None:
+        worker = function_body(MOE_RUNTIME, "void transition_worker_loop()")
+        wait_call = "if (error == 0 && (!cpu_wait || !cpu_wait(cpu)))"
+        release_call = "if (!cpu_release("
+        store_call = "if (!cpu_store("
+        self.assertIn(wait_call, worker)
+        self.assertIn(release_call, worker)
+        self.assertIn(store_call, worker)
+        self.assertLess(worker.index(wait_call), worker.index(release_call))
+        self.assertLess(worker.index(wait_call), worker.index(store_call))
+        self.assertIn("const int victim_l2_location = cpu_location", worker)
+        self.assertIn(
+            "victim_l2_location == GGML_SILIANGEM_EXPERT_LOCATION_RESIDENT", worker
+        )
+        location_check = "victim_l2_location == GGML_SILIANGEM_EXPERT_LOCATION_RESIDENT"
+        self.assertLess(worker.index("const int victim_l2_location = cpu_location"), worker.index(store_call))
+        duplicate_guard = worker[worker.index(location_check):worker.index(store_call)]
+        self.assertIn("Reuse the existing L2 copy", duplicate_guard)
+        self.assertIn("continue;", duplicate_guard)
+        self.assertIn('error_stage = "candidate-release";', worker)
+        self.assertIn('error_stage = "victim-store";', worker)
+        self.assertIn("K/L2 transition worker L2 swap failed stage=%s", MOE_RUNTIME)
+
     def test_l1_arena_rejects_lora_at_bind_and_dynamic_application(self) -> None:
         bind_body = function_body(LLAMA_CONTEXT, "bool llama_context::siliang_moe_arena_bind(")
         self.assertIn("!loras || !loras->empty()", bind_body)
