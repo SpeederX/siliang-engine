@@ -45,6 +45,17 @@ class ReleasePackagingContractTests(unittest.TestCase):
         ):
             self.assertIn(definition, text)
 
+    def test_windows_release_build_provisions_embedded_web_ui_and_fails_closed(self) -> None:
+        text = BUILD_SCRIPT.read_text(encoding="utf-8")
+
+        self.assertIn("-DLLAMA_BUILD_UI=ON", text)
+        self.assertIn("-DLLAMA_USE_PREBUILT_UI=ON", text)
+        self.assertIn("llama_build_ui = $true", text)
+        self.assertIn("llama_use_prebuilt_ui = $true", text)
+        self.assertIn("tools\\ui\\ui.h", text)
+        self.assertIn("#define LLAMA_UI_HAS_ASSETS 1", text)
+        self.assertIn("Release build completed without embedded llama.cpp Web UI assets.", text)
+
     def test_cuda_architecture_override_is_optional_and_release_uses_upstream_multi_arch(self) -> None:
         build_text = BUILD_SCRIPT.read_text(encoding="utf-8")
         workflow_text = WORKFLOW.read_text(encoding="utf-8")

@@ -97,8 +97,8 @@ $cmakeArguments = @(
     '-DLLAMA_BUILD_TOOLS=ON',
     '-DLLAMA_BUILD_SERVER=ON',
     '-DLLAMA_BUILD_EXAMPLES=OFF',
-    '-DLLAMA_BUILD_UI=OFF',
-    '-DLLAMA_USE_PREBUILT_UI=OFF'
+    '-DLLAMA_BUILD_UI=ON',
+    '-DLLAMA_USE_PREBUILT_UI=ON'
 )
 
 if (-not [string]::IsNullOrWhiteSpace($Generator)) {
@@ -137,7 +137,8 @@ Write-Host '  LLAMA_CURL           : OFF'
 Write-Host '  LLAMA_BUILD_TESTS    : ON'
 Write-Host '  LLAMA_BUILD_TOOLS    : ON'
 Write-Host '  LLAMA_BUILD_SERVER   : ON'
-Write-Host '  LLAMA_BUILD_UI       : OFF'
+Write-Host '  LLAMA_BUILD_UI       : ON'
+Write-Host '  LLAMA_USE_PREBUILT_UI: ON'
 
 Invoke-Native -Program 'cmake' -Arguments $cmakeArguments
 
@@ -175,6 +176,8 @@ $buildReceipt = [ordered]@{
     ggml_native = $false
     ggml_backend_dl = $true
     ggml_cpu_all_variants = $true
+    llama_build_ui = $true
+    llama_use_prebuilt_ui = $true
     cuda_architectures = $effectiveCudaArchitectures
     cuda_architecture_source = $cudaArchitectureSource
 }
@@ -194,6 +197,16 @@ if (-not $ConfigureOnly) {
         '--config', 'Release',
         '--parallel', $Parallel.ToString([Globalization.CultureInfo]::InvariantCulture)
     )
+
+    $uiHeaderPath = Join-Path $resolvedBuildDirectory 'tools\ui\ui.h'
+    if (-not (Test-Path -LiteralPath $uiHeaderPath -PathType Leaf)) {
+        throw "Embedded llama.cpp Web UI header was not generated: $uiHeaderPath"
+    }
+    $uiHeader = Get-Content -LiteralPath $uiHeaderPath -Raw
+    if (-not $uiHeader.Contains('#define LLAMA_UI_HAS_ASSETS 1')) {
+        throw 'Release build completed without embedded llama.cpp Web UI assets.'
+    }
+    Write-Host '  embedded Web UI      : verified'
 }
 
 Write-Host ('SILIANG_BUILD_DIRECTORY={0}' -f $resolvedBuildDirectory)
