@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing tag to package and release"
+        description: "Existing tag whose successful Siliang CI artifacts should be published"
         required: true
-        default: "v0.1.4"
+        default: "v0.1.5"
         type: string
 
 concurrency:
@@ -17,435 +17,10 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  package-windows:
-    name: Package Windows ${{ matrix.label }}
-    runs-on: windows-2022
-    timeout-minutes: 180
-
-    permissions:
-      contents: read
-
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - backend: Cpu
-            label: CPU
-            slug: cpu
-
-          - backend: Cuda
-            label: CUDA 13.2 multi-arch
-            slug: cuda-13.2
-
-    steps:
-      - name: Checkout release tag
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.tag || github.ref_name }}
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Verify release tag
-        shell: pwsh
-        run: |
-          $actual = (& git describe --tags --exact-match HEAD).Trim()
-
-          if ($actual -cne '${{ inputs.tag || github.ref_name }}') {
-              throw "Expected tag '${{ inputs.tag || github.ref_name }}', got '$actual'"
-          }
-
-          Write-Host "Packaging tag: $actual"
-          git log -1 --oneline
-
-      - name: Verify fork provenance
-        shell: pwsh
-        run: .\scripts\verify-snapshot.ps1
-
-      - name: Install CUDA Toolkit 13.2
-        if: matrix.backend == 'Cuda'
-        uses: Jimver/cuda-toolkit@3d45d157f327c09c04b50ee6ccdea2d9d017ec76
-        with:
-          cuda: '13.2.0'
-          use-github-cache: false
-          use-local-cache: false
-
-      - name: Build release
-        shell: pwsh
-        run: |
-          $buildDirectory = Join-Path `
-            $env:RUNNER_TEMP `
-            "siliang-release-${{ matrix.slug }}"
-
-          if ('${{ matrix.backend }}' -eq 'Cuda') {
-              .\scripts\build.ps1 `
-                -Backend Cuda `
-                -BuildDirectory $buildDirectory `
-                -Parallel 8
-          }
-          else {
-              .\scripts\build.ps1 `
-                -Backend Cpu `
-                -BuildDirectory $buildDirectory `
-                -Parallel 8
-          }
-
-          "SILIANG_RELEASE_BUILD=$buildDirectory" |
-            Out-File `
-              -FilePath $env:GITHUB_ENV `
-              -Append `
-              -Encoding utf8
-
-      - name: Assemble portable package
-        id: package
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          function Invoke-PackagedNative {
-              param(
-                  [Parameter(Mandatory = $true)][string]$FilePath,
-                  [string[]]$Arguments = @()
-              )
-
-              $startInfo = [Diagnostics.ProcessStartInfo]::new()
-              $startInfo.FileName = $FilePath
-              $startInfo.UseShellExecute = $false
-              $startInfo.RedirectStandardOutput = $true
-              $startInfo.RedirectStandardError = $true
-              foreach ($argument in $Arguments) {
-                  [void]$startInfo.ArgumentList.Add($argument)
-              }
-
-              $process = [Diagnostics.Process]::new()
-              $process.StartInfo = $startInfo
-              if (-not $process.Start()) {
-                  throw "Failed to start packaged executable: $FilePath"
-              }
-              $stdoutTask = $process.StandardOutput.ReadToEndAsync()
-              $stderrTask = $process.StandardError.ReadToEndAsync()
-              $process.WaitForExit()
-              $stdout = $stdoutTask.GetAwaiter().GetResult()
-              $stderr = $stderrTask.GetAwaiter().GetResult()
-              return [pscustomobject]@{
-                  ExitCode = $process.ExitCode
-                  Stdout = $stdout
-                  Stderr = $stderr
-                  Text = ($stdout + $stderr)
-              }
-          }
-
-          $tag = '${{ inputs.tag || github.ref_name }}'
-
-          if ($tag -notmatch '^v[0-9A-Za-z][0-9A-Za-z._-]*$') {
-              throw "Unsafe release tag: $tag"
-          }
-
-          $artifactName = "siliang-engine-$tag-windows-x64-${{ matrix.slug }}"
-
-          $packageRoot = Join-Path $env:RUNNER_TEMP $artifactName
-          $binTarget = Join-Path $packageRoot 'bin'
-          $docsTarget = Join-Path $packageRoot 'docs'
-          $releaseDocsTarget = Join-Path $docsTarget 'releases'
-          $licenseTarget = Join-Path $packageRoot 'licenses'
-          $provenanceTarget = Join-Path $packageRoot 'provenance'
-
-          New-Item `
-            -ItemType Directory `
-            -Path $binTarget, $docsTarget, $releaseDocsTarget, $licenseTarget, $provenanceTarget |
-            Out-Null
-
-          $binSource = Join-Path $env:SILIANG_RELEASE_BUILD 'bin\Release'
-
-          foreach ($fileName in @(
-              'llama-server.exe',
-              'llama-cli.exe'
-          )) {
-              $source = Join-Path $binSource $fileName
-
-              if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
-                  throw "Expected binary not found: $source"
-              }
-
-              Copy-Item $source $binTarget
-          }
-
-          Get-ChildItem `
-            -LiteralPath $binSource `
-            -Filter '*.dll' `
-            -File |
-            ForEach-Object {
-                Copy-Item $_.FullName $binTarget
-            }
-
-          # OpenSSL runtime used by the Windows build
-          $cmakeCache = Join-Path `
-            $env:SILIANG_RELEASE_BUILD `
-            'CMakeCache.txt'
-
-          $opensslMatch = Select-String `
-            -LiteralPath $cmakeCache `
-            -Pattern '^OPENSSL_INCLUDE_DIR:PATH=(.+)$'
-
-          if ($opensslMatch.Count -ne 1) {
-              throw 'Could not resolve OpenSSL from CMakeCache.txt'
-          }
-
-          $opensslInclude = `
-            $opensslMatch.Matches[0].Groups[1].Value
-
-          $opensslRoot = Split-Path -Parent $opensslInclude
-          $opensslBin = Join-Path $opensslRoot 'bin'
-
-          foreach ($runtime in @(
-              'libssl-3-x64.dll',
-              'libcrypto-3-x64.dll'
-          )) {
-              $source = Join-Path $opensslBin $runtime
-
-              if (-not (Test-Path $source)) {
-                  throw "Missing OpenSSL runtime: $runtime"
-              }
-
-              Copy-Item $source $binTarget -Force
-          }
-
-          $opensslLicense = Get-ChildItem `
-            -LiteralPath $opensslRoot `
-            -File |
-            Where-Object {
-                $_.Name -imatch '^license(?:\.txt)?$'
-            } |
-            Select-Object -First 1
-
-          if ($opensslLicense) {
-              Copy-Item `
-                $opensslLicense.FullName `
-                (Join-Path $licenseTarget 'OPENSSL-Apache-2.0.txt')
-          }
-
-          # CUDA runtime
-          if ('${{ matrix.backend }}' -eq 'Cuda') {
-              $cudaRuntimeDirs = @(
-                  (Join-Path $env:CUDA_PATH 'bin\x64')
-                  (Join-Path $env:CUDA_PATH 'bin')
-                  (Join-Path $env:CUDA_PATH 'lib')
-              ) | Where-Object {
-                  Test-Path -LiteralPath $_ -PathType Container
-              }
-              
-              foreach ($pattern in @(
-                  'cudart64_*.dll',
-                  'cublas64_*.dll',
-                  'cublasLt64_*.dll'
-              )) {
-                  $runtime = $cudaRuntimeDirs |
-                      ForEach-Object {
-                          Get-ChildItem `
-                              -LiteralPath $_ `
-                              -Filter $pattern `
-                              -File `
-                              -ErrorAction SilentlyContinue
-                      } |
-                      Select-Object -First 1
-              
-                  if (-not $runtime) {
-                      throw "Missing CUDA runtime matching $pattern under $env:CUDA_PATH"
-                  }
-              
-                  Write-Host "Bundling CUDA runtime: $($runtime.FullName)"
-                  Copy-Item $runtime.FullName $binTarget -Force
-              }
-
-              foreach ($licenseName in @(
-                  'EULA.txt',
-                  'LICENSE'
-              )) {
-                  $cudaLicense = Join-Path `
-                    $env:CUDA_PATH `
-                    $licenseName
-
-                  if (Test-Path $cudaLicense) {
-                      Copy-Item `
-                        $cudaLicense `
-                        (Join-Path $licenseTarget "NVIDIA-CUDA-$licenseName")
-                  }
-              }
-          }
-
-          # Siliang documentation and licenses
-          Copy-Item `
-            '.\README.md', `
-            '.\THIRD_PARTY_NOTICES.md', `
-            '.\LICENSE' `
-            -Destination $packageRoot
-
-          if (Test-Path '.\licenses') {
-              Get-ChildItem '.\licenses' -File |
-                ForEach-Object {
-                    Copy-Item $_.FullName $licenseTarget
-                }
-          }
-
-          Copy-Item `
-            '.\vendor\cpp-httplib\LICENSE' `
-            (Join-Path $licenseTarget 'CPP-HTTPLIB-MIT.txt')
-
-          Copy-Item `
-            '.\docs\PROVENANCE.md', `
-            '.\docs\source-manifest.json', `
-            '.\patches\siliang-engine.patch' `
-            -Destination $provenanceTarget
-
-          $buildReceipt = Join-Path `
-            $env:SILIANG_RELEASE_BUILD `
-            'SILIANG-BUILD-CONFIG.json'
-
-          if (-not (Test-Path $buildReceipt)) {
-              throw 'SILIANG-BUILD-CONFIG.json was not generated'
-          }
-
-          Copy-Item $buildReceipt $provenanceTarget
-
-          Copy-Item `
-            '.\docs\CONFIGURATION.md' `
-            $docsTarget
-
-          $releaseNotesPath = ".\docs\releases\$tag.md"
-
-          if (-not (Test-Path -LiteralPath $releaseNotesPath -PathType Leaf)) {
-              throw "Release notes were not found: $releaseNotesPath"
-          }
-
-          Copy-Item -LiteralPath $releaseNotesPath -Destination $releaseDocsTarget
-
-          # Smoke test assembled package
-          Push-Location $binTarget
-
-          $oldPath = $env:PATH
-
-          try {
-              $env:PATH = `
-                "$binTarget;$env:SystemRoot\System32;$env:SystemRoot"
-
-              $requiredExpertCacheOptions = @(
-                  '--expert-cache'
-                  '--no-expert-cache'
-                  '--expert-cache-l2-mib'
-                  '--expert-cache-l2-policy'
-                  '--expert-cache-l1-k'
-                  '--expert-cache-exchange-r'
-                  '--expert-cache-elevator-p'
-                  '--expert-cache-l1-policy'
-                  '--expert-cache-roll'
-                  '--expert-cache-memory-report'
-                  '--no-expert-cache-memory-report'
-                  '--expert-cache-deferred-wait'
-                  '--no-expert-cache-deferred-wait'
-              )
-
-              foreach ($executableName in @('llama-server.exe', 'llama-cli.exe')) {
-                  $executablePath = Join-Path $binTarget $executableName
-                  $versionResult = Invoke-PackagedNative -FilePath $executablePath -Arguments @('--version')
-                  if ($versionResult.ExitCode -ne 0) {
-                      throw "$executableName --version failed from the assembled package with exit code $($versionResult.ExitCode)."
-                  }
-                  Write-Host $versionResult.Text.TrimEnd()
-
-                  $helpResult = Invoke-PackagedNative -FilePath $executablePath -Arguments @('--help')
-                  if ($helpResult.ExitCode -ne 0) {
-                      throw "$executableName --help failed from the assembled package with exit code $($helpResult.ExitCode)."
-                  }
-                  $helpText = $helpResult.Text
-
-                  foreach ($option in $requiredExpertCacheOptions) {
-                      $helpPattern = '(?m)(?<![A-Za-z0-9-])' + [regex]::Escape($option) + '(?![A-Za-z0-9-])'
-                      if (-not [regex]::IsMatch($helpText, $helpPattern)) {
-                          throw "$executableName --help does not contain $option."
-                      }
-                  }
-              }
-          }
-          finally {
-              $env:PATH = $oldPath
-              Pop-Location
-          }
-
-          $zipPath = Join-Path `
-            $env:RUNNER_TEMP `
-            "$artifactName.zip"
-
-          Compress-Archive `
-            -LiteralPath $packageRoot `
-            -DestinationPath $zipPath `
-            -CompressionLevel Optimal
-
-          $digest = (
-              Get-FileHash `
-                $zipPath `
-                -Algorithm SHA256
-          ).Hash.ToLowerInvariant()
-
-          Write-Host "$artifactName.zip"
-          Write-Host "SHA256: $digest"
-
-          "artifact_name=$artifactName" |
-            Out-File `
-              $env:GITHUB_OUTPUT `
-              -Append `
-              -Encoding utf8
-
-          "zip_path=$zipPath" |
-            Out-File `
-              $env:GITHUB_OUTPUT `
-              -Append `
-              -Encoding utf8
-
-      - name: Upload package artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ steps.package.outputs.artifact_name }}
-          path: ${{ steps.package.outputs.zip_path }}
-          if-no-files-found: error
-          retention-days: 30
-
-  checksums:
-    name: Create SHA256SUMS
-    needs: package-windows
-    runs-on: ubuntu-24.04
-
-    permissions:
-      contents: read
-
-    steps:
-      - name: Download packages
-        uses: actions/download-artifact@v4
-        with:
-          pattern: siliang-engine-${{ inputs.tag || github.ref_name }}-windows-x64-*
-          path: packages
-          merge-multiple: true
-
-      - name: Generate SHA256SUMS
-        run: |
-          cd packages
-
-          test "$(find . -maxdepth 1 -name '*.zip' | wc -l)" -eq 2
-
-          sha256sum *.zip | sort > SHA256SUMS
-
-          cat SHA256SUMS
-
-      - name: Upload SHA256SUMS
-        uses: actions/upload-artifact@v4
-        with:
-          name: siliang-engine-${{ inputs.tag || github.ref_name }}-SHA256SUMS
-          path: packages/SHA256SUMS
-          if-no-files-found: error
-          retention-days: 30
-
   release:
-    name: Create GitHub Release
-    needs: checksums
+    name: Publish verified CI artifacts
     runs-on: ubuntu-24.04
+    timeout-minutes: 90
 
     permissions:
       actions: read
@@ -457,35 +32,112 @@ jobs:
         with:
           ref: ${{ inputs.tag || github.ref_name }}
           fetch-depth: 0
+          persist-credentials: false
 
-      - name: Download release assets
+      - name: Verify release tag and fork provenance
+        shell: pwsh
+        run: |
+          $tag = '${{ inputs.tag || github.ref_name }}'
+          if ($tag -notmatch '^v[0-9A-Za-z][0-9A-Za-z._-]*$') {
+              throw "Unsafe release tag: $tag"
+          }
+
+          $actual = (& git describe --tags --exact-match HEAD).Trim()
+          if ($actual -cne $tag) {
+              throw "Expected tag '$tag', got '$actual'"
+          }
+
+          $releaseNotesPath = "./docs/releases/$tag.md"
+          if (-not (Test-Path -LiteralPath $releaseNotesPath -PathType Leaf)) {
+              throw "Release notes were not found: $releaseNotesPath"
+          }
+
+          ./scripts/verify-snapshot.ps1
+          Write-Host "Publishing artifacts for tag $actual at $((& git rev-parse HEAD).Trim())"
+
+      - name: Wait for matching Siliang CI tag run
+        id: ci
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_sha="$(git rev-parse HEAD)"
+          echo "Waiting for successful Siliang CI tag run at $release_sha."
+
+          for attempt in $(seq 1 240); do
+            state="$(gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yaml/runs" -f event=push -f head_sha="$release_sha" -f per_page=20 | jq -r --arg tag "$TAG" '.workflow_runs[] | select(.head_branch == $tag) | [.id, .status, (.conclusion // "")] | @tsv' | head -n 1)"
+
+            if [ -z "$state" ]; then
+              echo "Matching Siliang CI tag run is not visible yet (attempt $attempt)."
+              sleep 15
+              continue
+            fi
+
+            IFS=$'\t' read -r ci_run_id ci_status ci_conclusion <<< "$state"
+            echo "Siliang CI run $ci_run_id: status=$ci_status conclusion=${ci_conclusion:-pending}"
+
+            if [ "$ci_status" = "completed" ]; then
+              if [ "$ci_conclusion" != "success" ]; then
+                echo "Siliang CI for $TAG did not succeed; refusing to publish artifacts." >&2
+                exit 1
+              fi
+
+              echo "run_id=$ci_run_id" >> "$GITHUB_OUTPUT"
+              echo "release_sha=$release_sha" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            sleep 15
+          done
+
+          echo "Timed out waiting for the matching Siliang CI tag run." >&2
+          exit 1
+
+      - name: Download verified artifacts from matching CI run
         uses: actions/download-artifact@v4
         with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.ci.outputs.run_id }}
           pattern: siliang-engine-${{ inputs.tag || github.ref_name }}-*
           path: release-assets
           merge-multiple: true
 
-      - name: Inspect release assets
+      - name: Verify release artifact inventory and checksums
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        shell: bash
         run: |
-          ls -lah release-assets
+          set -euo pipefail
+          cd release-assets
+          ls -lah
 
-          test -f \
-            "release-assets/siliang-engine-${{ inputs.tag || github.ref_name }}-windows-x64-cpu.zip"
+          cpu_zip="siliang-engine-$TAG-windows-x64-cpu.zip"
+          cuda_zip="siliang-engine-$TAG-windows-x64-cuda-13.2.zip"
 
-          test -f \
-            "release-assets/siliang-engine-${{ inputs.tag || github.ref_name }}-windows-x64-cuda-13.2.zip"
+          test "$(find . -maxdepth 1 -name '*.zip' -type f | wc -l)" -eq 2
+          test -f "$cpu_zip"
+          test -f "$cuda_zip"
+          test -f "$cpu_zip.sha256"
+          test -f "$cuda_zip.sha256"
+          test -f SHA256SUMS
 
-          test -f \
-            "release-assets/SHA256SUMS"
+          sha256sum --check "$cpu_zip.sha256"
+          sha256sum --check "$cuda_zip.sha256"
+          sha256sum --check SHA256SUMS
 
-          test -f \
-            "docs/releases/${{ inputs.tag || github.ref_name }}.md"
+          test "$(grep -Ec '^[0-9a-f]{64}  siliang-engine-' SHA256SUMS)" -eq 2
+          echo "Verified CI-produced CPU/CUDA archives and SHA256SUMS."
 
-      - name: Create draft release
+      - name: Replace existing draft only
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag || github.ref_name }}
+        shell: bash
         run: |
+          set -euo pipefail
           if existing_draft="$(gh release view "$TAG" --json isDraft --jq '.isDraft' 2>/dev/null)"; then
             if [ "$existing_draft" != "true" ]; then
               echo "Release $TAG already exists and is not a draft; refusing to replace it." >&2
@@ -495,6 +147,14 @@ jobs:
             echo "Replacing existing draft release for $TAG."
             gh release delete "$TAG" --yes
           fi
+
+      - name: Publish prerelease from verified CI artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
           gh release create "$TAG" \
             "release-assets/siliang-engine-$TAG-windows-x64-cpu.zip" \
             "release-assets/siliang-engine-$TAG-windows-x64-cuda-13.2.zip" \
@@ -505,39 +165,5 @@ jobs:
             --prerelease \
             --draft
 
-      - name: Publish after matching tag CI succeeds
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ inputs.tag || github.ref_name }}
-        run: |
-          release_sha="$(git rev-parse HEAD)"
-          echo "Waiting for Siliang CI tag run at $release_sha."
-
-          for attempt in $(seq 1 120); do
-            state="$(gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yaml/runs" -f event=push -f head_sha="$release_sha" -f per_page=20 | jq -r --arg tag "$TAG" '.workflow_runs[] | select(.head_branch == $tag) | [.id, .status, (.conclusion // "")] | @tsv' | head -n 1)"
-
-            if [ -z "$state" ]; then
-              echo "Matching Siliang CI tag run is not visible yet (attempt $attempt)."
-              sleep 15
-              continue
-            fi
-
-            IFS=$'	' read -r ci_run_id ci_status ci_conclusion <<< "$state"
-            echo "Siliang CI run $ci_run_id: status=$ci_status conclusion=${ci_conclusion:-pending}"
-
-            if [ "$ci_status" = "completed" ]; then
-              if [ "$ci_conclusion" != "success" ]; then
-                echo "Siliang CI for $TAG did not succeed; leaving the GitHub release as a draft." >&2
-                exit 1
-              fi
-
-              gh release edit "$TAG" --draft=false --verify-tag
-              echo "Published Siliang Engine $TAG after successful tag CI."
-              exit 0
-            fi
-
-            sleep 15
-          done
-
-          echo "Timed out waiting for the matching Siliang CI tag run; leaving the release as a draft." >&2
-          exit 1
+          gh release edit "$TAG" --draft=false --verify-tag
+          echo "Published Siliang Engine $TAG from Siliang CI run ${{ steps.ci.outputs.run_id }} at ${{ steps.ci.outputs.release_sha }}."

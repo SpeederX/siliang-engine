@@ -16,25 +16,25 @@ class ReleasePackagingContractTests(unittest.TestCase):
     def test_release_packages_ship_cli_configuration_without_environment_helper(self) -> None:
         ci_text = WORKFLOW.read_text(encoding="utf-8")
         publish_text = PUBLISH_WORKFLOW.read_text(encoding="utf-8")
+        bs = chr(92)
 
-        self.assertIn('default: "v0.1.4"', publish_text)
+        self.assertIn('default: "v0.1.5"', publish_text)
         self.assertIn("      - 'v*'", publish_text)
         self.assertIn("inputs.tag || github.ref_name", publish_text)
-        for text in (ci_text, publish_text):
-            self.assertIn("'.\\docs\\CONFIGURATION.md'", text)
-            self.assertIn('$releaseNotesPath = ".\\docs\\releases\\$tag.md"', text)
-            self.assertIn("$releaseDocsTarget = Join-Path $docsTarget 'releases'", text)
-            self.assertIn("$releaseNotesPath -Destination $releaseDocsTarget", text)
-            self.assertNotIn("siliang-" + "env.ps1", text)
-            self.assertIn("llama-cli.exe", text)
-            self.assertIn("llama-server.exe", text)
-            self.assertIn("$requiredExpertCacheOptions", text)
-            self.assertIn("--expert-cache-l2-mib", text)
-            self.assertIn("--expert-cache-exchange-r", text)
-            self.assertIn("--expert-cache-roll", text)
-            self.assertIn("--expert-cache-memory-report", text)
-            self.assertIn("--expert-cache-deferred-wait", text)
-            self.assertIn("[regex]::IsMatch($helpText, $helpPattern)", text)
+        self.assertIn(f"'.{bs}docs{bs}CONFIGURATION.md'", ci_text)
+        self.assertIn(f'$releaseNotesPath = ".{bs}docs{bs}releases{bs}$tag.md"', ci_text)
+        self.assertIn("$releaseDocsTarget = Join-Path $docsTarget 'releases'", ci_text)
+        self.assertIn("$releaseNotesPath -Destination $releaseDocsTarget", ci_text)
+        self.assertNotIn("siliang-" + "env.ps1", ci_text)
+        self.assertIn("llama-cli.exe", ci_text)
+        self.assertIn("llama-server.exe", ci_text)
+        self.assertIn("$requiredExpertCacheOptions", ci_text)
+        self.assertIn("--expert-cache-l2-mib", ci_text)
+        self.assertIn("--expert-cache-exchange-r", ci_text)
+        self.assertIn("--expert-cache-roll", ci_text)
+        self.assertIn("--expert-cache-memory-report", ci_text)
+        self.assertIn("--expert-cache-deferred-wait", ci_text)
+        self.assertIn("[regex]::IsMatch($helpText, $helpPattern)", ci_text)
 
     def test_build_uses_portable_runtime_selected_cpu_variants(self) -> None:
         text = BUILD_SCRIPT.read_text(encoding="utf-8")
@@ -174,16 +174,21 @@ class ReleasePackagingContractTests(unittest.TestCase):
             list_devices.index("exit(0);")
         )
 
-    def test_publish_workflow_uses_native_process_capture_for_package_smoke(self) -> None:
+    def test_publish_workflow_reuses_ci_artifacts_instead_of_rebuilding(self) -> None:
         text = PUBLISH_WORKFLOW.read_text(encoding="utf-8")
 
-        self.assertIn("function Invoke-PackagedNative", text)
-        self.assertIn("[Diagnostics.ProcessStartInfo]::new()", text)
-        self.assertIn("RedirectStandardOutput = $true", text)
-        self.assertIn("RedirectStandardError = $true", text)
-        self.assertIn("$versionResult = Invoke-PackagedNative", text)
-        self.assertIn("$helpResult = Invoke-PackagedNative", text)
-        self.assertNotIn("$helpText = @(&", text)
+        self.assertNotIn("package-windows:", text)
+        self.assertNotIn("Install CUDA Toolkit", text)
+        self.assertNotIn("scripts\build.ps1", text)
+        self.assertNotIn("function Invoke-PackagedNative", text)
+        self.assertIn("actions/download-artifact@v4", text)
+        self.assertIn("run-id: ${{ steps.ci.outputs.run_id }}", text)
+        self.assertIn("github-token: ${{ github.token }}", text)
+        self.assertIn("merge-multiple: true", text)
+        self.assertIn('$releaseNotesPath = "./docs/releases/$tag.md"', text)
+        self.assertIn("sha256sum --check SHA256SUMS", text)
+        self.assertIn('sha256sum --check "$cpu_zip.sha256"', text)
+        self.assertIn('sha256sum --check "$cuda_zip.sha256"', text)
 
     def test_publish_workflow_replaces_only_existing_draft_release(self) -> None:
         text = PUBLISH_WORKFLOW.read_text(encoding="utf-8")
@@ -195,7 +200,7 @@ class ReleasePackagingContractTests(unittest.TestCase):
         self.assertNotIn('--cleanup-tag', text)
         self.assertLess(text.index('gh release delete "$TAG" --yes'), text.index('gh release create "$TAG"'))
 
-    def test_publish_workflow_publishes_only_after_matching_tag_ci_succeeds(self) -> None:
+    def test_publish_workflow_publishes_only_ci_artifacts_from_matching_tag_sha(self) -> None:
         text = PUBLISH_WORKFLOW.read_text(encoding="utf-8")
 
         self.assertIn("actions: read", text)
@@ -205,9 +210,11 @@ class ReleasePackagingContractTests(unittest.TestCase):
         self.assertIn('jq -r --arg tag "$TAG"', text)
         self.assertIn('select(.head_branch == $tag)', text)
         self.assertIn('if [ "$ci_conclusion" != "success" ]; then', text)
-        self.assertIn("leaving the GitHub release as a draft", text)
+        self.assertIn('echo "run_id=$ci_run_id" >> "$GITHUB_OUTPUT"', text)
+        self.assertIn("run-id: ${{ steps.ci.outputs.run_id }}", text)
+        self.assertLess(text.index("Wait for matching Siliang CI tag run"), text.index("Download verified artifacts from matching CI run"))
+        self.assertLess(text.index("Download verified artifacts from matching CI run"), text.index("Publish prerelease from verified CI artifacts"))
         self.assertIn('gh release edit "$TAG" --draft=false --verify-tag', text)
-        self.assertLess(text.index('gh release create "$TAG"'), text.index('gh release edit "$TAG" --draft=false --verify-tag'))
 
     def test_cuda_package_requires_exact_runtime_set_and_loads_it_isolated(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
