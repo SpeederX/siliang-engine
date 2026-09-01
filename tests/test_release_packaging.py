@@ -185,6 +185,16 @@ class ReleasePackagingContractTests(unittest.TestCase):
         self.assertIn("$helpResult = Invoke-PackagedNative", text)
         self.assertNotIn("$helpText = @(&", text)
 
+    def test_publish_workflow_replaces_only_existing_draft_release(self) -> None:
+        text = PUBLISH_WORKFLOW.read_text(encoding="utf-8")
+
+        self.assertIn("gh release view \"$TAG\" --json isDraft --jq '.isDraft'", text)
+        self.assertIn('if [ "$existing_draft" != "true" ]; then', text)
+        self.assertIn("already exists and is not a draft; refusing to replace it", text)
+        self.assertIn('gh release delete "$TAG" --yes', text)
+        self.assertNotIn('--cleanup-tag', text)
+        self.assertLess(text.index('gh release delete "$TAG" --yes'), text.index('gh release create "$TAG"'))
+
     def test_cuda_package_requires_exact_runtime_set_and_loads_it_isolated(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
 

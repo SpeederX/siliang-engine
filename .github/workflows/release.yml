@@ -485,6 +485,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag || github.ref_name }}
         run: |
+          if existing_draft="$(gh release view "$TAG" --json isDraft --jq '.isDraft' 2>/dev/null)"; then
+            if [ "$existing_draft" != "true" ]; then
+              echo "Release $TAG already exists and is not a draft; refusing to replace it." >&2
+              exit 1
+            fi
+
+            echo "Replacing existing draft release for $TAG."
+            gh release delete "$TAG" --yes
+          fi
           gh release create "$TAG" \
             "release-assets/siliang-engine-$TAG-windows-x64-cpu.zip" \
             "release-assets/siliang-engine-$TAG-windows-x64-cuda-13.2.zip" \
