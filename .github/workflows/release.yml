@@ -34,7 +34,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Verify release tag and fork provenance
+      - name: Verify exact release tag
         shell: pwsh
         run: |
           $tag = '${{ inputs.tag || github.ref_name }}'
@@ -42,9 +42,13 @@ jobs:
               throw "Unsafe release tag: $tag"
           }
 
-          $actual = (& git describe --tags --exact-match HEAD).Trim()
-          if ($actual -cne $tag) {
-              throw "Expected tag '$tag', got '$actual'"
+          $headSha = (& git rev-parse HEAD).Trim()
+          $tagSha = (& git rev-parse "$tag^{commit}" 2>$null).Trim()
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($tagSha)) {
+              throw "Release tag '$tag' cannot be resolved to a commit in the checkout."
+          }
+          if ($tagSha -cne $headSha) {
+              throw "Release tag '$tag' resolves to $tagSha, but checkout HEAD is $headSha."
           }
 
           $releaseNotesPath = "./docs/releases/$tag.md"
@@ -52,8 +56,12 @@ jobs:
               throw "Release notes were not found: $releaseNotesPath"
           }
 
+          Write-Host "Verified exact release tag $tag at $headSha"
+
+      - name: Verify fork provenance
+        shell: pwsh
+        run: |
           ./scripts/verify-snapshot.ps1
-          Write-Host "Publishing artifacts for tag $actual at $((& git rev-parse HEAD).Trim())"
 
       - name: Wait for matching Siliang CI tag run
         id: ci
