@@ -14,12 +14,12 @@
   "source": {
     "canonicalPatch": {
       "path": "patches/siliang-engine.patch",
-      "sha256": "C85906670F4896B365FE8A74C1A9C520C81E2B8870AB7DD246EFED0CDA84ED8C",
-      "gitBlob": "982d19a4eb45ee168ff4d5a6fc463445aab150eb"
+      "sha256": "98413ABA53FCD432DE6EB05E0E2D25791F7C26DBBB6888529FFAD2C65B5F4AF1",
+      "gitBlob": "9690f097d6af1c93207f1d7ba151f2b9184a6f5b"
     },
     "engineDelta": {
-      "insertions": 10663,
-      "deletions": 24,
+      "insertions": 10899,
+      "deletions": 29,
       "files": [
         {
           "path": "common/arg.cpp",
@@ -34,8 +34,8 @@
           "status": "modified",
           "mode": "100644",
           "baseBlob": "d9ce5755161edc853dbcf629819ee75971ba413d",
-          "finalBlob": "702a52c5e1cf0603862c294fe56d82a040de2098",
-          "previousBlob": "1ffabac36f8c0382bc284104391fd7f00cbf5106"
+          "finalBlob": "3c25ea9519bca36bffdca6f3ce1230bcce112a38",
+          "previousBlob": "702a52c5e1cf0603862c294fe56d82a040de2098"
         },
         {
           "path": "common/common.h",
@@ -56,7 +56,8 @@
           "status": "modified",
           "mode": "100644",
           "baseBlob": "2924fdbe9884df40abf505fd89d277f5281a835b",
-          "finalBlob": "d04327dbc6ca76b1831ccd1fd8571a107e4982a9"
+          "finalBlob": "1b45c1ad7cd9618936aaebc243b82e8b48a09b84",
+          "previousBlob": "d04327dbc6ca76b1831ccd1fd8571a107e4982a9"
         },
         {
           "path": "ggml/include/ggml-cpu.h",
@@ -78,7 +79,8 @@
           "status": "modified",
           "mode": "100644",
           "baseBlob": "f6fb91798ca484fd1298d7012be3ae8d73cb0ea4",
-          "finalBlob": "4e3d46d30679d3097395409f0382bcd3ddaea2a3"
+          "finalBlob": "f075d0274d7944bb96967f42b8453e1d80e58ec0",
+          "previousBlob": "4e3d46d30679d3097395409f0382bcd3ddaea2a3"
         },
         {
           "path": "ggml/src/ggml-cpu/ggml-cpu-impl.h",
@@ -92,8 +94,8 @@
           "status": "modified",
           "mode": "100644",
           "baseBlob": "491316f7491252248d6f74a60440d3efa7aa6177",
-          "finalBlob": "83518e829c9f9a72a606514cef178260d3f73a37",
-          "previousBlob": "e09fa142ae1a1c188a34bcf420606383fb9921b8"
+          "finalBlob": "ae7c8a129a9f5dc7cd5c16b175261f665ee5e5a8",
+          "previousBlob": "83518e829c9f9a72a606514cef178260d3f73a37"
         },
         {
           "path": "ggml/src/ggml-cpu/ggml-cpu.cpp",
@@ -107,7 +109,8 @@
           "status": "added",
           "mode": "100644",
           "baseBlob": null,
-          "finalBlob": "f0d97e499332959d836ec8d97aa4f63f13b5629d"
+          "finalBlob": "fe88c90c6583eeb1a67f018e04f53c57123bc8ea",
+          "previousBlob": "f0d97e499332959d836ec8d97aa4f63f13b5629d"
         },
         {
           "path": "ggml/src/ggml-cuda/ggml-cuda.cu",
@@ -171,14 +174,24 @@
           "status": "modified",
           "mode": "100644",
           "baseBlob": "b31e92e2da7ef42eabbb47173bb1f2088c952f39",
-          "finalBlob": "709db618f656f22e02fbcea1101db185341a8afb"
+          "finalBlob": "630aa17427d80a56559813d67e3d97d25d9a76b9",
+          "previousBlob": "709db618f656f22e02fbcea1101db185341a8afb"
         },
         {
           "path": "src/llama-model-loader.h",
           "status": "modified",
           "mode": "100644",
           "baseBlob": "d6b31c2311186608f48e88d1a37c23adc7e1b0c7",
-          "finalBlob": "aa1772d1377724450c2f3b9b3013e771607f8c3f"
+          "finalBlob": "fec9ae9ee9550f8a7cb930f9a0334aa3c5c157be",
+          "previousBlob": "aa1772d1377724450c2f3b9b3013e771607f8c3f"
+        },
+        {
+          "path": "src/llama-model.cpp",
+          "status": "modified",
+          "mode": "100644",
+          "baseBlob": "dda311c47bbf64c0333c2c48b23f16bf24153e42",
+          "finalBlob": "1626b09eb0b0c618303c5fe8d583c3b015c7bae0",
+          "previousBlob": "dda311c47bbf64c0333c2c48b23f16bf24153e42"
         },
         {
           "path": "src/llama-model.h",
@@ -228,8 +241,8 @@
           "status": "added",
           "mode": "100644",
           "baseBlob": null,
-          "finalBlob": "6cf14959d265c2f97b7ed3846d057bffcead8944",
-          "previousBlob": "fff1b5a60f4f59a044b0e82c99ed2b98e1b6c14a"
+          "finalBlob": "ab97163e047107215dedbcfa9989d7a97e81b27e",
+          "previousBlob": "6cf14959d265c2f97b7ed3846d057bffcead8944"
         },
         {
           "path": "src/siliang-moe-runtime.h",

@@ -2274,18 +2274,25 @@ static void ggml_compute_forward_mul_mat_id(
             continue;
         }
 
-        const char * src0_cur = (const char *) src0->data + cur_a * nb02;
+        const char * src0_cur = NULL;
 #if defined(_WIN32)
-        // The only behavioural hook: serve this expert from the managed cache
-        // when it is resident there. Identical bytes, different residence.
-        // NULL means "not ours" (no slab, not an expert tensor, layout
-        // mismatch, or a read that failed) and the mmap pointer above stands.
-        {
-            const char * cached = siliangem_state
-                    ? siliangem_ptr(src0->name, cur_a, (size_t) nb02, ith) : NULL;
-            if (cached) src0_cur = cached;
+        const int managed_only = ggml_backend_buffer_is_siliang_managed(src0->buffer);
+        // Managed-only tensors have no model-resident weight bytes. SiliangEM
+        // must provide every active expert; a miss or read failure is a
+        // correctness failure, never permission to dereference the proxy.
+        const char * cached = siliangem_state
+                ? siliangem_ptr(src0->name, cur_a, (size_t) nb02, ith, managed_only) : NULL;
+        if (cached) {
+            src0_cur = cached;
+        } else if (managed_only) {
+            GGML_ABORT(
+                "Siliang managed expert source unavailable for tensor %s expert %d; refusing model-backing fallback\n",
+                src0->name, cur_a);
         }
 #endif
+        if (src0_cur == NULL) {
+            src0_cur = (const char *) src0->data + cur_a * nb02;
+        }
         const void * wdata = (src1->type == vec_dot_type) ? src1->data : params->wdata;
         const size_t row_size = ggml_row_size(vec_dot_type, ne10);
 

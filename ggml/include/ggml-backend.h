@@ -441,6 +441,13 @@ extern "C" {
     GGML_API ggml_backend_buffer_t      ggml_backend_cpu_buffer_from_ptr(void * ptr, size_t size);
     GGML_API ggml_backend_buffer_type_t ggml_backend_cpu_buffer_type(void);
 
+    // Siliang managed-source proxy. The buffer reserves virtual address space
+    // but owns no weight bytes; callers must never materialize or read it.
+    // It exists so managed routed-expert tensors retain exact GGML geometry
+    // while SiliangEM is the only runtime source of their weight bytes.
+    GGML_API ggml_backend_buffer_type_t ggml_backend_cpu_siliang_managed_buffer_type(void);
+    GGML_API bool ggml_backend_buffer_is_siliang_managed(ggml_backend_buffer_t buffer);
+
 #ifdef  __cplusplus
 }
 #endif

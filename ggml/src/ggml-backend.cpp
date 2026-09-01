@@ -2419,6 +2419,111 @@ ggml_backend_buffer_type_t ggml_backend_cpu_buffer_type(void) {
     return &ggml_backend_cpu_buffer_type;
 }
 
+static void ggml_backend_cpu_siliang_managed_forbidden(const char * operation) {
+    GGML_ABORT("Siliang managed-source proxy does not contain weight bytes; forbidden operation: %s\n", operation);
+}
+
+static void ggml_backend_cpu_siliang_managed_free_buffer(ggml_backend_buffer_t buffer) {
+    GGML_ASSERT(buffer);
+#ifdef _WIN32
+    if (buffer->context != nullptr && !VirtualFree(buffer->context, 0, MEM_RELEASE)) {
+        GGML_LOG_WARN("Siliang managed-source proxy VirtualFree failed: %lu\n", GetLastError());
+    }
+#else
+    GGML_UNUSED(buffer);
+#endif
+}
+
+static void ggml_backend_cpu_siliang_managed_memset_tensor(
+        ggml_backend_buffer_t buffer, struct ggml_tensor * tensor,
+        uint8_t value, size_t offset, size_t size) {
+    GGML_UNUSED(buffer); GGML_UNUSED(tensor); GGML_UNUSED(value); GGML_UNUSED(offset); GGML_UNUSED(size);
+    ggml_backend_cpu_siliang_managed_forbidden("memset_tensor");
+}
+
+static void ggml_backend_cpu_siliang_managed_set_tensor(
+        ggml_backend_buffer_t buffer, struct ggml_tensor * tensor,
+        const void * data, size_t offset, size_t size) {
+    GGML_UNUSED(buffer); GGML_UNUSED(tensor); GGML_UNUSED(data); GGML_UNUSED(offset); GGML_UNUSED(size);
+    ggml_backend_cpu_siliang_managed_forbidden("set_tensor");
+}
+
+static void ggml_backend_cpu_siliang_managed_get_tensor(
+        ggml_backend_buffer_t buffer, const struct ggml_tensor * tensor,
+        void * data, size_t offset, size_t size) {
+    GGML_UNUSED(buffer); GGML_UNUSED(tensor); GGML_UNUSED(data); GGML_UNUSED(offset); GGML_UNUSED(size);
+    ggml_backend_cpu_siliang_managed_forbidden("get_tensor");
+}
+
+static bool ggml_backend_cpu_siliang_managed_cpy_tensor(
+        ggml_backend_buffer_t buffer, const struct ggml_tensor * src, struct ggml_tensor * dst) {
+    GGML_UNUSED(buffer); GGML_UNUSED(src); GGML_UNUSED(dst);
+    ggml_backend_cpu_siliang_managed_forbidden("cpy_tensor");
+    return false;
+}
+
+static void ggml_backend_cpu_siliang_managed_clear(ggml_backend_buffer_t buffer, uint8_t value) {
+    GGML_UNUSED(buffer); GGML_UNUSED(value);
+    ggml_backend_cpu_siliang_managed_forbidden("clear");
+}
+
+static const struct ggml_backend_buffer_i ggml_backend_cpu_siliang_managed_buffer_i = {
+    /* .free_buffer     = */ ggml_backend_cpu_siliang_managed_free_buffer,
+    /* .get_base        = */ ggml_backend_cpu_buffer_get_base,
+    /* .init_tensor     = */ NULL,
+    /* .memset_tensor   = */ ggml_backend_cpu_siliang_managed_memset_tensor,
+    /* .set_tensor      = */ ggml_backend_cpu_siliang_managed_set_tensor,
+    /* .get_tensor      = */ ggml_backend_cpu_siliang_managed_get_tensor,
+    /* .set_tensor_2d   = */ NULL,
+    /* .get_tensor_2d   = */ NULL,
+    /* .cpy_tensor      = */ ggml_backend_cpu_siliang_managed_cpy_tensor,
+    /* .clear           = */ ggml_backend_cpu_siliang_managed_clear,
+    /* .reset           = */ NULL,
+};
+
+static const char * ggml_backend_cpu_siliang_managed_buffer_type_get_name(ggml_backend_buffer_type_t buft) {
+    GGML_UNUSED(buft);
+    return "CPU_SILIANG_MANAGED";
+}
+
+static ggml_backend_buffer_t ggml_backend_cpu_siliang_managed_buffer_type_alloc_buffer(
+        ggml_backend_buffer_type_t buft, size_t size) {
+#ifdef _WIN32
+    // Reserve the address span GGML requires for the strided tensor geometry,
+    // but commit no pages. Runtime weight bytes must come from SiliangEM.
+    void * base = VirtualAlloc(nullptr, size, MEM_RESERVE, PAGE_NOACCESS);
+    if (base == nullptr) {
+        GGML_LOG_ERROR("Siliang managed-source proxy failed to reserve %zu bytes (err %lu)\n", size, GetLastError());
+        return nullptr;
+    }
+    return ggml_backend_buffer_init(buft, ggml_backend_cpu_siliang_managed_buffer_i, base, size);
+#else
+    GGML_UNUSED(buft); GGML_UNUSED(size);
+    GGML_LOG_ERROR("Siliang managed-source proxy is currently Windows-only\n");
+    return nullptr;
+#endif
+}
+
+ggml_backend_buffer_type_t ggml_backend_cpu_siliang_managed_buffer_type(void) {
+    static struct ggml_backend_buffer_type buft = {
+        /* .iface   = */ {
+            /* .get_name         = */ ggml_backend_cpu_siliang_managed_buffer_type_get_name,
+            /* .alloc_buffer     = */ ggml_backend_cpu_siliang_managed_buffer_type_alloc_buffer,
+            /* .get_alignment    = */ ggml_backend_cpu_buffer_type_get_alignment,
+            /* .get_max_size     = */ NULL,
+            /* .get_alloc_size   = */ NULL,
+            /* .is_host          = */ ggml_backend_cpu_buffer_type_is_host,
+        },
+        /* .device  = */ NULL,
+        /* .context = */ NULL,
+    };
+    return &buft;
+}
+
+bool ggml_backend_buffer_is_siliang_managed(ggml_backend_buffer_t buffer) {
+    return buffer != nullptr && buffer->buft == ggml_backend_cpu_siliang_managed_buffer_type();
+}
+
 static const char * ggml_backend_cpu_buffer_from_ptr_type_get_name(ggml_backend_buffer_type_t buft) {
     return "CPU_Mapped";
 

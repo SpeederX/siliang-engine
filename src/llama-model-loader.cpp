@@ -813,25 +813,38 @@ llama_model_loader::llama_model_loader(
     }
 
     // ---- Siliang expert-major layout -------------------------------------
-    // Read after use_mmap is final, because this layout REQUIRES mmap: under
-    // mmap load_data_for() just assigns a pointer into the mapping, which is
-    // correct for a strided tensor. Without mmap, load_all_data() reads
-    // ggml_nbytes(cur) CONTIGUOUS bytes from the tensor's offset, which for a
-    // strided expert tensor is the wrong data -- and it would load and
-    // generate plausible wrong text rather than fail. So refuse instead.
+    // Ordinary host tensors require mmap because expert-major projection views
+    // are strided across the packed expert region. Siliang managed no-mmap is
+    // different: the tensors are metadata/proxy objects only and SiliangEM
+    // reads the actual expert bytes directly from the model file.
     {
         bool em = false;
         get_key("siliangem.expert_major", em, /*required=*/false);
+
+        bool managed_proxy_requested = false;
+        if (tensor_buft_overrides != nullptr) {
+            for (const auto * override = tensor_buft_overrides; override->pattern != nullptr; ++override) {
+                if (override->buft == ggml_backend_cpu_siliang_managed_buffer_type()) {
+                    managed_proxy_requested = true;
+                    break;
+                }
+            }
+        }
+        if (managed_proxy_requested && !em) {
+            throw std::runtime_error(
+                "Siliang managed no-mmap expert backing currently requires an expert-major GGUF");
+        }
+
         if (em) {
-            // no_alloc means a metadata-only probe (common_fit_params sizes the
-            // model before really loading it). That path never touches tensor
-            // data, so the mmap requirement does not apply and refusing there
-            // would block loading entirely.
-            if (!no_alloc && !this->use_mmap) {
+            expert_major_managed_only = !this->use_mmap && managed_proxy_requested;
+            // A normal no-mmap host tensor would read a contiguous byte range
+            // from an interleaved expert-major region and silently contain the
+            // wrong experts. The managed proxy is the only no-mmap exception:
+            // it materializes no expert bytes and makes SiliangEM mandatory.
+            if (!no_alloc && !this->use_mmap && !expert_major_managed_only) {
                 throw std::runtime_error(
-                    "this model uses the Siliang expert-major layout, which requires mmap; "
-                    "remove --no-mmap (loading it without mmap would read experts from the "
-                    "wrong offsets and silently produce wrong output)");
+                    "this model uses the Siliang expert-major layout; --no-mmap requires "
+                    "the managed expert-cache source path so routed experts are never materialized");
             }
             std::vector<uint32_t> strides, pbytes, pne0, pne1;
             std::vector<uint32_t> lidx, ptypes;
@@ -1574,6 +1587,35 @@ struct ggml_tensor * llama_model_loader::create_tensor(
         if (sscanf(ggml_get_name(tensor), "blk.%d.", &layer) == 1 &&
             strstr(ggml_get_name(tensor), "_exps.weight") != nullptr) {
             auto it = expert_stride.find(layer);
+            const bool managed_proxy = buft == ggml_backend_cpu_siliang_managed_buffer_type();
+            if (expert_major_managed_only) {
+                if (!managed_proxy || it == expert_stride.end()) {
+                    throw std::runtime_error(format(
+                        "%s: expert-major no-mmap tensor escaped the managed-source proxy",
+                        ggml_get_name(tensor)));
+                }
+                const uint64_t file_stride = it->second;
+                if (file_stride == 0 || file_stride < (uint64_t) tensor->nb[2]) {
+                    throw std::runtime_error(format(
+                        "%s: invalid managed expert-major file stride %" PRIu64,
+                        ggml_get_name(tensor), file_stride));
+                }
+                // Unlike an mmap view, this tensor is never used to address
+                // file bytes. Keep the ordinary contiguous GGML nb[] so the
+                // proxy reserves only the logical projection size. The real
+                // expert-major file stride lives in siliang_expert_source.
+                const size_t span = ggml_nbytes(&t_meta);
+                const size_t real = ggml_nbytes(tensor);
+                GGML_ASSERT(span >= real);
+                em_span_excess += span - real;
+                em_managed_only.insert(tensor);
+                return tensor;
+            }
+            if (managed_proxy) {
+                throw std::runtime_error(format(
+                    "%s: managed-source proxy is valid only for expert-major --no-mmap loading",
+                    ggml_get_name(tensor)));
+            }
             if (it != expert_stride.end() && !ggml_backend_buft_is_host(buft)) {
                 // Contiguous nb[] survives; remember that this tensor's bytes
                 // still have to come out of a STRIDED region of the file.
@@ -1843,6 +1885,23 @@ bool llama_model_loader::load_all_data(
         }
 
         size_t n_size = ggml_nbytes(cur);
+        const bool managed_only = em_managed_only.count(cur) > 0;
+        if (managed_only) {
+            if (!ggml_backend_buffer_is_siliang_managed(cur->buffer)) {
+                throw std::runtime_error(format(
+                    "%s: managed expert tensor lost its proxy buffer", ggml_get_name(cur)));
+            }
+            if (check_tensors) {
+                throw std::runtime_error(
+                    "--check-tensors is not yet supported with Siliang managed no-mmap expert backing");
+            }
+            if (!em_managed_log_emitted) {
+                LLAMA_LOG_INFO("%s: Siliang managed-source proxy active; routed expert tensor bytes are not materialized\n", __func__);
+                em_managed_log_emitted = true;
+            }
+            size_done += n_size;
+            continue;
+        }
 
         if (use_mmap) {
             const auto & mapping = mappings.at(weight->idx);

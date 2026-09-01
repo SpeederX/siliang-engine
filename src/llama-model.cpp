@@ -1642,8 +1642,13 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
     // print memory requirements per buffer type
     for (auto & [_, bufs] : pimpl->ctxs_bufs) {
         for (auto & buf: bufs) {
-            LLAMA_LOG_INFO("%s: %12s model buffer size = %8.2f MiB\n",
-                __func__, ggml_backend_buffer_name(buf.get()), ggml_backend_buffer_get_size(buf.get()) / 1024.0 / 1024.0);
+            if (ggml_backend_buffer_is_siliang_managed(buf.get())) {
+                LLAMA_LOG_INFO("%s: %12s proxy VA reserve = %8.2f MiB, committed = 0 MiB\n",
+                    __func__, ggml_backend_buffer_name(buf.get()), ggml_backend_buffer_get_size(buf.get()) / 1024.0 / 1024.0);
+            } else {
+                LLAMA_LOG_INFO("%s: %12s model buffer size = %8.2f MiB\n",
+                    __func__, ggml_backend_buffer_name(buf.get()), ggml_backend_buffer_get_size(buf.get()) / 1024.0 / 1024.0);
+            }
         }
     }
 
@@ -1726,8 +1731,12 @@ std::map<ggml_backend_buffer_type_t, size_t> llama_model::memory_breakdown() con
             ret[buft] += ggml_backend_alloc_ctx_tensors_from_buft_size(ctx.get(), buft);
         } else {
             for (const auto & buf : bufs) {
-                // GGML_ASSERT(ggml_backend_buffer_get_base(buf.get()) != nullptr); // multi_buffer does not have a defined base
-                ret[ggml_backend_buffer_get_type(buf.get())] += ggml_backend_buffer_get_size(buf.get());
+                // Managed-source proxies reserve address space only and own no
+                // committed model bytes, so they do not enter memory fitting.
+                if (!ggml_backend_buffer_is_siliang_managed(buf.get())) {
+                    // GGML_ASSERT(ggml_backend_buffer_get_base(buf.get()) != nullptr); // multi_buffer does not have a defined base
+                    ret[ggml_backend_buffer_get_type(buf.get())] += ggml_backend_buffer_get_size(buf.get());
+                }
             }
         }
     }

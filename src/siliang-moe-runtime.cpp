@@ -1701,6 +1701,10 @@ struct siliang_moe_runtime {
                     return fail(SILIANG_RUNTIME_FAILURE_L2, "L2 cached part copy failed");
                 }
             } else {
+                if (ggml_backend_buffer_is_siliang_managed(part.source->buffer)) {
+                    return fail(SILIANG_RUNTIME_FAILURE_L2,
+                        "managed expert source cannot fall back to model-resident bytes");
+                }
                 const auto * source = static_cast<const uint8_t *>(part.source->data) +
                     static_cast<size_t>(expert) * part.source_stride;
                 std::memcpy(destination, source, part.bytes);

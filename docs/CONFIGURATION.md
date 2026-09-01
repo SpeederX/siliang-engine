@@ -62,6 +62,30 @@ routed layer after schema-bank partitioning. Unsupported capacities fail closed.
 This does not make prefill a performance-qualified preset for every supported
 model; it only removes the DeepSeek-only implementation constraint.
 
+## Managed no-mmap expert backing (v0.1.6 experimental)
+
+On Windows, a monolithic expert-major GGUF can use `--load-mode none` together
+with `--expert-cache` and a nonzero L2. Routed expert **weight** tensors then use
+a `CPU_SILIANG_MANAGED` metadata/proxy buffer: it reserves only their logical
+virtual-address span, commits no weight pages, and the model loader does not
+materialize their bytes. SiliangEM direct GGUF I/O is the mandatory source for
+CPU execution and K staging; if it cannot serve a managed expert, the runtime
+fails closed instead of falling back to model-resident or mmap-backed bytes.
+Expert sidecars remain ordinary CPU tensors.
+
+This first step manages routed experts only. DeepSeek4 FRONT source tensors are
+still ordinary host-backed tensors; `--expert-cache-roll deepseek4` also keeps
+its separate populated FRONT host store. Consequently `--load-mode none` can
+reduce file-backed working-set residency while still increasing private commit
+relative to mmap until FRONT source ownership is migrated separately.
+
+Reference smoke on the RTX 2070 workstation: L2-only managed no-mmap and the
+matched mmap path produced the same output hash; fresh-load working set was
+3.81 GiB vs 10.18 GiB, while private memory was 12.41 GiB vs 11.56 GiB. With
+K256/R12/P12, double-bank FRONT, `-ub 512`, and bounded prefill, a separate
+965-token managed no-mmap prompt completed at 25.02 tok/s. These are
+architecture/correctness receipts, not general performance guarantees.
+
 ## DeepSeek4 v0.1.3 profile
 
 The release profile uses the smaller 8 GiB managed L2 together with K216/R12/P12
@@ -92,15 +116,14 @@ it is not required for normal use.
 
 ### FRONT determinism gate
 
-Release qualification found that the earlier asynchronous single-bank FRONT
-overwrite could change greedy output across fresh starts. The underlying DS4
-model was deterministic with `--no-expert-cache`, and both L2-only and
-K216/L2/R/P were deterministic when FRONT was disabled. The release candidate
-therefore fences each FRONT overwrite behind completion of preceding CUDA
-consumers. With that fence, three fresh 64-token starts produced an identical
-token hash at 1.936-1.983 tok/s.
-
-A 2,048-token release gate is recorded in the v0.1.3 release notes once complete.
+The earlier asynchronous single-bank FRONT overwrite could change greedy output
+across fresh starts. v0.1.4 closed that race with a full CUDA-backend fence but
+that fence serialized prompt processing. v0.1.5 replaces it with two FRONT
+banks and device-side all-stream completion events: layer N+2 reuses N's bank
+only after every CUDA consumer has completed, without a per-layer host-wide
+backend synchronize. Three fresh 64-token starts produced the same token hash,
+and the bounded K256/`-ub 512` prompt smoke reached 24.90 tok/s over 1,101
+prompt tokens.
 
 ### Historical DS4 capacity observations
 

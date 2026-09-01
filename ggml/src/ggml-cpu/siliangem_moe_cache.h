@@ -1946,9 +1946,10 @@ static void siliangem_wait(void) {
     g_siliangem.wait_ns += (uint64_t)(siliangem_now_ns() - t_start);
 }
 
-/* Pointer to expert `a`'s slice of `name`, or NULL to use the mmap pointer.
+/* Pointer to expert `a`'s slice of `name`. NULL permits ordinary model-backing
+ * fallback, but managed-only callers treat NULL as a correctness failure.
  * Read-only and called from every worker thread after the barrier. */
-static const char *siliangem_ptr(const char *name, int a, size_t stride, int ith) {
+static const char *siliangem_ptr(const char *name, int a, size_t stride, int ith, int managed_only) {
     if (!g_siliangem.ready) return NULL;
     int layer, part;
     if (!siliangem_parse_name(name, &layer, &part)) return NULL;
@@ -1962,15 +1963,14 @@ static const char *siliangem_ptr(const char *name, int a, size_t stride, int ith
         if (part >= g_siliangem.em_nparts) return NULL;
         /* What nb[2] means depends on where the geometry came from:
          *
-         *   expert-major   the loader SET nb[2] to the whole expert stride,
-         *                  because gate|up|down are one packed region
-         *   stock GGUF     nb[2] is the tensor's own per-PART stride, since
-         *                  gate/up/down are three separate tensors
+         *   expert-major mmap  loader SET nb[2] to the whole expert stride
+         *   managed no-mmap    proxy keeps logical per-PART contiguous stride
+         *   stock GGUF         nb[2] is the tensor's own per-PART stride
          *
          * Comparing a stock tensor's per-part stride with a packed whole-expert
          * stride fails, and siliangem_ptr returning NULL is silent: every expert can
          * fall back to mmap while the arena still pays to fetch. */
-        const uint32_t want = g_siliangem.em_scattered
+        const uint32_t want = (managed_only || g_siliangem.em_scattered)
                             ? g_siliangem.em_pbytes[layer * g_siliangem.em_nparts + part]
                             : g_siliangem.em_stride[layer];
         if (stride != (size_t) want) return NULL;

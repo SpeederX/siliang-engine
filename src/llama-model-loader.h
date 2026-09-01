@@ -110,8 +110,11 @@ struct llama_model_loader {
     // derived assuming contiguity. This map supplies the true expert stride
     // per layer; create_tensor() writes it into nb[2].
     bool expert_major = false;
+    bool expert_major_managed_only = false;
     std::map<int, uint64_t> expert_stride;   // layer -> bytes between experts
     llama_siliang_expert_source siliang_expert_source;
+    std::set<const struct ggml_tensor *> em_managed_only;
+    bool em_managed_log_emitted = false;
 
     // ---- expert-major on a DEVICE buffer ---------------------------------
     // The interleaving exists to make a DISK read contiguous, and only the

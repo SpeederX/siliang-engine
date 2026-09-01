@@ -114,7 +114,8 @@ class StockArenaSourceContractTests(unittest.TestCase):
         self.assertIn("if (g_src.enabled && ith == 0 && !g_src_layer_substituted[layer])", CACHE_SOURCE)
         self.assertIn("g_src_layers_substituted++;", CACHE_SOURCE)
         self.assertIn("return cached;", CACHE_SOURCE)
-        self.assertIn("siliangem_ptr(src0->name, cur_a, (size_t) nb02, ith)", CPU_SOURCE)
+        self.assertIn("siliangem_ptr(src0->name, cur_a, (size_t) nb02, ith, managed_only)", CPU_SOURCE)
+        self.assertIn("managed_only || g_siliangem.em_scattered", CACHE_SOURCE)
 
 
 if __name__ == "__main__":

@@ -71,6 +71,7 @@ ENGINE_DELTA_FILES = (
     "src/llama-graph.h",
     "src/llama-model-loader.cpp",
     "src/llama-model-loader.h",
+    "src/llama-model.cpp",
     "src/llama-model.h",
     "src/llama.cpp",
     "src/models/deepseek4.cpp",

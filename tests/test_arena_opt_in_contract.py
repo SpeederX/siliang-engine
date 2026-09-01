@@ -17,6 +17,11 @@ LLAMA_CPARAMS = (REPOSITORY_ROOT / "src/llama-cparams.h").read_text(encoding="ut
 LLAMA_GRAPH = (REPOSITORY_ROOT / "src/llama-graph.cpp").read_text(encoding="utf-8")
 LLAMA_CONTEXT = (REPOSITORY_ROOT / "src/llama-context.cpp").read_text(encoding="utf-8")
 MOE_RUNTIME = (REPOSITORY_ROOT / "src/siliang-moe-runtime.cpp").read_text(encoding="utf-8")
+BACKEND_HEADER = (REPOSITORY_ROOT / "ggml/include/ggml-backend.h").read_text(encoding="utf-8")
+BACKEND_SOURCE = (REPOSITORY_ROOT / "ggml/src/ggml-backend.cpp").read_text(encoding="utf-8")
+CPU_SOURCE = (REPOSITORY_ROOT / "ggml/src/ggml-cpu/ggml-cpu.c").read_text(encoding="utf-8")
+MODEL_LOADER = (REPOSITORY_ROOT / "src/llama-model-loader.cpp").read_text(encoding="utf-8")
+MODEL_SOURCE = (REPOSITORY_ROOT / "src/llama-model.cpp").read_text(encoding="utf-8")
 CLI_HELP_DOC = (REPOSITORY_ROOT / "tools/cli/README.md").read_text(encoding="utf-8")
 SERVER_HELP_DOC = (REPOSITORY_ROOT / "tools/server/README.md").read_text(encoding="utf-8")
 SERVER_SOURCE = (REPOSITORY_ROOT / "tools/server/server-context.cpp").read_text(encoding="utf-8")
@@ -58,6 +63,38 @@ class ArenaOptInContractTests(unittest.TestCase):
         self.assertIn("cuda.all_streams_event_record(cuda_backend, use_done[bank])", use_done)
         self.assertIn("ggml_backend_cuda_siliang_all_streams_event_record", cuda_header)
         self.assertNotIn("ggml_backend_synchronize(cuda_backend);", issue)
+
+    def test_no_mmap_managed_experts_have_no_model_backing_fallback(self) -> None:
+        reserve = function_body(
+            BACKEND_SOURCE,
+            "static ggml_backend_buffer_t ggml_backend_cpu_siliang_managed_buffer_type_alloc_buffer("
+        )
+        self.assertIn("ggml_backend_cpu_siliang_managed_buffer_type", BACKEND_HEADER)
+        self.assertIn("ggml_backend_buffer_is_siliang_managed", BACKEND_HEADER)
+        self.assertIn("MEM_RESERVE", reserve)
+        self.assertIn("PAGE_NOACCESS", reserve)
+        self.assertNotIn("MEM_COMMIT", reserve)
+
+        self.assertIn("managed_expert_source", COMMON_SOURCE)
+        self.assertIn("params.load_mode == LLAMA_LOAD_MODE_NONE", COMMON_SOURCE)
+        self.assertIn("params.expert_cache.l2_mib > 0", COMMON_SOURCE)
+        self.assertIn("managed_override_patterns", COMMON_SOURCE)
+        self.assertIn("routed-expert sidecar CPU", COMMON_SOURCE)
+        self.assertIn("CPU_SILIANG_MANAGED", BACKEND_SOURCE)
+
+        self.assertIn("expert_major_managed_only", MODEL_LOADER)
+        self.assertIn("em_managed_only", MODEL_LOADER)
+        self.assertIn("routed expert tensor bytes are not materialized", MODEL_LOADER)
+        self.assertIn("managed expert tensor lost its proxy buffer", MODEL_LOADER)
+
+        self.assertIn("const int managed_only = ggml_backend_buffer_is_siliang_managed", CPU_SOURCE)
+        self.assertIn("refusing model-backing fallback", CPU_SOURCE)
+        self.assertIn("if (src0_cur == NULL)", CPU_SOURCE)
+        self.assertIn("managed_only || g_siliangem.em_scattered", CACHE_SOURCE)
+        self.assertIn("managed expert source cannot fall back to model-resident bytes", MOE_RUNTIME)
+        self.assertIn("proxy reserves only the logical projection size", MODEL_LOADER)
+        self.assertIn("proxy VA reserve", MODEL_SOURCE)
+        self.assertIn("committed = 0 MiB", MODEL_SOURCE)
 
     def test_public_cpu_api_uses_typed_configuration(self) -> None:
         self.assertIn("struct ggml_siliangem_cache_config", CPU_HEADER)

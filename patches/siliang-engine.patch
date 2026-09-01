@@ -295,7 +295,7 @@ index 86af0ba10a327283f2500f0bb8e48095df547017..6cbfc21a81c449b46cfa3456f4003016
          }
      ));
 diff --git a/common/common.cpp b/common/common.cpp
-index d9ce5755161edc853dbcf629819ee75971ba413d..702a52c5e1cf0603862c294fe56d82a040de2098 100644
+index d9ce5755161edc853dbcf629819ee75971ba413d..3c25ea9519bca36bffdca6f3ce1230bcce112a38 100644
 --- a/common/common.cpp
 +++ b/common/common.cpp
 @@ -9,6 +9,7 @@
@@ -306,7 +306,15 @@ index d9ce5755161edc853dbcf629819ee75971ba413d..702a52c5e1cf0603862c294fe56d82a0
  
  #include <algorithm>
  #include <cinttypes>
-@@ -1216,6 +1217,65 @@ static void common_init_sampler_from_model(
+@@ -22,6 +23,7 @@
+ #include <fstream>
+ #include <iostream>
+ #include <iterator>
++#include <list>
+ #include <regex>
+ #include <sstream>
+ #include <string>
+@@ -1216,6 +1218,65 @@ static void common_init_sampler_from_model(
      get_float(llama_model_meta_key_str(LLAMA_MODEL_META_KEY_SAMPLING_MIROSTAT_ETA),    sparams.mirostat_eta,    common_params_sampling_config::COMMON_PARAMS_SAMPLING_CONFIG_MIROSTAT_ETA);
  }
  
@@ -372,7 +380,7 @@ index d9ce5755161edc853dbcf629819ee75971ba413d..702a52c5e1cf0603862c294fe56d82a0
  struct common_init_result::impl {
      impl() = default;
      ~impl() = default;
-@@ -1224,6 +1284,8 @@ struct common_init_result::impl {
+@@ -1224,6 +1285,8 @@ struct common_init_result::impl {
  
      llama_model_ptr   model;
      llama_context_ptr context;
@@ -381,13 +389,15 @@ index d9ce5755161edc853dbcf629819ee75971ba413d..702a52c5e1cf0603862c294fe56d82a0
  
      std::vector<llama_adapter_lora_ptr> lora;
  
-@@ -1233,6 +1295,32 @@ struct common_init_result::impl {
+@@ -1233,6 +1296,68 @@ struct common_init_result::impl {
  
  common_init_result::common_init_result(common_params & params, bool model_only) :
      pimpl(new impl{}) {
 +    static const char * const ds4_front_regex =
 +        "^blk\\.[0-9]+\\.(hc_attn_fn|hc_attn_scale|hc_attn_base|attn_norm|attn_q_a|attn_q_a_norm|attn_q_b|attn_kv|attn_kv_a_norm|attn_sinks|attn_compressor_ape|attn_compressor_gate|attn_compressor_kv|attn_compressor_norm|indexer\\.attn_q_b|indexer\\.proj|indexer_compressor_ape|indexer_compressor_gate|indexer_compressor_kv|indexer_compressor_norm)\\.weight$";
 +    const bool l1_enabled = !model_only && params.expert_cache.enabled && params.expert_cache.l1_k > 0;
++    const bool managed_expert_source = !model_only && params.expert_cache.enabled &&
++        params.expert_cache.l2_mib > 0 && params.load_mode == LLAMA_LOAD_MODE_NONE;
 +    if (l1_enabled && !params.lora_adapters.empty()) {
 +        COM_ERR("%s", "expert cache: L1 K/R/P does not support LoRA adapters\n");
 +        return;
@@ -396,12 +406,46 @@ index d9ce5755161edc853dbcf629819ee75971ba413d..702a52c5e1cf0603862c294fe56d82a0
 +        COM_WRN("%s", "expert cache: disabling automatic fit because the K+R arena is allocated after model load\n");
 +        params.fit_params = false;
 +    }
-+    if (l1_enabled) {
++    static const std::string managed_expert_regex =
++        std::string(R"(^blk\.[0-9]+)") + LLM_FFN_EXPS_REGEX + R"(\.weight$)";
++    if (managed_expert_source) {
++        static std::list<std::string> managed_override_patterns;
++        ggml_backend_buffer_type_t managed_buft = ggml_backend_cpu_siliang_managed_buffer_type();
++        for (auto & current : params.tensor_buft_overrides) {
++            if (!current.pattern) {
++                break;
++            }
++            const std::string current_pattern = current.pattern;
++            if (current.buft == ggml_backend_cpu_buffer_type() &&
++                current_pattern.find(LLM_FFN_EXPS_REGEX) != std::string::npos) {
++                if (current_pattern.find("weight") == std::string::npos) {
++                    managed_override_patterns.push_back(current_pattern + R"(\.weight$)");
++                    current.pattern = managed_override_patterns.back().c_str();
++                }
++                current.buft = managed_buft;
++            }
++        }
++    }
++
++    if (l1_enabled || managed_expert_source) {
++        const char * pattern = managed_expert_source ? managed_expert_regex.c_str() : LLM_FFN_EXPS_REGEX;
++        ggml_backend_buffer_type_t buft = managed_expert_source ?
++            ggml_backend_cpu_siliang_managed_buffer_type() : ggml_backend_cpu_buffer_type();
 +        if (!common_append_tensor_buft_override(
-+                params, LLM_FFN_EXPS_REGEX, ggml_backend_cpu_buffer_type(), "routed-expert CPU")) {
++                params, pattern, buft, managed_expert_source ? "managed routed-expert source" : "routed-expert CPU")) {
 +            return;
 +        }
-+        COM_INF("%s", "expert cache: routed-expert CPU placement rule prepared; runtime will validate effective placement\n");
++        if (managed_expert_source) {
++            // Keep scale/bias/other expert sidecars ordinary CPU tensors. The
++            // managed proxy is only for the large routed expert weight tensors.
++            if (!common_append_tensor_buft_override(
++                    params, LLM_FFN_EXPS_REGEX, ggml_backend_cpu_buffer_type(), "routed-expert sidecar CPU")) {
++                return;
++            }
++            COM_INF("%s", "expert cache: no-mmap managed routed-expert proxy prepared; GGUF/SiliangEM owns weight bytes\n");
++        } else {
++            COM_INF("%s", "expert cache: routed-expert CPU placement rule prepared; runtime will validate effective placement\n");
++        }
 +    }
 +    if (l1_enabled && params.expert_cache.roll == COMMON_EXPERT_CACHE_ROLL_DEEPSEEK4) {
 +        if (!common_append_tensor_buft_override(
@@ -414,7 +458,7 @@ index d9ce5755161edc853dbcf629819ee75971ba413d..702a52c5e1cf0603862c294fe56d82a0
      auto mparams = common_model_params_to_llama(params);
      auto cparams = common_context_params_to_llama(params);
  
-@@ -1334,6 +1422,39 @@ common_init_result::common_init_result(common_params & params, bool model_only)
+@@ -1334,6 +1459,39 @@ common_init_result::common_init_result(common_params & params, bool model_only)
      }
  
      pimpl->context.reset(lctx);
@@ -454,7 +498,7 @@ index d9ce5755161edc853dbcf629819ee75971ba413d..702a52c5e1cf0603862c294fe56d82a0
  }
  
  llama_model * common_init_result::model() {
-@@ -1344,6 +1465,16 @@ llama_context * common_init_result::context() {
+@@ -1344,6 +1502,16 @@ llama_context * common_init_result::context() {
      return pimpl->context.get();
  }
  
@@ -471,7 +515,7 @@ index d9ce5755161edc853dbcf629819ee75971ba413d..702a52c5e1cf0603862c294fe56d82a0
  common_sampler * common_init_result::sampler(llama_seq_id seq_id) {
      if (seq_id < 0 || seq_id >= (int) pimpl->samplers.size()) {
          return nullptr;
-@@ -1432,8 +1563,10 @@ common_init_result_ptr common_init_from_params(common_params & params, bool mode
+@@ -1432,8 +1600,10 @@ common_init_result_ptr common_init_from_params(common_params & params, bool mode
          }
      }
  
@@ -484,7 +528,7 @@ index d9ce5755161edc853dbcf629819ee75971ba413d..702a52c5e1cf0603862c294fe56d82a0
      }
  
      if (params.warmup) {
-@@ -1474,6 +1607,10 @@ common_init_result_ptr common_init_from_params(common_params & params, bool mode
+@@ -1474,6 +1644,10 @@ common_init_result_ptr common_init_from_params(common_params & params, bool mode
          res->reset_samplers();
      }
  
@@ -495,7 +539,7 @@ index d9ce5755161edc853dbcf629819ee75971ba413d..702a52c5e1cf0603862c294fe56d82a0
      return res;
  }
  
-@@ -1593,7 +1730,7 @@ void common_memory::seq_add(llama_seq_id seq_id, llama_pos p0, llama_pos p1, lla
+@@ -1593,7 +1767,7 @@ void common_memory::seq_add(llama_seq_id seq_id, llama_pos p0, llama_pos p1, lla
      }
  }
  
@@ -504,7 +548,7 @@ index d9ce5755161edc853dbcf629819ee75971ba413d..702a52c5e1cf0603862c294fe56d82a0
      std::vector<llama_adapter_lora *> loras;
      std::vector<float> scales;
  
-@@ -1602,7 +1739,7 @@ void common_set_adapter_lora(struct llama_context * ctx, std::vector<common_adap
+@@ -1602,7 +1776,7 @@ void common_set_adapter_lora(struct llama_context * ctx, std::vector<common_adap
          scales.push_back(la.scale);
      }
  
@@ -513,7 +557,7 @@ index d9ce5755161edc853dbcf629819ee75971ba413d..702a52c5e1cf0603862c294fe56d82a0
  }
  
  struct llama_model_params common_model_params_to_llama(common_params & params) {
-@@ -1646,6 +1783,20 @@ struct llama_model_params common_model_params_to_llama(common_params & params) {
+@@ -1646,6 +1820,20 @@ struct llama_model_params common_model_params_to_llama(common_params & params) {
  struct llama_context_params common_context_params_to_llama(const common_params & params) {
      auto cparams = llama_context_default_params();
  
@@ -534,7 +578,7 @@ index d9ce5755161edc853dbcf629819ee75971ba413d..702a52c5e1cf0603862c294fe56d82a0
      cparams.n_ctx             = params.n_ctx;
      cparams.n_seq_max         = params.n_parallel;
      cparams.n_rs_seq          = params.speculative.need_n_rs_seq();
-@@ -1675,6 +1826,22 @@ struct llama_context_params common_context_params_to_llama(const common_params &
+@@ -1675,6 +1863,22 @@ struct llama_context_params common_context_params_to_llama(const common_params &
      cparams.swa_full          = params.swa_full;
      cparams.kv_unified        = params.kv_unified;
  
@@ -662,7 +706,7 @@ index 70dc0ac3b1b74fdd5f08b470308786c3f12411e7..3f7c5f87559b224c038b86f958557abb
  }
  
 diff --git a/ggml/include/ggml-backend.h b/ggml/include/ggml-backend.h
-index 2924fdbe9884df40abf505fd89d277f5281a835b..d04327dbc6ca76b1831ccd1fd8571a107e4982a9 100644
+index 2924fdbe9884df40abf505fd89d277f5281a835b..1b45c1ad7cd9618936aaebc243b82e8b48a09b84 100644
 --- a/ggml/include/ggml-backend.h
 +++ b/ggml/include/ggml-backend.h
 @@ -313,6 +313,14 @@ extern "C" {
@@ -690,6 +734,20 @@ index 2924fdbe9884df40abf505fd89d277f5281a835b..d04327dbc6ca76b1831ccd1fd8571a10
      //
      // Meta backend
      //
+@@ -430,6 +441,13 @@ extern "C" {
+     GGML_API ggml_backend_buffer_t      ggml_backend_cpu_buffer_from_ptr(void * ptr, size_t size);
+     GGML_API ggml_backend_buffer_type_t ggml_backend_cpu_buffer_type(void);
+ 
++    // Siliang managed-source proxy. The buffer reserves virtual address space
++    // but owns no weight bytes; callers must never materialize or read it.
++    // It exists so managed routed-expert tensors retain exact GGML geometry
++    // while SiliangEM is the only runtime source of their weight bytes.
++    GGML_API ggml_backend_buffer_type_t ggml_backend_cpu_siliang_managed_buffer_type(void);
++    GGML_API bool ggml_backend_buffer_is_siliang_managed(ggml_backend_buffer_t buffer);
++
+ #ifdef  __cplusplus
+ }
+ #endif
 diff --git a/ggml/include/ggml-cpu.h b/ggml/include/ggml-cpu.h
 index dc6453c6eaa16667f720f987659ad42d03a403a2..8f1634660f907e8e2d52ad8c20c122e576544184 100644
 --- a/ggml/include/ggml-cpu.h
@@ -906,7 +964,7 @@ index 1cd81eeaebcdf4abcd46c87ba1a9a46e275aa12b..6c4776a86af28a6485d8cfb8b4242b20
  
  #ifdef  __cplusplus
 diff --git a/ggml/src/ggml-backend.cpp b/ggml/src/ggml-backend.cpp
-index f6fb91798ca484fd1298d7012be3ae8d73cb0ea4..4e3d46d30679d3097395409f0382bcd3ddaea2a3 100644
+index f6fb91798ca484fd1298d7012be3ae8d73cb0ea4..f075d0274d7944bb96967f42b8453e1d80e58ec0 100644
 --- a/ggml/src/ggml-backend.cpp
 +++ b/ggml/src/ggml-backend.cpp
 @@ -815,6 +815,9 @@ struct ggml_backend_sched {
@@ -947,6 +1005,118 @@ index f6fb91798ca484fd1298d7012be3ae8d73cb0ea4..4e3d46d30679d3097395409f0382bcd3
  int ggml_backend_sched_get_n_splits(ggml_backend_sched_t sched) {
      GGML_ASSERT(sched);
      return sched->n_splits;
+@@ -2402,6 +2419,111 @@ ggml_backend_buffer_type_t ggml_backend_cpu_buffer_type(void) {
+     return &ggml_backend_cpu_buffer_type;
+ }
+ 
++static void ggml_backend_cpu_siliang_managed_forbidden(const char * operation) {
++    GGML_ABORT("Siliang managed-source proxy does not contain weight bytes; forbidden operation: %s\n", operation);
++}
++
++static void ggml_backend_cpu_siliang_managed_free_buffer(ggml_backend_buffer_t buffer) {
++    GGML_ASSERT(buffer);
++#ifdef _WIN32
++    if (buffer->context != nullptr && !VirtualFree(buffer->context, 0, MEM_RELEASE)) {
++        GGML_LOG_WARN("Siliang managed-source proxy VirtualFree failed: %lu\n", GetLastError());
++    }
++#else
++    GGML_UNUSED(buffer);
++#endif
++}
++
++static void ggml_backend_cpu_siliang_managed_memset_tensor(
++        ggml_backend_buffer_t buffer, struct ggml_tensor * tensor,
++        uint8_t value, size_t offset, size_t size) {
++    GGML_UNUSED(buffer); GGML_UNUSED(tensor); GGML_UNUSED(value); GGML_UNUSED(offset); GGML_UNUSED(size);
++    ggml_backend_cpu_siliang_managed_forbidden("memset_tensor");
++}
++
++static void ggml_backend_cpu_siliang_managed_set_tensor(
++        ggml_backend_buffer_t buffer, struct ggml_tensor * tensor,
++        const void * data, size_t offset, size_t size) {
++    GGML_UNUSED(buffer); GGML_UNUSED(tensor); GGML_UNUSED(data); GGML_UNUSED(offset); GGML_UNUSED(size);
++    ggml_backend_cpu_siliang_managed_forbidden("set_tensor");
++}
++
++static void ggml_backend_cpu_siliang_managed_get_tensor(
++        ggml_backend_buffer_t buffer, const struct ggml_tensor * tensor,
++        void * data, size_t offset, size_t size) {
++    GGML_UNUSED(buffer); GGML_UNUSED(tensor); GGML_UNUSED(data); GGML_UNUSED(offset); GGML_UNUSED(size);
++    ggml_backend_cpu_siliang_managed_forbidden("get_tensor");
++}
++
++static bool ggml_backend_cpu_siliang_managed_cpy_tensor(
++        ggml_backend_buffer_t buffer, const struct ggml_tensor * src, struct ggml_tensor * dst) {
++    GGML_UNUSED(buffer); GGML_UNUSED(src); GGML_UNUSED(dst);
++    ggml_backend_cpu_siliang_managed_forbidden("cpy_tensor");
++    return false;
++}
++
++static void ggml_backend_cpu_siliang_managed_clear(ggml_backend_buffer_t buffer, uint8_t value) {
++    GGML_UNUSED(buffer); GGML_UNUSED(value);
++    ggml_backend_cpu_siliang_managed_forbidden("clear");
++}
++
++static const struct ggml_backend_buffer_i ggml_backend_cpu_siliang_managed_buffer_i = {
++    /* .free_buffer     = */ ggml_backend_cpu_siliang_managed_free_buffer,
++    /* .get_base        = */ ggml_backend_cpu_buffer_get_base,
++    /* .init_tensor     = */ NULL,
++    /* .memset_tensor   = */ ggml_backend_cpu_siliang_managed_memset_tensor,
++    /* .set_tensor      = */ ggml_backend_cpu_siliang_managed_set_tensor,
++    /* .get_tensor      = */ ggml_backend_cpu_siliang_managed_get_tensor,
++    /* .set_tensor_2d   = */ NULL,
++    /* .get_tensor_2d   = */ NULL,
++    /* .cpy_tensor      = */ ggml_backend_cpu_siliang_managed_cpy_tensor,
++    /* .clear           = */ ggml_backend_cpu_siliang_managed_clear,
++    /* .reset           = */ NULL,
++};
++
++static const char * ggml_backend_cpu_siliang_managed_buffer_type_get_name(ggml_backend_buffer_type_t buft) {
++    GGML_UNUSED(buft);
++    return "CPU_SILIANG_MANAGED";
++}
++
++static ggml_backend_buffer_t ggml_backend_cpu_siliang_managed_buffer_type_alloc_buffer(
++        ggml_backend_buffer_type_t buft, size_t size) {
++#ifdef _WIN32
++    // Reserve the address span GGML requires for the strided tensor geometry,
++    // but commit no pages. Runtime weight bytes must come from SiliangEM.
++    void * base = VirtualAlloc(nullptr, size, MEM_RESERVE, PAGE_NOACCESS);
++    if (base == nullptr) {
++        GGML_LOG_ERROR("Siliang managed-source proxy failed to reserve %zu bytes (err %lu)\n", size, GetLastError());
++        return nullptr;
++    }
++    return ggml_backend_buffer_init(buft, ggml_backend_cpu_siliang_managed_buffer_i, base, size);
++#else
++    GGML_UNUSED(buft); GGML_UNUSED(size);
++    GGML_LOG_ERROR("Siliang managed-source proxy is currently Windows-only\n");
++    return nullptr;
++#endif
++}
++
++ggml_backend_buffer_type_t ggml_backend_cpu_siliang_managed_buffer_type(void) {
++    static struct ggml_backend_buffer_type buft = {
++        /* .iface   = */ {
++            /* .get_name         = */ ggml_backend_cpu_siliang_managed_buffer_type_get_name,
++            /* .alloc_buffer     = */ ggml_backend_cpu_siliang_managed_buffer_type_alloc_buffer,
++            /* .get_alignment    = */ ggml_backend_cpu_buffer_type_get_alignment,
++            /* .get_max_size     = */ NULL,
++            /* .get_alloc_size   = */ NULL,
++            /* .is_host          = */ ggml_backend_cpu_buffer_type_is_host,
++        },
++        /* .device  = */ NULL,
++        /* .context = */ NULL,
++    };
++    return &buft;
++}
++
++bool ggml_backend_buffer_is_siliang_managed(ggml_backend_buffer_t buffer) {
++    return buffer != nullptr && buffer->buft == ggml_backend_cpu_siliang_managed_buffer_type();
++}
++
+ static const char * ggml_backend_cpu_buffer_from_ptr_type_get_name(ggml_backend_buffer_type_t buft) {
+     return "CPU_Mapped";
+ 
 diff --git a/ggml/src/ggml-cpu/ggml-cpu-impl.h b/ggml/src/ggml-cpu/ggml-cpu-impl.h
 index 5d1ca5ffcc368b9f0249d6cf6ccc4549bb9a3ab4..97a2a0b1b72df88a9af3cb6ab825ee4b474a40ae 100644
 --- a/ggml/src/ggml-cpu/ggml-cpu-impl.h
@@ -1005,7 +1175,7 @@ index 5d1ca5ffcc368b9f0249d6cf6ccc4549bb9a3ab4..97a2a0b1b72df88a9af3cb6ab825ee4b
  #if defined(_MSC_VER)
  
 diff --git a/ggml/src/ggml-cpu/ggml-cpu.c b/ggml/src/ggml-cpu/ggml-cpu.c
-index 491316f7491252248d6f74a60440d3efa7aa6177..83518e829c9f9a72a606514cef178260d3f73a37 100644
+index 491316f7491252248d6f74a60440d3efa7aa6177..ae7c8a129a9f5dc7cd5c16b175261f665ee5e5a8 100644
 --- a/ggml/src/ggml-cpu/ggml-cpu.c
 +++ b/ggml/src/ggml-cpu/ggml-cpu.c
 @@ -5,6 +5,7 @@
@@ -1588,7 +1758,7 @@ index 491316f7491252248d6f74a60440d3efa7aa6177..83518e829c9f9a72a606514cef178260
      const struct ggml_tensor * src0 = dst->src[0];
      const struct ggml_tensor * src1 = dst->src[1];
      const struct ggml_tensor * ids = dst->src[2];
-@@ -1644,14 +2206,86 @@ static void ggml_compute_forward_mul_mat_id(
+@@ -1644,14 +2206,93 @@ static void ggml_compute_forward_mul_mat_id(
  
      ggml_barrier(params->threadpool);
  
@@ -1661,22 +1831,30 @@ index 491316f7491252248d6f74a60440d3efa7aa6177..83518e829c9f9a72a606514cef178260
              continue;
          }
  
-         const char * src0_cur = (const char *) src0->data + cur_a * nb02;
+-        const char * src0_cur = (const char *) src0->data + cur_a * nb02;
++        const char * src0_cur = NULL;
 +#if defined(_WIN32)
-+        // The only behavioural hook: serve this expert from the managed cache
-+        // when it is resident there. Identical bytes, different residence.
-+        // NULL means "not ours" (no slab, not an expert tensor, layout
-+        // mismatch, or a read that failed) and the mmap pointer above stands.
-+        {
-+            const char * cached = siliangem_state
-+                    ? siliangem_ptr(src0->name, cur_a, (size_t) nb02, ith) : NULL;
-+            if (cached) src0_cur = cached;
++        const int managed_only = ggml_backend_buffer_is_siliang_managed(src0->buffer);
++        // Managed-only tensors have no model-resident weight bytes. SiliangEM
++        // must provide every active expert; a miss or read failure is a
++        // correctness failure, never permission to dereference the proxy.
++        const char * cached = siliangem_state
++                ? siliangem_ptr(src0->name, cur_a, (size_t) nb02, ith, managed_only) : NULL;
++        if (cached) {
++            src0_cur = cached;
++        } else if (managed_only) {
++            GGML_ABORT(
++                "Siliang managed expert source unavailable for tensor %s expert %d; refusing model-backing fallback\n",
++                src0->name, cur_a);
 +        }
 +#endif
++        if (src0_cur == NULL) {
++            src0_cur = (const char *) src0->data + cur_a * nb02;
++        }
          const void * wdata = (src1->type == vec_dot_type) ? src1->data : params->wdata;
          const size_t row_size = ggml_row_size(vec_dot_type, ne10);
  
-@@ -3076,6 +3710,7 @@ static thread_ret_t ggml_graph_compute_thread(void * data) {
+@@ -3076,6 +3717,7 @@ static thread_ret_t ggml_graph_compute_thread(void * data) {
          /*.wsize      =*/ cplan->work_size,
          /*.wdata      =*/ cplan->work_data,
          /*.threadpool =*/ tp,
@@ -1904,7 +2082,7 @@ index 16cc5116c5451787c6a1dd1988e38b761f20ef12..f39002fc95a5f793e2f2ed68187bfa8b
      if (strcmp(name, "ggml_threadpool_new") == 0) {
 diff --git a/ggml/src/ggml-cpu/siliangem_moe_cache.h b/ggml/src/ggml-cpu/siliangem_moe_cache.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..f0d97e499332959d836ec8d97aa4f63f13b5629d
+index 0000000000000000000000000000000000000000..fe88c90c6583eeb1a67f018e04f53c57123bc8ea
 --- /dev/null
 +++ b/ggml/src/ggml-cpu/siliangem_moe_cache.h
 @@ -0,0 +1,1996 @@
@@ -3856,9 +4034,10 @@ index 0000000000000000000000000000000000000000..f0d97e499332959d836ec8d97aa4f63f
 +    g_siliangem.wait_ns += (uint64_t)(siliangem_now_ns() - t_start);
 +}
 +
-+/* Pointer to expert `a`'s slice of `name`, or NULL to use the mmap pointer.
++/* Pointer to expert `a`'s slice of `name`. NULL permits ordinary model-backing
++ * fallback, but managed-only callers treat NULL as a correctness failure.
 + * Read-only and called from every worker thread after the barrier. */
-+static const char *siliangem_ptr(const char *name, int a, size_t stride, int ith) {
++static const char *siliangem_ptr(const char *name, int a, size_t stride, int ith, int managed_only) {
 +    if (!g_siliangem.ready) return NULL;
 +    int layer, part;
 +    if (!siliangem_parse_name(name, &layer, &part)) return NULL;
@@ -3872,15 +4051,14 @@ index 0000000000000000000000000000000000000000..f0d97e499332959d836ec8d97aa4f63f
 +        if (part >= g_siliangem.em_nparts) return NULL;
 +        /* What nb[2] means depends on where the geometry came from:
 +         *
-+         *   expert-major   the loader SET nb[2] to the whole expert stride,
-+         *                  because gate|up|down are one packed region
-+         *   stock GGUF     nb[2] is the tensor's own per-PART stride, since
-+         *                  gate/up/down are three separate tensors
++         *   expert-major mmap  loader SET nb[2] to the whole expert stride
++         *   managed no-mmap    proxy keeps logical per-PART contiguous stride
++         *   stock GGUF         nb[2] is the tensor's own per-PART stride
 +         *
 +         * Comparing a stock tensor's per-part stride with a packed whole-expert
 +         * stride fails, and siliangem_ptr returning NULL is silent: every expert can
 +         * fall back to mmap while the arena still pays to fetch. */
-+        const uint32_t want = g_siliangem.em_scattered
++        const uint32_t want = (managed_only || g_siliangem.em_scattered)
 +                            ? g_siliangem.em_pbytes[layer * g_siliangem.em_nparts + part]
 +                            : g_siliangem.em_stride[layer];
 +        if (stride != (size_t) want) return NULL;
@@ -6105,7 +6283,7 @@ index 32d8d395aa4546ed7e90e7d26d24218fcd37547a..08c5d6968e6fde56d207c6607fdc6834
              gtype == other.gtype &&
              cvec  == other.cvec  &&
 diff --git a/src/llama-model-loader.cpp b/src/llama-model-loader.cpp
-index b31e92e2da7ef42eabbb47173bb1f2088c952f39..709db618f656f22e02fbcea1101db185341a8afb 100644
+index b31e92e2da7ef42eabbb47173bb1f2088c952f39..630aa17427d80a56559813d67e3d97d25d9a76b9 100644
 --- a/src/llama-model-loader.cpp
 +++ b/src/llama-model-loader.cpp
 @@ -2,6 +2,7 @@
@@ -6116,30 +6294,43 @@ index b31e92e2da7ef42eabbb47173bb1f2088c952f39..709db618f656f22e02fbcea1101db185
  #include "gguf.h"
  #include "llama-hparams.h"
  #include "llama.h"
-@@ -811,6 +812,257 @@ llama_model_loader::llama_model_loader(
+@@ -811,6 +812,270 @@ llama_model_loader::llama_model_loader(
          this->use_mmap = false;
      }
  
 +    // ---- Siliang expert-major layout -------------------------------------
-+    // Read after use_mmap is final, because this layout REQUIRES mmap: under
-+    // mmap load_data_for() just assigns a pointer into the mapping, which is
-+    // correct for a strided tensor. Without mmap, load_all_data() reads
-+    // ggml_nbytes(cur) CONTIGUOUS bytes from the tensor's offset, which for a
-+    // strided expert tensor is the wrong data -- and it would load and
-+    // generate plausible wrong text rather than fail. So refuse instead.
++    // Ordinary host tensors require mmap because expert-major projection views
++    // are strided across the packed expert region. Siliang managed no-mmap is
++    // different: the tensors are metadata/proxy objects only and SiliangEM
++    // reads the actual expert bytes directly from the model file.
 +    {
 +        bool em = false;
 +        get_key("siliangem.expert_major", em, /*required=*/false);
++
++        bool managed_proxy_requested = false;
++        if (tensor_buft_overrides != nullptr) {
++            for (const auto * override = tensor_buft_overrides; override->pattern != nullptr; ++override) {
++                if (override->buft == ggml_backend_cpu_siliang_managed_buffer_type()) {
++                    managed_proxy_requested = true;
++                    break;
++                }
++            }
++        }
++        if (managed_proxy_requested && !em) {
++            throw std::runtime_error(
++                "Siliang managed no-mmap expert backing currently requires an expert-major GGUF");
++        }
++
 +        if (em) {
-+            // no_alloc means a metadata-only probe (common_fit_params sizes the
-+            // model before really loading it). That path never touches tensor
-+            // data, so the mmap requirement does not apply and refusing there
-+            // would block loading entirely.
-+            if (!no_alloc && !this->use_mmap) {
++            expert_major_managed_only = !this->use_mmap && managed_proxy_requested;
++            // A normal no-mmap host tensor would read a contiguous byte range
++            // from an interleaved expert-major region and silently contain the
++            // wrong experts. The managed proxy is the only no-mmap exception:
++            // it materializes no expert bytes and makes SiliangEM mandatory.
++            if (!no_alloc && !this->use_mmap && !expert_major_managed_only) {
 +                throw std::runtime_error(
-+                    "this model uses the Siliang expert-major layout, which requires mmap; "
-+                    "remove --no-mmap (loading it without mmap would read experts from the "
-+                    "wrong offsets and silently produce wrong output)");
++                    "this model uses the Siliang expert-major layout; --no-mmap requires "
++                    "the managed expert-cache source path so routed experts are never materialized");
 +            }
 +            std::vector<uint32_t> strides, pbytes, pne0, pne1;
 +            std::vector<uint32_t> lidx, ptypes;
@@ -6374,7 +6565,7 @@ index b31e92e2da7ef42eabbb47173bb1f2088c952f39..709db618f656f22e02fbcea1101db185
      this->check_tensors = check_tensors;
      this->no_alloc = no_alloc;
      this->load_mtp = load_mtp;
-@@ -1302,6 +1554,65 @@ struct ggml_tensor * llama_model_loader::create_tensor(
+@@ -1302,6 +1567,94 @@ struct ggml_tensor * llama_model_loader::create_tensor(
          n_created++;
      }
  
@@ -6398,6 +6589,35 @@ index b31e92e2da7ef42eabbb47173bb1f2088c952f39..709db618f656f22e02fbcea1101db185
 +        if (sscanf(ggml_get_name(tensor), "blk.%d.", &layer) == 1 &&
 +            strstr(ggml_get_name(tensor), "_exps.weight") != nullptr) {
 +            auto it = expert_stride.find(layer);
++            const bool managed_proxy = buft == ggml_backend_cpu_siliang_managed_buffer_type();
++            if (expert_major_managed_only) {
++                if (!managed_proxy || it == expert_stride.end()) {
++                    throw std::runtime_error(format(
++                        "%s: expert-major no-mmap tensor escaped the managed-source proxy",
++                        ggml_get_name(tensor)));
++                }
++                const uint64_t file_stride = it->second;
++                if (file_stride == 0 || file_stride < (uint64_t) tensor->nb[2]) {
++                    throw std::runtime_error(format(
++                        "%s: invalid managed expert-major file stride %" PRIu64,
++                        ggml_get_name(tensor), file_stride));
++                }
++                // Unlike an mmap view, this tensor is never used to address
++                // file bytes. Keep the ordinary contiguous GGML nb[] so the
++                // proxy reserves only the logical projection size. The real
++                // expert-major file stride lives in siliang_expert_source.
++                const size_t span = ggml_nbytes(&t_meta);
++                const size_t real = ggml_nbytes(tensor);
++                GGML_ASSERT(span >= real);
++                em_span_excess += span - real;
++                em_managed_only.insert(tensor);
++                return tensor;
++            }
++            if (managed_proxy) {
++                throw std::runtime_error(format(
++                    "%s: managed-source proxy is valid only for expert-major --no-mmap loading",
++                    ggml_get_name(tensor)));
++            }
 +            if (it != expert_stride.end() && !ggml_backend_buft_is_host(buft)) {
 +                // Contiguous nb[] survives; remember that this tensor's bytes
 +                // still have to come out of a STRIDED region of the file.
@@ -6440,7 +6660,7 @@ index b31e92e2da7ef42eabbb47173bb1f2088c952f39..709db618f656f22e02fbcea1101db185
      return tensor;
  }
  
-@@ -1354,6 +1665,13 @@ void llama_model_loader::init_mappings(bool prefetch, llama_mlocks * mlock_mmaps
+@@ -1354,6 +1707,13 @@ void llama_model_loader::init_mappings(bool prefetch, llama_mlocks * mlock_mmaps
      for (const auto & it : weights_map) {
          size_data += ggml_nbytes(it.second.tensor);
      }
@@ -6454,7 +6674,31 @@ index b31e92e2da7ef42eabbb47173bb1f2088c952f39..709db618f656f22e02fbcea1101db185
  }
  
  void llama_model_loader::get_mapping_range(size_t * first, size_t * last, void ** addr, int idx, ggml_context * ctx) const {
-@@ -1534,14 +1852,43 @@ bool llama_model_loader::load_all_data(
+@@ -1525,6 +1885,23 @@ bool llama_model_loader::load_all_data(
+         }
+ 
+         size_t n_size = ggml_nbytes(cur);
++        const bool managed_only = em_managed_only.count(cur) > 0;
++        if (managed_only) {
++            if (!ggml_backend_buffer_is_siliang_managed(cur->buffer)) {
++                throw std::runtime_error(format(
++                    "%s: managed expert tensor lost its proxy buffer", ggml_get_name(cur)));
++            }
++            if (check_tensors) {
++                throw std::runtime_error(
++                    "--check-tensors is not yet supported with Siliang managed no-mmap expert backing");
++            }
++            if (!em_managed_log_emitted) {
++                LLAMA_LOG_INFO("%s: Siliang managed-source proxy active; routed expert tensor bytes are not materialized\n", __func__);
++                em_managed_log_emitted = true;
++            }
++            size_done += n_size;
++            continue;
++        }
+ 
+         if (use_mmap) {
+             const auto & mapping = mappings.at(weight->idx);
+@@ -1534,14 +1911,43 @@ bool llama_model_loader::load_all_data(
              }
              uint8_t * data = (uint8_t *) mapping->addr() + weight->offs;
  
@@ -6501,7 +6745,7 @@ index b31e92e2da7ef42eabbb47173bb1f2088c952f39..709db618f656f22e02fbcea1101db185
                  ggml_backend_tensor_alloc(buf_mmap, cur, data);
                  if (lmlocks) {
                      const auto & lmlock = lmlocks->at(weight->idx);
-@@ -1551,6 +1898,10 @@ bool llama_model_loader::load_all_data(
+@@ -1551,6 +1957,10 @@ bool llama_model_loader::load_all_data(
                  auto & mmap_used = mmaps_used[weight->idx];
                  mmap_used.first  = std::min(mmap_used.first,  weight->offs);
                  mmap_used.second = std::max(mmap_used.second, weight->offs + n_size);
@@ -6513,7 +6757,7 @@ index b31e92e2da7ef42eabbb47173bb1f2088c952f39..709db618f656f22e02fbcea1101db185
                  ggml_backend_tensor_set(cur, data, 0, n_size);
              }
 diff --git a/src/llama-model-loader.h b/src/llama-model-loader.h
-index d6b31c2311186608f48e88d1a37c23adc7e1b0c7..aa1772d1377724450c2f3b9b3013e771607f8c3f 100644
+index d6b31c2311186608f48e88d1a37c23adc7e1b0c7..fec9ae9ee9550f8a7cb930f9a0334aa3c5c157be 100644
 --- a/src/llama-model-loader.h
 +++ b/src/llama-model-loader.h
 @@ -1,5 +1,7 @@
@@ -6547,7 +6791,7 @@ index d6b31c2311186608f48e88d1a37c23adc7e1b0c7..aa1772d1377724450c2f3b9b3013e771
          llama_tensor_weight(const llama_file * file, uint16_t idx, const struct gguf_context * gguf_ctx, ggml_tensor * tensor) : idx(idx), tensor(tensor) {
              const int tensor_idx = gguf_find_tensor(gguf_ctx,  ggml_get_name(tensor));
              if (tensor_idx < 0) {
-@@ -88,6 +99,42 @@ struct llama_model_loader {
+@@ -88,6 +99,45 @@ struct llama_model_loader {
  
      llama_mmaps mappings;
  
@@ -6562,8 +6806,11 @@ index d6b31c2311186608f48e88d1a37c23adc7e1b0c7..aa1772d1377724450c2f3b9b3013e771
 +    // derived assuming contiguity. This map supplies the true expert stride
 +    // per layer; create_tensor() writes it into nb[2].
 +    bool expert_major = false;
++    bool expert_major_managed_only = false;
 +    std::map<int, uint64_t> expert_stride;   // layer -> bytes between experts
 +    llama_siliang_expert_source siliang_expert_source;
++    std::set<const struct ggml_tensor *> em_managed_only;
++    bool em_managed_log_emitted = false;
 +
 +    // ---- expert-major on a DEVICE buffer ---------------------------------
 +    // The interleaving exists to make a DISK read contiguous, and only the
@@ -6590,6 +6837,41 @@ index d6b31c2311186608f48e88d1a37c23adc7e1b0c7..aa1772d1377724450c2f3b9b3013e771
      std::map<std::string, llama_tensor_weight, weight_name_comparer> weights_map;
      std::unordered_map<std::string, llama_model_kv_override> kv_overrides;
      const llama_model_tensor_buft_override * tensor_buft_overrides;
+diff --git a/src/llama-model.cpp b/src/llama-model.cpp
+index dda311c47bbf64c0333c2c48b23f16bf24153e42..1626b09eb0b0c618303c5fe8d583c3b015c7bae0 100644
+--- a/src/llama-model.cpp
++++ b/src/llama-model.cpp
+@@ -1642,8 +1642,13 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
+     // print memory requirements per buffer type
+     for (auto & [_, bufs] : pimpl->ctxs_bufs) {
+         for (auto & buf: bufs) {
+-            LLAMA_LOG_INFO("%s: %12s model buffer size = %8.2f MiB\n",
+-                __func__, ggml_backend_buffer_name(buf.get()), ggml_backend_buffer_get_size(buf.get()) / 1024.0 / 1024.0);
++            if (ggml_backend_buffer_is_siliang_managed(buf.get())) {
++                LLAMA_LOG_INFO("%s: %12s proxy VA reserve = %8.2f MiB, committed = 0 MiB\n",
++                    __func__, ggml_backend_buffer_name(buf.get()), ggml_backend_buffer_get_size(buf.get()) / 1024.0 / 1024.0);
++            } else {
++                LLAMA_LOG_INFO("%s: %12s model buffer size = %8.2f MiB\n",
++                    __func__, ggml_backend_buffer_name(buf.get()), ggml_backend_buffer_get_size(buf.get()) / 1024.0 / 1024.0);
++            }
+         }
+     }
+ 
+@@ -1726,8 +1731,12 @@ std::map<ggml_backend_buffer_type_t, size_t> llama_model::memory_breakdown() con
+             ret[buft] += ggml_backend_alloc_ctx_tensors_from_buft_size(ctx.get(), buft);
+         } else {
+             for (const auto & buf : bufs) {
+-                // GGML_ASSERT(ggml_backend_buffer_get_base(buf.get()) != nullptr); // multi_buffer does not have a defined base
+-                ret[ggml_backend_buffer_get_type(buf.get())] += ggml_backend_buffer_get_size(buf.get());
++                // Managed-source proxies reserve address space only and own no
++                // committed model bytes, so they do not enter memory fitting.
++                if (!ggml_backend_buffer_is_siliang_managed(buf.get())) {
++                    // GGML_ASSERT(ggml_backend_buffer_get_base(buf.get()) != nullptr); // multi_buffer does not have a defined base
++                    ret[ggml_backend_buffer_get_type(buf.get())] += ggml_backend_buffer_get_size(buf.get());
++                }
+             }
+         }
+     }
 diff --git a/src/llama-model.h b/src/llama-model.h
 index 6b9e94a0a6921745fd20f58aba38490480c36a38..f14b607ded2574b98290f9eb5e9237989e9313d6 100644
 --- a/src/llama-model.h
@@ -7776,10 +8058,10 @@ index 0000000000000000000000000000000000000000..01b630212a342f9eb0770985995098a0
 +};
 diff --git a/src/siliang-moe-runtime.cpp b/src/siliang-moe-runtime.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..6cf14959d265c2f97b7ed3846d057bffcead8944
+index 0000000000000000000000000000000000000000..ab97163e047107215dedbcfa9989d7a97e81b27e
 --- /dev/null
 +++ b/src/siliang-moe-runtime.cpp
-@@ -0,0 +1,2835 @@
+@@ -0,0 +1,2839 @@
 +#include "siliang-moe-runtime.h"
 +
 +#include "llama-impl.h"
@@ -9483,6 +9765,10 @@ index 0000000000000000000000000000000000000000..6cf14959d265c2f97b7ed3846d057bff
 +                    return fail(SILIANG_RUNTIME_FAILURE_L2, "L2 cached part copy failed");
 +                }
 +            } else {
++                if (ggml_backend_buffer_is_siliang_managed(part.source->buffer)) {
++                    return fail(SILIANG_RUNTIME_FAILURE_L2,
++                        "managed expert source cannot fall back to model-resident bytes");
++                }
 +                const auto * source = static_cast<const uint8_t *>(part.source->data) +
 +                    static_cast<size_t>(expert) * part.source_stride;
 +                std::memcpy(destination, source, part.bytes);
