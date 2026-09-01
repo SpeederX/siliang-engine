@@ -195,6 +195,20 @@ class ReleasePackagingContractTests(unittest.TestCase):
         self.assertNotIn('--cleanup-tag', text)
         self.assertLess(text.index('gh release delete "$TAG" --yes'), text.index('gh release create "$TAG"'))
 
+    def test_publish_workflow_publishes_only_after_matching_tag_ci_succeeds(self) -> None:
+        text = PUBLISH_WORKFLOW.read_text(encoding="utf-8")
+
+        self.assertIn("actions: read", text)
+        self.assertIn("actions/workflows/ci.yaml/runs", text)
+        self.assertIn('release_sha="$(git rev-parse HEAD)"', text)
+        self.assertIn('-f head_sha="$release_sha"', text)
+        self.assertIn('jq -r --arg tag "$TAG"', text)
+        self.assertIn('select(.head_branch == $tag)', text)
+        self.assertIn('if [ "$ci_conclusion" != "success" ]; then', text)
+        self.assertIn("leaving the GitHub release as a draft", text)
+        self.assertIn('gh release edit "$TAG" --draft=false --verify-tag', text)
+        self.assertLess(text.index('gh release create "$TAG"'), text.index('gh release edit "$TAG" --draft=false --verify-tag'))
+
     def test_cuda_package_requires_exact_runtime_set_and_loads_it_isolated(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
 

@@ -448,6 +448,7 @@ jobs:
     runs-on: ubuntu-24.04
 
     permissions:
+      actions: read
       contents: write
 
     steps:
@@ -503,3 +504,40 @@ jobs:
             --notes-file "docs/releases/$TAG.md" \
             --prerelease \
             --draft
+
+      - name: Publish after matching tag CI succeeds
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          release_sha="$(git rev-parse HEAD)"
+          echo "Waiting for Siliang CI tag run at $release_sha."
+
+          for attempt in $(seq 1 120); do
+            state="$(gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yaml/runs" -f event=push -f head_sha="$release_sha" -f per_page=20 | jq -r --arg tag "$TAG" '.workflow_runs[] | select(.head_branch == $tag) | [.id, .status, (.conclusion // "")] | @tsv' | head -n 1)"
+
+            if [ -z "$state" ]; then
+              echo "Matching Siliang CI tag run is not visible yet (attempt $attempt)."
+              sleep 15
+              continue
+            fi
+
+            IFS=$'	' read -r ci_run_id ci_status ci_conclusion <<< "$state"
+            echo "Siliang CI run $ci_run_id: status=$ci_status conclusion=${ci_conclusion:-pending}"
+
+            if [ "$ci_status" = "completed" ]; then
+              if [ "$ci_conclusion" != "success" ]; then
+                echo "Siliang CI for $TAG did not succeed; leaving the GitHub release as a draft." >&2
+                exit 1
+              fi
+
+              gh release edit "$TAG" --draft=false --verify-tag
+              echo "Published Siliang Engine $TAG after successful tag CI."
+              exit 0
+            fi
+
+            sleep 15
+          done
+
+          echo "Timed out waiting for the matching Siliang CI tag run; leaving the release as a draft." >&2
+          exit 1
