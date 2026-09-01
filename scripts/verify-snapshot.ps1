@@ -29,9 +29,9 @@ $expected = [ordered]@{
     upstreamTag = 'b10270'
     upstreamRootTree = '46f77bf060878e2b3b9d7c43b4d8a3a566ba3384'
     patchPath = 'patches/siliang-engine.patch'
-    patchSha256 = '98413ABA53FCD432DE6EB05E0E2D25791F7C26DBBB6888529FFAD2C65B5F4AF1'
-    patchGitBlob = '9690f097d6af1c93207f1d7ba151f2b9184a6f5b'
-    patchInsertions = 10899
+    patchSha256 = '4FB0DC53C831DBFD9869ABC3B4823D5CE66E35CDA15FE097336ECD469BD6EF0F'
+    patchGitBlob = '43e416ebf3d1f0d493b7d7572dae2954228e0037'
+    patchInsertions = 11075
     patchDeletions = 29
 }
 
@@ -58,7 +58,7 @@ function New-ExpectedEngineFile {
 
 $expectedFiles = @(
     New-ExpectedEngineFile 'common/arg.cpp' '86af0ba10a327283f2500f0bb8e48095df547017' '6cbfc21a81c449b46cfa3456f40030161765995b' '21881e865fd7f870b4f25c0cbeeb7b1e707df7dc'
-    New-ExpectedEngineFile 'common/common.cpp' 'd9ce5755161edc853dbcf629819ee75971ba413d' '3c25ea9519bca36bffdca6f3ce1230bcce112a38' '702a52c5e1cf0603862c294fe56d82a040de2098'
+    New-ExpectedEngineFile 'common/common.cpp' 'd9ce5755161edc853dbcf629819ee75971ba413d' '2a7248fff647e177c3b7e37d634178d078566724' '3c25ea9519bca36bffdca6f3ce1230bcce112a38'
     New-ExpectedEngineFile 'common/common.h' '3444aa157e9b73727ea2ca6107eb0dc9f9b36a74' '86bbf4a9c35e7abc35e0cd1521a6557d41602ca9'
     New-ExpectedEngineFile 'common/speculative.cpp' '70dc0ac3b1b74fdd5f08b470308786c3f12411e7' '3f7c5f87559b224c038b86f958557abbad2c13a4'
     New-ExpectedEngineFile 'ggml/include/ggml-backend.h' '2924fdbe9884df40abf505fd89d277f5281a835b' '1b45c1ad7cd9618936aaebc243b82e8b48a09b84' 'd04327dbc6ca76b1831ccd1fd8571a107e4982a9'
@@ -77,15 +77,15 @@ $expectedFiles = @(
     New-ExpectedEngineFile 'src/llama-cparams.h' '5018170ed85e3b82abad65e6a3c71859067c9f71' '2de4137861983ca96170eeb71b893ededb9dad29'
     New-ExpectedEngineFile 'src/llama-graph.cpp' '2be3b75fb9825ccc9aa08cda294f46d6422c61ea' '4258d05f5ff0f958dafdb621aeecd7d2530e1f48'
     New-ExpectedEngineFile 'src/llama-graph.h' '32d8d395aa4546ed7e90e7d26d24218fcd37547a' '08c5d6968e6fde56d207c6607fdc6834e97287ca'
-    New-ExpectedEngineFile 'src/llama-model-loader.cpp' 'b31e92e2da7ef42eabbb47173bb1f2088c952f39' '630aa17427d80a56559813d67e3d97d25d9a76b9' '709db618f656f22e02fbcea1101db185341a8afb'
-    New-ExpectedEngineFile 'src/llama-model-loader.h' 'd6b31c2311186608f48e88d1a37c23adc7e1b0c7' 'fec9ae9ee9550f8a7cb930f9a0334aa3c5c157be' 'aa1772d1377724450c2f3b9b3013e771607f8c3f'
+    New-ExpectedEngineFile 'src/llama-model-loader.cpp' 'b31e92e2da7ef42eabbb47173bb1f2088c952f39' '1f22894f6e1e99b42f89a878915a9d12b7fd6cd6' '630aa17427d80a56559813d67e3d97d25d9a76b9'
+    New-ExpectedEngineFile 'src/llama-model-loader.h' 'd6b31c2311186608f48e88d1a37c23adc7e1b0c7' 'f03513c4a7dde82fa69d38480592bf8a5dc48c35' 'fec9ae9ee9550f8a7cb930f9a0334aa3c5c157be'
     New-ExpectedEngineFile 'src/llama-model.cpp' 'dda311c47bbf64c0333c2c48b23f16bf24153e42' '1626b09eb0b0c618303c5fe8d583c3b015c7bae0' 'dda311c47bbf64c0333c2c48b23f16bf24153e42'
-    New-ExpectedEngineFile 'src/llama-model.h' '6b9e94a0a6921745fd20f58aba38490480c36a38' 'f14b607ded2574b98290f9eb5e9237989e9313d6'
-    New-ExpectedEngineFile 'src/llama.cpp' 'd6e0bbfefa729329fe6b83e46e603a85dab0f2e3' '3113ca8d1cacc2a8c42ef815e4aba9a6c22a88bb'
-    New-ExpectedEngineFile 'src/models/deepseek4.cpp' '89cd461765adfe8c32fa2e6c6b6d2e962de4b0ac' 'e0ae251cb500c5eb55d6b2c8b36a24a6f6005b84'
-    New-ExpectedEngineFile 'src/siliang-ds4-front-slab.cpp' $null '91d6640557077aa6c2f2afad77d8130df46f2ab9' '8068e77bc74bc1198b79c80deb50431551a03c32'
+    New-ExpectedEngineFile 'src/llama-model.h' '6b9e94a0a6921745fd20f58aba38490480c36a38' 'f10d49771cc26af6cb7d1856d84c4a8cd4653473' 'f14b607ded2574b98290f9eb5e9237989e9313d6'
+    New-ExpectedEngineFile 'src/llama.cpp' 'd6e0bbfefa729329fe6b83e46e603a85dab0f2e3' 'f86fb3124cf4e5f35b22098391af07cae3c3a9cc' '3113ca8d1cacc2a8c42ef815e4aba9a6c22a88bb'
+    New-ExpectedEngineFile 'src/models/deepseek4.cpp' '89cd461765adfe8c32fa2e6c6b6d2e962de4b0ac' '10d8f5ef0b34c9a989d11856ba9dcebddb59723c' 'e0ae251cb500c5eb55d6b2c8b36a24a6f6005b84'
+    New-ExpectedEngineFile 'src/siliang-ds4-front-slab.cpp' $null '6f9a6ad9aaf1afe20f5e29ed950489f8e5a03075' '91d6640557077aa6c2f2afad77d8130df46f2ab9'
     New-ExpectedEngineFile 'src/siliang-ds4-front-slab.h' $null 'a3c1052be580ed7ceecbd3d64d01350e439a5a74'
-    New-ExpectedEngineFile 'src/siliang-expert-source.h' $null '01b630212a342f9eb0770985995098a049734064'
+    New-ExpectedEngineFile 'src/siliang-expert-source.h' $null '72b1d213be6b1d40f687f040e8913e648aeaefd3' '01b630212a342f9eb0770985995098a049734064'
     New-ExpectedEngineFile 'src/siliang-moe-runtime.cpp' $null 'ab97163e047107215dedbcfa9989d7a97e81b27e' '6cf14959d265c2f97b7ed3846d057bffcead8944'
     New-ExpectedEngineFile 'src/siliang-moe-runtime.h' $null '5bf98bd7fdaa26a64c66f8c4231ea133d6136cf6'
     New-ExpectedEngineFile 'tests/CMakeLists.txt' '419e1eba4c2cdb465d20453004eeeca5af28037f' 'b66f6c8fa62a68fcc95194cf5d5689035056adc7'
@@ -93,7 +93,6 @@ $expectedFiles = @(
     New-ExpectedEngineFile 'tests/test-siliang-prefill.cpp' $null '7d740fe1e709cf8a7985ff418124a732c3f281c8'
     New-ExpectedEngineFile 'tools/server/server-context.cpp' '5d2798cc14e9295646bb8e570bbec166c9ecc72c' '1162ccd4b1dc37d203f048d9fbe47f73e0fc997a'
 )
-
 function Normalize-GitHubUrl {
     param([Parameter(Mandatory = $true)][string]$Url)
 

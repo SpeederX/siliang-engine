@@ -18,9 +18,11 @@ static float dsv4_rope_attn_factor(float freq_scale, float ext_factor) {
 static const llama_layer & ds4_front_slab_layer(
         const llama_model & model,
         const llama_cparams & cparams,
-        int il,
-        bool managed_graph) {
-    if (!cparams.siliang_ds4_front_slab_enabled || !managed_graph) {
+        int il) {
+    // FRONT ownership is independent from routed-expert prefill policy. Once
+    // the slab is enabled the model-owned FRONT tensors may be metadata-only
+    // proxies, so every graph must consume the slab aliases.
+    if (!cparams.siliang_ds4_front_slab_enabled) {
         return model.layers[il];
     }
     if (il < 0 || il >= 43 || cparams.siliang_ds4_front_slab_layers[il] == nullptr) {
@@ -627,7 +629,7 @@ ggml_tensor * llama_model_deepseek4::graph::build_lid_top_k(
         ggml_tensor * inp_pos,
         int il) const {
     const auto & layer = ds4_front_slab_layer(
-            model, cparams, il, n_tokens == 1 || cparams.expert_cache.prefill);
+            model, cparams, il);
     const auto & inp_lid = inp_dsv4->get_lid();
     const int64_t n_embd_indexer_head      = hparams.indexer_head_size;
     const int64_t n_embd_indexer_head_rope = hparams.n_rot();
@@ -926,7 +928,7 @@ ggml_tensor * llama_model_deepseek4::graph::build_attention_impl(
     GGML_ASSERT((inp_dsv4 == nullptr) != (inp_mtp == nullptr));
 
     const auto & layer = ds4_front_slab_layer(
-            model, cparams, il, n_tokens == 1 || cparams.expert_cache.prefill);
+            model, cparams, il);
     llm_graph_input_dsv4_raw * inp_attn = inp_dsv4 ? inp_dsv4->get_raw() : nullptr;
 
     const int64_t n_embd_head      = hparams.n_embd_head_k();
@@ -1305,7 +1307,7 @@ llama_model_deepseek4::graph::graph(const llama_model & model, const llm_graph_p
 
     for (int il = 0; il < n_layer; ++il) {
         const auto & front_layer = ds4_front_slab_layer(
-                model, cparams, il, n_tokens == 1 || cparams.expert_cache.prefill);
+                model, cparams, il);
 
         if ((size_t) il < cparams.embeddings_layer_inp.size() && cparams.embeddings_layer_inp[il]) {
             res->t_layer_inp[il] = dsv4_hc_mean(ctx0, inpL);

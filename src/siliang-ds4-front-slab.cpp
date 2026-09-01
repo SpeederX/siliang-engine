@@ -180,6 +180,8 @@ struct siliang_ds4_front_slab::impl {
         size_t offset = 0;
         size_t alloc_size = 0;
         size_t payload_size = 0;
+        uint64_t source_file_offset = 0;
+        bool source_file_managed = false;
     };
 
     struct layer_plan {
@@ -223,7 +225,6 @@ struct siliang_ds4_front_slab::impl {
     bool graph_mode_known = false;
     bool graph_managed = false;
     bool graph_decode = false;
-    bool prefill_enabled = false;
     int64_t graph_tokens = 0;
     int64_t max_graph_tokens = 1;
     int32_t waited_layer = -1;
@@ -250,6 +251,31 @@ struct siliang_ds4_front_slab::impl {
     static bool cuda_ok(ggml_backend_cuda_siliang_status status) {
         return status == GGML_BACKEND_CUDA_SILIANG_STATUS_SUCCESS;
     }
+
+#if defined(_WIN32)
+    static bool read_file_range(HANDLE file, uint64_t offset, void * destination, size_t bytes) {
+        if (file == INVALID_HANDLE_VALUE || destination == nullptr || bytes == 0 ||
+            offset > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+            return false;
+        }
+        LARGE_INTEGER position = {};
+        position.QuadPart = static_cast<LONGLONG>(offset);
+        if (!SetFilePointerEx(file, position, nullptr, FILE_BEGIN)) {
+            return false;
+        }
+        auto * output = static_cast<uint8_t *>(destination);
+        size_t completed = 0;
+        while (completed < bytes) {
+            const DWORD chunk = static_cast<DWORD>(std::min<size_t>(bytes - completed, 64u * 1024u * 1024u));
+            DWORD read = 0;
+            if (!ReadFile(file, output + completed, chunk, &read, nullptr) || read != chunk) {
+                return false;
+            }
+            completed += read;
+        }
+        return true;
+    }
+#endif
 
     template <typename T>
     static void load_proc(ggml_backend_reg_t reg, const char * name, T & proc) {
@@ -312,9 +338,30 @@ struct siliang_ds4_front_slab::impl {
                 if (source == nullptr) {
                     continue;
                 }
-                if (source->buffer == nullptr || source->data == nullptr ||
-                    !ggml_is_contiguous(source) || !ggml_backend_buffer_is_host(source->buffer)) {
+                const bool managed_source = source->buffer != nullptr &&
+                    ggml_backend_buffer_is_siliang_managed(source->buffer);
+                const bool contiguous = ggml_is_contiguous(source);
+                const bool host_buffer = source->buffer != nullptr && ggml_backend_buffer_is_host(source->buffer);
+                if (source->buffer == nullptr || !contiguous ||
+                    (!managed_source && (source->data == nullptr || !host_buffer))) {
+                    LLAMA_LOG_ERROR(
+                        "siliang_ds4_front_slab: source placement reject layer=%d field=%s tensor=%s buffer=%s "
+                        "managed=%d host=%d contiguous=%d data=%p\n",
+                        layer, field.name, source->name,
+                        source->buffer ? ggml_backend_buffer_name(source->buffer) : "<null>",
+                        managed_source ? 1 : 0, host_buffer ? 1 : 0, contiguous ? 1 : 0, source->data);
                     return fail(FAILURE_FRONT_PLACEMENT);
+                }
+                if (managed_source) {
+                    const auto * receipt = model->siliang_file_source.find(source->name);
+                    if (receipt == nullptr || receipt->bytes != ggml_nbytes(source)) {
+                        LLAMA_LOG_ERROR(
+                            "siliang_ds4_front_slab: source receipt reject layer=%d field=%s tensor=%s receipt=%p "
+                            "receipt_bytes=%" PRIu64 " tensor_bytes=%zu\n",
+                            layer, field.name, source->name, static_cast<const void *>(receipt),
+                            receipt ? receipt->bytes : 0, ggml_nbytes(source));
+                        return fail(FAILURE_FRONT_PLACEMENT);
+                    }
                 }
                 ++tensor_count;
             }
@@ -360,7 +407,24 @@ struct siliang_ds4_front_slab::impl {
                     !checked_add(plan.payload, payload_size, plan.payload)) {
                     return fail(FAILURE_ALLOCATION);
                 }
-                plan.segments.push_back({ alias, source, offset, alloc_size, payload_size });
+                const bool managed_source = ggml_backend_buffer_is_siliang_managed(source->buffer);
+                uint64_t source_file_offset = 0;
+                if (managed_source) {
+                    const auto * receipt = model->siliang_file_source.find(source->name);
+                    if (receipt == nullptr || receipt->bytes != payload_size) {
+                        return fail(FAILURE_FRONT_PLACEMENT);
+                    }
+                    source_file_offset = receipt->offset;
+                }
+                plan.segments.push_back({
+                    /*.tensor              =*/ alias,
+                    /*.source              =*/ source,
+                    /*.offset              =*/ offset,
+                    /*.alloc_size          =*/ alloc_size,
+                    /*.payload_size        =*/ payload_size,
+                    /*.source_file_offset  =*/ source_file_offset,
+                    /*.source_file_managed =*/ managed_source,
+                });
                 alternate_layers[layer].*(field.member) = alias;
             }
             if (plan.segments.empty() || !align_up(cursor, alignment, plan.span)) {
@@ -394,14 +458,55 @@ struct siliang_ds4_front_slab::impl {
         return fail(FAILURE_ALLOCATION);
 #endif
         std::memset(host_store, 0, host_store_size);
+#if defined(_WIN32)
+        bool needs_model_file = false;
         for (const layer_plan & plan : plans) {
             for (const segment & item : plan.segments) {
-                std::memcpy(
-                    host_store + plan.store_offset + item.offset,
-                    item.source->data,
-                    item.payload_size);
+                needs_model_file = needs_model_file || item.source_file_managed;
             }
         }
+        HANDLE source_file = INVALID_HANDLE_VALUE;
+        if (needs_model_file) {
+            if (!model->siliang_file_source.valid()) {
+                return fail(FAILURE_FRONT_PLACEMENT);
+            }
+            source_file = CreateFileA(
+                model->siliang_file_source.path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+            if (source_file == INVALID_HANDLE_VALUE) {
+                return fail(FAILURE_FRONT_PLACEMENT);
+            }
+        }
+        bool source_ok = true;
+        for (const layer_plan & plan : plans) {
+            for (const segment & item : plan.segments) {
+                void * destination = host_store + plan.store_offset + item.offset;
+                if (item.source_file_managed) {
+                    if (!read_file_range(source_file, item.source_file_offset, destination, item.payload_size)) {
+                        source_ok = false;
+                        break;
+                    }
+                } else {
+                    std::memcpy(destination, item.source->data, item.payload_size);
+                }
+            }
+            if (!source_ok) {
+                break;
+            }
+        }
+        if (source_file != INVALID_HANDLE_VALUE) {
+            CloseHandle(source_file);
+        }
+        if (!source_ok) {
+            return fail(FAILURE_FRONT_PLACEMENT);
+        }
+        if (needs_model_file) {
+            LLAMA_LOG_INFO("siliang_ds4_front_slab: populated FRONT host store from model-owned GGUF receipt (%zu MiB)\n",
+                    host_store_size / (1024 * 1024));
+        }
+#else
+        return fail(FAILURE_ALLOCATION);
+#endif
         if (!cuda_ok(cuda.host_register(cuda_backend, host_store, host_store_size))) {
             return fail(FAILURE_ALLOCATION);
         }
@@ -607,8 +712,7 @@ struct siliang_ds4_front_slab::impl {
             graph_mode_known = true;
             graph_tokens = marker_tokens;
             graph_decode = marker_tokens == 1;
-            graph_managed = graph_decode ||
-                (prefill_enabled && marker_tokens > 1 && marker_tokens <= max_graph_tokens);
+            graph_managed = marker_tokens > 0 && marker_tokens <= max_graph_tokens;
             if (!graph_managed) {
                 pending_layer = -1;
                 waited_layer = -1;
@@ -721,7 +825,6 @@ struct siliang_ds4_front_slab::impl {
         graph_mode_known = false;
         graph_managed = false;
         graph_decode = false;
-        prefill_enabled = false;
         graph_tokens = 0;
         max_graph_tokens = 1;
         bound.store(false, std::memory_order_release);
@@ -760,7 +863,6 @@ bool siliang_ds4_front_slab::bind(llama_context & ctx) {
         return impl_->fail(FAILURE_INVALID_STATE);
     }
     impl_->ctx = &ctx;
-    impl_->prefill_enabled = ctx.get_cparams().expert_cache.prefill;
     impl_->max_graph_tokens = std::max<int64_t>(1, ctx.n_ubatch());
     if (!impl_->load_cuda_bridge(ctx) || !impl_->build_storage() || !impl_->create_cuda_objects()) {
         impl_->release_binding();

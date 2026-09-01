@@ -543,6 +543,7 @@ llama_model_loader::llama_model_loader(
     }
 
     tensor_buft_overrides = param_tensor_buft_overrides_p;
+    primary_source_path = fname;
 
     this->use_mmap      = load_mode == LLAMA_LOAD_MODE_MMAP || load_mode == LLAMA_LOAD_MODE_MMAP_MLOCK;
     this->use_direct_io = load_mode == LLAMA_LOAD_MODE_DIRECT_IO;
@@ -1655,6 +1656,32 @@ struct ggml_tensor * llama_model_loader::create_tensor(
         }
     }
 
+    if (buft == ggml_backend_cpu_siliang_managed_buffer_type()) {
+        const auto & weight = require_weight(ggml_get_name(tensor));
+        const uint64_t bytes = static_cast<uint64_t>(ggml_nbytes(tensor));
+        if (use_mmap || primary_source_path.empty() || files.size() != 1 || weight.idx != 0 ||
+            bytes == 0 || weight.offs > files[0]->size() || bytes > files[0]->size() - weight.offs) {
+            throw std::runtime_error(format(
+                "%s: managed file tensor does not have a valid monolithic model-file receipt",
+                ggml_get_name(tensor)));
+        }
+        if (siliang_file_source.path.empty()) {
+            siliang_file_source.path = primary_source_path;
+        } else if (siliang_file_source.path != primary_source_path) {
+            throw std::runtime_error("managed file tensor source path changed during model load");
+        }
+        if (siliang_file_source.find(ggml_get_name(tensor)) != nullptr) {
+            throw std::runtime_error(format(
+                "%s: duplicate managed file tensor receipt", ggml_get_name(tensor)));
+        }
+        siliang_file_source.tensors.push_back({
+            /*.name   =*/ ggml_get_name(tensor),
+            /*.offset =*/ static_cast<uint64_t>(weight.offs),
+            /*.bytes  =*/ bytes,
+        });
+        file_managed_only.insert(tensor);
+    }
+
     return tensor;
 }
 
@@ -1885,15 +1912,15 @@ bool llama_model_loader::load_all_data(
         }
 
         size_t n_size = ggml_nbytes(cur);
-        const bool managed_only = em_managed_only.count(cur) > 0;
+        const bool managed_only = em_managed_only.count(cur) > 0 || file_managed_only.count(cur) > 0;
         if (managed_only) {
             if (!ggml_backend_buffer_is_siliang_managed(cur->buffer)) {
                 throw std::runtime_error(format(
-                    "%s: managed expert tensor lost its proxy buffer", ggml_get_name(cur)));
+                    "%s: managed tensor lost its proxy buffer", ggml_get_name(cur)));
             }
             if (check_tensors) {
                 throw std::runtime_error(
-                    "--check-tensors is not yet supported with Siliang managed no-mmap expert backing");
+                    "--check-tensors is not yet supported with Siliang managed no-mmap backing");
             }
             if (!em_managed_log_emitted) {
                 LLAMA_LOG_INFO("%s: Siliang managed-source proxy active; routed expert tensor bytes are not materialized\n", __func__);

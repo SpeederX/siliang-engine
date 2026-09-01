@@ -13,7 +13,7 @@ index 86af0ba10a327283f2500f0bb8e48095df547017..6cbfc21a81c449b46cfa3456f4003016
 @@ -74,6 +75,74 @@ static std::string read_file(const std::string & fname) {
      return content;
  }
- 
+
 +static uint64_t parse_unsigned_decimal(const std::string & value, uint64_t max_value) {
 +    if (value.empty()) {
 +        throw std::invalid_argument("value must be an unsigned decimal integer");
@@ -88,7 +88,7 @@ index 86af0ba10a327283f2500f0bb8e48095df547017..6cbfc21a81c449b46cfa3456f4003016
 @@ -830,6 +899,61 @@ static bool common_params_parse_ex(int argc, char ** argv, common_params_context
      // parse all CLI args now, so that -hf is available below for remote preset resolution
      parse_cli_args();
- 
+
 +    const common_params_expert_cache & expert_cache = params.expert_cache;
 +    if (!expert_cache.enabled && expert_cache.tier_configured) {
 +        throw std::invalid_argument("error: expert-cache tier options require --expert-cache\n");
@@ -146,7 +146,7 @@ index 86af0ba10a327283f2500f0bb8e48095df547017..6cbfc21a81c449b46cfa3456f4003016
 +
      postprocess_cpu_params(params.cpuparams,       nullptr);
      postprocess_cpu_params(params.cpuparams_batch, &params.cpuparams);
- 
+
 @@ -2620,6 +2744,136 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
              else { throw std::invalid_argument("invalid value"); }
          }
@@ -295,7 +295,7 @@ index 86af0ba10a327283f2500f0bb8e48095df547017..6cbfc21a81c449b46cfa3456f4003016
          }
      ));
 diff --git a/common/common.cpp b/common/common.cpp
-index d9ce5755161edc853dbcf629819ee75971ba413d..3c25ea9519bca36bffdca6f3ce1230bcce112a38 100644
+index d9ce5755161edc853dbcf629819ee75971ba413d..2a7248fff647e177c3b7e37d634178d078566724 100644
 --- a/common/common.cpp
 +++ b/common/common.cpp
 @@ -9,6 +9,7 @@
@@ -303,7 +303,7 @@ index d9ce5755161edc853dbcf629819ee75971ba413d..3c25ea9519bca36bffdca6f3ce1230bc
  #include "speculative.h"
  #include "unicode.h"
 +#include "../src/siliang-moe-runtime.h"
- 
+
  #include <algorithm>
  #include <cinttypes>
 @@ -22,6 +23,7 @@
@@ -317,7 +317,7 @@ index d9ce5755161edc853dbcf629819ee75971ba413d..3c25ea9519bca36bffdca6f3ce1230bc
 @@ -1216,6 +1218,65 @@ static void common_init_sampler_from_model(
      get_float(llama_model_meta_key_str(LLAMA_MODEL_META_KEY_SAMPLING_MIROSTAT_ETA),    sparams.mirostat_eta,    common_params_sampling_config::COMMON_PARAMS_SAMPLING_CONFIG_MIROSTAT_ETA);
  }
- 
+
 +namespace {
 +
 +struct siliang_moe_runtime_deleter {
@@ -381,34 +381,34 @@ index d9ce5755161edc853dbcf629819ee75971ba413d..3c25ea9519bca36bffdca6f3ce1230bc
      impl() = default;
      ~impl() = default;
 @@ -1224,6 +1285,8 @@ struct common_init_result::impl {
- 
+
      llama_model_ptr   model;
      llama_context_ptr context;
 +    siliang_moe_runtime_ptr moe_runtime;
 +    siliang_ds4_front_runtime_ptr front_runtime;
- 
+
      std::vector<llama_adapter_lora_ptr> lora;
- 
-@@ -1233,6 +1296,68 @@ struct common_init_result::impl {
- 
+
+@@ -1233,6 +1296,73 @@ struct common_init_result::impl {
+
  common_init_result::common_init_result(common_params & params, bool model_only) :
      pimpl(new impl{}) {
 +    static const char * const ds4_front_regex =
 +        "^blk\\.[0-9]+\\.(hc_attn_fn|hc_attn_scale|hc_attn_base|attn_norm|attn_q_a|attn_q_a_norm|attn_q_b|attn_kv|attn_kv_a_norm|attn_sinks|attn_compressor_ape|attn_compressor_gate|attn_compressor_kv|attn_compressor_norm|indexer\\.attn_q_b|indexer\\.proj|indexer_compressor_ape|indexer_compressor_gate|indexer_compressor_kv|indexer_compressor_norm)\\.weight$";
 +    const bool l1_enabled = !model_only && params.expert_cache.enabled && params.expert_cache.l1_k > 0;
-+    const bool managed_expert_source = !model_only && params.expert_cache.enabled &&
++    const bool managed_no_mmap_source = !model_only && params.expert_cache.enabled &&
 +        params.expert_cache.l2_mib > 0 && params.load_mode == LLAMA_LOAD_MODE_NONE;
 +    if (l1_enabled && !params.lora_adapters.empty()) {
 +        COM_ERR("%s", "expert cache: L1 K/R/P does not support LoRA adapters\n");
 +        return;
 +    }
-+    if (l1_enabled && params.fit_params) {
-+        COM_WRN("%s", "expert cache: disabling automatic fit because the K+R arena is allocated after model load\n");
++    if ((l1_enabled || managed_no_mmap_source) && params.fit_params) {
++        COM_WRN("%s", "expert cache: disabling automatic fit because managed arena/proxy memory is allocated outside model fit\n");
 +        params.fit_params = false;
 +    }
 +    static const std::string managed_expert_regex =
 +        std::string(R"(^blk\.[0-9]+)") + LLM_FFN_EXPS_REGEX + R"(\.weight$)";
-+    if (managed_expert_source) {
++    if (managed_no_mmap_source) {
 +        static std::list<std::string> managed_override_patterns;
 +        ggml_backend_buffer_type_t managed_buft = ggml_backend_cpu_siliang_managed_buffer_type();
 +        for (auto & current : params.tensor_buft_overrides) {
@@ -427,40 +427,45 @@ index d9ce5755161edc853dbcf629819ee75971ba413d..3c25ea9519bca36bffdca6f3ce1230bc
 +        }
 +    }
 +
-+    if (l1_enabled || managed_expert_source) {
-+        const char * pattern = managed_expert_source ? managed_expert_regex.c_str() : LLM_FFN_EXPS_REGEX;
-+        ggml_backend_buffer_type_t buft = managed_expert_source ?
++    if (l1_enabled || managed_no_mmap_source) {
++        const char * pattern = managed_no_mmap_source ? managed_expert_regex.c_str() : LLM_FFN_EXPS_REGEX;
++        ggml_backend_buffer_type_t buft = managed_no_mmap_source ?
 +            ggml_backend_cpu_siliang_managed_buffer_type() : ggml_backend_cpu_buffer_type();
 +        if (!common_append_tensor_buft_override(
-+                params, pattern, buft, managed_expert_source ? "managed routed-expert source" : "routed-expert CPU")) {
++                params, pattern, buft, managed_no_mmap_source ? "managed routed-expert source" : "routed-expert CPU")) {
 +            return;
 +        }
-+        if (managed_expert_source) {
++        if (managed_no_mmap_source) {
 +            // Keep scale/bias/other expert sidecars ordinary CPU tensors. The
 +            // managed proxy is only for the large routed expert weight tensors.
 +            if (!common_append_tensor_buft_override(
 +                    params, LLM_FFN_EXPS_REGEX, ggml_backend_cpu_buffer_type(), "routed-expert sidecar CPU")) {
 +                return;
 +            }
-+            COM_INF("%s", "expert cache: no-mmap managed routed-expert proxy prepared; GGUF/SiliangEM owns weight bytes\n");
++            COM_INF("%s", "expert cache: no-mmap managed routed-expert proxy prepared; model-owned GGUF source is materialized through SiliangEM\n");
 +        } else {
 +            COM_INF("%s", "expert cache: routed-expert CPU placement rule prepared; runtime will validate effective placement\n");
 +        }
 +    }
 +    if (l1_enabled && params.expert_cache.roll == COMMON_EXPERT_CACHE_ROLL_DEEPSEEK4) {
++        ggml_backend_buffer_type_t front_buft = managed_no_mmap_source ?
++            ggml_backend_cpu_siliang_managed_buffer_type() : ggml_backend_cpu_buffer_type();
 +        if (!common_append_tensor_buft_override(
-+                params, ds4_front_regex, ggml_backend_cpu_buffer_type(), "DeepSeek-V4 FRONT CPU")) {
++                params, ds4_front_regex, front_buft,
++                managed_no_mmap_source ? "managed DeepSeek-V4 FRONT source" : "DeepSeek-V4 FRONT CPU")) {
 +            return;
 +        }
-+        COM_INF("%s", "expert cache: exact DeepSeek-V4 FRONT CPU placement rule prepared; runtime will validate effective placement\n");
++        COM_INF("%s", managed_no_mmap_source ?
++            "expert cache: DeepSeek-V4 FRONT model-file receipt/proxy prepared; roller will materialize its host store directly\n" :
++            "expert cache: exact DeepSeek-V4 FRONT CPU placement rule prepared; runtime will validate effective placement\n");
 +    }
 +
      auto mparams = common_model_params_to_llama(params);
      auto cparams = common_context_params_to_llama(params);
- 
-@@ -1334,6 +1459,39 @@ common_init_result::common_init_result(common_params & params, bool model_only)
+
+@@ -1334,6 +1464,39 @@ common_init_result::common_init_result(common_params & params, bool model_only)
      }
- 
+
      pimpl->context.reset(lctx);
 +
 +    if (l1_enabled) {
@@ -496,12 +501,12 @@ index d9ce5755161edc853dbcf629819ee75971ba413d..3c25ea9519bca36bffdca6f3ce1230bc
 +        }
 +    }
  }
- 
+
  llama_model * common_init_result::model() {
-@@ -1344,6 +1502,16 @@ llama_context * common_init_result::context() {
+@@ -1344,6 +1507,16 @@ llama_context * common_init_result::context() {
      return pimpl->context.get();
  }
- 
+
 +void common_init_result::reset_context() {
 +    pimpl->front_runtime.reset();
 +    pimpl->moe_runtime.reset();
@@ -515,10 +520,10 @@ index d9ce5755161edc853dbcf629819ee75971ba413d..3c25ea9519bca36bffdca6f3ce1230bc
  common_sampler * common_init_result::sampler(llama_seq_id seq_id) {
      if (seq_id < 0 || seq_id >= (int) pimpl->samplers.size()) {
          return nullptr;
-@@ -1432,8 +1600,10 @@ common_init_result_ptr common_init_from_params(common_params & params, bool mode
+@@ -1432,8 +1605,10 @@ common_init_result_ptr common_init_from_params(common_params & params, bool mode
          }
      }
- 
+
 -    if (!params.lora_init_without_apply) {
 -        common_set_adapter_lora(lctx, params.lora_adapters);
 +    if (!params.lora_init_without_apply && !common_set_adapter_lora(lctx, params.lora_adapters)) {
@@ -526,41 +531,41 @@ index d9ce5755161edc853dbcf629819ee75971ba413d..3c25ea9519bca36bffdca6f3ce1230bc
 +        res->reset_context();
 +        return res;
      }
- 
+
      if (params.warmup) {
-@@ -1474,6 +1644,10 @@ common_init_result_ptr common_init_from_params(common_params & params, bool mode
+@@ -1474,6 +1649,10 @@ common_init_result_ptr common_init_from_params(common_params & params, bool mode
          res->reset_samplers();
      }
- 
+
 +    // Graph reservation and the optional warmup can execute the route mapper.
 +    // Start serving with a fresh prefill trace without changing cache residency.
 +    res->reset_expert_cache_prefill_trace();
 +
      return res;
  }
- 
-@@ -1593,7 +1767,7 @@ void common_memory::seq_add(llama_seq_id seq_id, llama_pos p0, llama_pos p1, lla
+
+@@ -1593,7 +1772,7 @@ void common_memory::seq_add(llama_seq_id seq_id, llama_pos p0, llama_pos p1, lla
      }
  }
- 
+
 -void common_set_adapter_lora(struct llama_context * ctx, std::vector<common_adapter_lora_info> & lora) {
 +bool common_set_adapter_lora(struct llama_context * ctx, std::vector<common_adapter_lora_info> & lora) {
      std::vector<llama_adapter_lora *> loras;
      std::vector<float> scales;
- 
-@@ -1602,7 +1776,7 @@ void common_set_adapter_lora(struct llama_context * ctx, std::vector<common_adap
+
+@@ -1602,7 +1781,7 @@ void common_set_adapter_lora(struct llama_context * ctx, std::vector<common_adap
          scales.push_back(la.scale);
      }
- 
+
 -    llama_set_adapters_lora(ctx, loras.data(), loras.size(), scales.data());
 +    return llama_set_adapters_lora(ctx, loras.data(), loras.size(), scales.data()) == 0;
  }
- 
+
  struct llama_model_params common_model_params_to_llama(common_params & params) {
-@@ -1646,6 +1820,20 @@ struct llama_model_params common_model_params_to_llama(common_params & params) {
+@@ -1646,6 +1825,20 @@ struct llama_model_params common_model_params_to_llama(common_params & params) {
  struct llama_context_params common_context_params_to_llama(const common_params & params) {
      auto cparams = llama_context_default_params();
- 
+
 +    const auto cache_policy = [](common_expert_cache_policy policy) {
 +        switch (policy) {
 +            case COMMON_EXPERT_CACHE_POLICY_LRU:
@@ -578,10 +583,10 @@ index d9ce5755161edc853dbcf629819ee75971ba413d..3c25ea9519bca36bffdca6f3ce1230bc
      cparams.n_ctx             = params.n_ctx;
      cparams.n_seq_max         = params.n_parallel;
      cparams.n_rs_seq          = params.speculative.need_n_rs_seq();
-@@ -1675,6 +1863,22 @@ struct llama_context_params common_context_params_to_llama(const common_params &
+@@ -1675,6 +1868,22 @@ struct llama_context_params common_context_params_to_llama(const common_params &
      cparams.swa_full          = params.swa_full;
      cparams.kv_unified        = params.kv_unified;
- 
+
 +    cparams.expert_cache.enabled       = params.expert_cache.enabled;
 +    cparams.expert_cache.l2_bytes      = params.expert_cache.l2_mib * 1024ULL * 1024ULL;
 +    cparams.expert_cache.l2_policy     = cache_policy(params.expert_cache.l2_policy);
@@ -600,7 +605,7 @@ index d9ce5755161edc853dbcf629819ee75971ba413d..3c25ea9519bca36bffdca6f3ce1230bc
 +
      cparams.type_k = params.cache_type_k;
      cparams.type_v = params.cache_type_v;
- 
+
 diff --git a/common/common.h b/common/common.h
 index 3444aa157e9b73727ea2ca6107eb0dc9f9b36a74..86bbf4a9c35e7abc35e0cd1521a6557d41602ca9 100644
 --- a/common/common.h
@@ -611,12 +616,12 @@ index 3444aa157e9b73727ea2ca6107eb0dc9f9b36a74..86bbf4a9c35e7abc35e0cd1521a6557d
  #include <algorithm>
 +#include <cstdint>
  #include <fstream>
- 
+
  #if defined(_WIN32) && !defined(_WIN32_WINNT)
 @@ -437,6 +438,49 @@ struct lr_opt {
- 
+
  struct ggml_opt_optimizer_params common_opt_lr_pars(void * userdata);
- 
+
 +enum common_expert_cache_policy {
 +    COMMON_EXPERT_CACHE_POLICY_LRU = 0,
 +    COMMON_EXPERT_CACHE_POLICY_LFU,
@@ -666,28 +671,28 @@ index 3444aa157e9b73727ea2ca6107eb0dc9f9b36a74..86bbf4a9c35e7abc35e0cd1521a6557d
 @@ -474,6 +518,8 @@ struct common_params {
      enum llama_split_mode split_mode = LLAMA_SPLIT_MODE_LAYER; // how to split the model across GPUs
      enum llama_load_mode  load_mode  = LLAMA_LOAD_MODE_MMAP; // how to load the model
- 
+
 +    common_params_expert_cache expert_cache;
 +
      common_cpu_params cpuparams;
      common_cpu_params cpuparams_batch;
- 
+
 @@ -911,6 +957,8 @@ struct common_init_result {
- 
+
      llama_model * model();
      llama_context * context();
 +    void reset_context();
 +    void reset_expert_cache_prefill_trace();
- 
+
      common_sampler * sampler(llama_seq_id seq_id);
      void reset_samplers();
 @@ -931,7 +979,7 @@ struct llama_context_params   common_context_params_to_llama(const common_params
  struct ggml_threadpool_params ggml_threadpool_params_from_cpu_params(const common_cpu_params & params);
- 
+
  // clear LoRA adapters from context, then apply new list of adapters
 -void common_set_adapter_lora(struct llama_context * ctx, std::vector<common_adapter_lora_info> & lora);
 +bool common_set_adapter_lora(struct llama_context * ctx, std::vector<common_adapter_lora_info> & lora);
- 
+
  // model endpoint from env
  std::string common_get_model_endpoint();
 diff --git a/common/speculative.cpp b/common/speculative.cpp
@@ -697,14 +702,14 @@ index 70dc0ac3b1b74fdd5f08b470308786c3f12411e7..3f7c5f87559b224c038b86f958557abb
 @@ -2293,6 +2293,10 @@ common_params common_base_params_to_speculative(const common_params & params) {
      result.cache_type_v  = params_spec.cache_type_v;
      result.n_outputs_max = params.n_parallel;
- 
+
 +    // The target context owns the Siliang hierarchy. A draft or MTP context
 +    // must not allocate a second L2 cache or K/R/P arena from copied params.
 +    result.expert_cache = common_params_expert_cache {};
 +
      return result;
  }
- 
+
 diff --git a/ggml/include/ggml-backend.h b/ggml/include/ggml-backend.h
 index 2924fdbe9884df40abf505fd89d277f5281a835b..1b45c1ad7cd9618936aaebc243b82e8b48a09b84 100644
 --- a/ggml/include/ggml-backend.h
@@ -712,7 +717,7 @@ index 2924fdbe9884df40abf505fd89d277f5281a835b..1b45c1ad7cd9618936aaebc243b82e8b
 @@ -313,6 +313,14 @@ extern "C" {
      //
      typedef bool (*ggml_backend_sched_eval_callback)(struct ggml_tensor * t, bool ask, void * user_data);
- 
+
 +    // Called immediately before the first asynchronous submission for each scheduler split. False cancels submission.
 +    // The graph pointer remains owned by the scheduler and is only valid for the duration of the callback.
 +    typedef bool (*ggml_backend_sched_split_observer_callback)(
@@ -727,7 +732,7 @@ index 2924fdbe9884df40abf505fd89d277f5281a835b..1b45c1ad7cd9618936aaebc243b82e8b
 @@ -351,6 +359,9 @@ extern "C" {
      // Set a callback to be called for each resulting node during graph compute
      GGML_API void                 ggml_backend_sched_set_eval_callback(ggml_backend_sched_t sched, ggml_backend_sched_eval_callback callback, void * user_data);
- 
+
 +    // Set a callback to observe scheduler split submissions. A NULL callback disables observation.
 +    GGML_API void                 ggml_backend_sched_set_split_observer(ggml_backend_sched_t sched, ggml_backend_sched_split_observer_callback callback, void * user_data);
 +
@@ -737,7 +742,7 @@ index 2924fdbe9884df40abf505fd89d277f5281a835b..1b45c1ad7cd9618936aaebc243b82e8b
 @@ -430,6 +441,13 @@ extern "C" {
      GGML_API ggml_backend_buffer_t      ggml_backend_cpu_buffer_from_ptr(void * ptr, size_t size);
      GGML_API ggml_backend_buffer_type_t ggml_backend_cpu_buffer_type(void);
- 
+
 +    // Siliang managed-source proxy. The buffer reserves virtual address space
 +    // but owns no weight bytes; callers must never materialize or read it.
 +    // It exists so managed routed-expert tensors retain exact GGML geometry
@@ -753,7 +758,7 @@ index dc6453c6eaa16667f720f987659ad42d03a403a2..8f1634660f907e8e2d52ad8c20c122e5
 --- a/ggml/include/ggml-cpu.h
 +++ b/ggml/include/ggml-cpu.h
 @@ -22,6 +22,11 @@ extern "C" {
- 
+
          // use only reference implementations
          bool use_ref;
 +
@@ -762,7 +767,7 @@ index dc6453c6eaa16667f720f987659ad42d03a403a2..8f1634660f907e8e2d52ad8c20c122e5
 +        // NULL and retain the stock, cache-disabled behavior.
 +        struct ggml_siliangem_cache_state * siliangem_cache;
      };
- 
+
      // numa strategies
 @@ -80,6 +85,117 @@ extern "C" {
      // x86
@@ -889,7 +894,7 @@ index 1cd81eeaebcdf4abcd46c87ba1a9a46e275aa12b..6c4776a86af28a6485d8cfb8b4242b20
 @@ -40,6 +40,76 @@ GGML_BACKEND_API void ggml_backend_cuda_get_device_memory(int device, size_t * f
  GGML_BACKEND_API bool ggml_backend_cuda_register_host_buffer(void * buffer, size_t size);
  GGML_BACKEND_API void ggml_backend_cuda_unregister_host_buffer(void * buffer);
- 
+
 +// Minimal CUDA synchronization and H2D bridge used by the Siliang MoE arena.
 +// Stream and event handles are private to the CUDA backend and must not be mixed across devices.
 +enum ggml_backend_cuda_siliang_status {
@@ -961,7 +966,7 @@ index 1cd81eeaebcdf4abcd46c87ba1a9a46e275aa12b..6c4776a86af28a6485d8cfb8b4242b20
 +        void * buffer);
 +
  GGML_BACKEND_API ggml_backend_reg_t ggml_backend_cuda_reg(void);
- 
+
  #ifdef  __cplusplus
 diff --git a/ggml/src/ggml-backend.cpp b/ggml/src/ggml-backend.cpp
 index f6fb91798ca484fd1298d7012be3ae8d73cb0ea4..f075d0274d7944bb96967f42b8453e1d80e58ec0 100644
@@ -970,17 +975,17 @@ index f6fb91798ca484fd1298d7012be3ae8d73cb0ea4..f075d0274d7944bb96967f42b8453e1d
 @@ -815,6 +815,9 @@ struct ggml_backend_sched {
      ggml_backend_sched_eval_callback callback_eval;
      void * callback_eval_user_data;
- 
+
 +    ggml_backend_sched_split_observer_callback callback_split_observer;
 +    void * callback_split_observer_user_data;
 +
      char * context_buffer;
      size_t context_buffer_size;
- 
+
 @@ -1727,6 +1730,11 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
              }
          }
- 
+
 +        if (sched->callback_split_observer && !sched->callback_split_observer(
 +                split_id, split_backend, &split->graph, sched->callback_split_observer_user_data)) {
 +            return GGML_STATUS_FAILED;
@@ -992,7 +997,7 @@ index f6fb91798ca484fd1298d7012be3ae8d73cb0ea4..f075d0274d7944bb96967f42b8453e1d
 @@ -1980,6 +1988,15 @@ void ggml_backend_sched_set_eval_callback(ggml_backend_sched_t sched, ggml_backe
      sched->callback_eval_user_data = user_data;
  }
- 
+
 +void ggml_backend_sched_set_split_observer(
 +        ggml_backend_sched_t sched,
 +        ggml_backend_sched_split_observer_callback callback,
@@ -1008,7 +1013,7 @@ index f6fb91798ca484fd1298d7012be3ae8d73cb0ea4..f075d0274d7944bb96967f42b8453e1d
 @@ -2402,6 +2419,111 @@ ggml_backend_buffer_type_t ggml_backend_cpu_buffer_type(void) {
      return &ggml_backend_cpu_buffer_type;
  }
- 
+
 +static void ggml_backend_cpu_siliang_managed_forbidden(const char * operation) {
 +    GGML_ABORT("Siliang managed-source proxy does not contain weight bytes; forbidden operation: %s\n", operation);
 +}
@@ -1116,15 +1121,15 @@ index f6fb91798ca484fd1298d7012be3ae8d73cb0ea4..f075d0274d7944bb96967f42b8453e1d
 +
  static const char * ggml_backend_cpu_buffer_from_ptr_type_get_name(ggml_backend_buffer_type_t buft) {
      return "CPU_Mapped";
- 
+
 diff --git a/ggml/src/ggml-cpu/ggml-cpu-impl.h b/ggml/src/ggml-cpu/ggml-cpu-impl.h
 index 5d1ca5ffcc368b9f0249d6cf6ccc4549bb9a3ab4..97a2a0b1b72df88a9af3cb6ab825ee4b474a40ae 100644
 --- a/ggml/src/ggml-cpu/ggml-cpu-impl.h
 +++ b/ggml/src/ggml-cpu/ggml-cpu-impl.h
 @@ -25,10 +25,52 @@ struct ggml_compute_params {
- 
+
      struct ggml_threadpool * threadpool;
- 
+
 +    // Owned by the CPU backend context and propagated through ggml_cplan.
 +    // It is deliberately not attached to the reusable threadpool.
 +    struct ggml_siliangem_cache_state * siliangem_cache;
@@ -1132,7 +1137,7 @@ index 5d1ca5ffcc368b9f0249d6cf6ccc4549bb9a3ab4..97a2a0b1b72df88a9af3cb6ab825ee4b
      // use reference implementation
      bool use_ref;
  };
- 
+
 +struct ggml_siliangem_cache_config;
 +struct ggml_siliangem_source_desc;
 +struct ggml_siliangem_cache_info;
@@ -1171,9 +1176,9 @@ index 5d1ca5ffcc368b9f0249d6cf6ccc4549bb9a3ab4..97a2a0b1b72df88a9af3cb6ab825ee4b
 +        struct ggml_siliangem_cache_state * state,
 +        uint32_t * capacity_slots, uint32_t * occupied_slots);
 +
- 
+
  #if defined(_MSC_VER)
- 
+
 diff --git a/ggml/src/ggml-cpu/ggml-cpu.c b/ggml/src/ggml-cpu/ggml-cpu.c
 index 491316f7491252248d6f74a60440d3efa7aa6177..ae7c8a129a9f5dc7cd5c16b175261f665ee5e5a8 100644
 --- a/ggml/src/ggml-cpu/ggml-cpu.c
@@ -1189,7 +1194,7 @@ index 491316f7491252248d6f74a60440d3efa7aa6177..ae7c8a129a9f5dc7cd5c16b175261f66
 @@ -1531,10 +1532,571 @@ static void * incr_ptr_aligned(void ** p, size_t size, size_t align) {
      return ptr;
  }
- 
+
 +// ---- batched MoE expert prefetch (Siliang Engine Lever 0) ------------------
 +// For a mmap'd out-of-core MoE, the routed-expert weights for a token are not
 +// resident, so each chunk of the matmul below can fault them in small pages,
@@ -1749,7 +1754,7 @@ index 491316f7491252248d6f74a60440d3efa7aa6177..ae7c8a129a9f5dc7cd5c16b175261f66
  static void ggml_compute_forward_mul_mat_id(
          const struct ggml_compute_params * params,
                struct ggml_tensor * dst) {
- 
+
 +#if defined(_WIN32)
 +    struct ggml_siliangem_cache_state * siliangem_state = params->siliangem_cache;
 +    if (siliangem_state) siliangem_bind_state(siliangem_state);
@@ -1759,9 +1764,9 @@ index 491316f7491252248d6f74a60440d3efa7aa6177..ae7c8a129a9f5dc7cd5c16b175261f66
      const struct ggml_tensor * src1 = dst->src[1];
      const struct ggml_tensor * ids = dst->src[2];
 @@ -1644,14 +2206,93 @@ static void ggml_compute_forward_mul_mat_id(
- 
+
      ggml_barrier(params->threadpool);
- 
+
 -    for (int cur_a = 0; cur_a < n_as; ++cur_a) {
 +#if defined(_WIN32)
 +    // matrix_row_counts[] is complete here, so the exact expert set is known.
@@ -1820,7 +1825,7 @@ index 491316f7491252248d6f74a60440d3efa7aa6177..ae7c8a129a9f5dc7cd5c16b175261f66
 +        }
 +#endif
          const int64_t cne1 = matrix_row_counts[cur_a];
- 
+
 +#if defined(_WIN32)
 +        if (siliangem_state && ith == 0) {
 +            siliangem_note_cne1((long long) cne1);
@@ -1830,7 +1835,7 @@ index 491316f7491252248d6f74a60440d3efa7aa6177..ae7c8a129a9f5dc7cd5c16b175261f66
          if (cne1 == 0) {
              continue;
          }
- 
+
 -        const char * src0_cur = (const char *) src0->data + cur_a * nb02;
 +        const char * src0_cur = NULL;
 +#if defined(_WIN32)
@@ -1853,7 +1858,7 @@ index 491316f7491252248d6f74a60440d3efa7aa6177..ae7c8a129a9f5dc7cd5c16b175261f66
 +        }
          const void * wdata = (src1->type == vec_dot_type) ? src1->data : params->wdata;
          const size_t row_size = ggml_row_size(vec_dot_type, ne10);
- 
+
 @@ -3076,6 +3717,7 @@ static thread_ret_t ggml_graph_compute_thread(void * data) {
          /*.wsize      =*/ cplan->work_size,
          /*.wdata      =*/ cplan->work_data,
@@ -1861,22 +1866,22 @@ index 491316f7491252248d6f74a60440d3efa7aa6177..ae7c8a129a9f5dc7cd5c16b175261f66
 +        /*.siliangem_cache =*/ cplan->siliangem_cache,
          /*.use_ref    =*/ cplan->use_ref,
      };
- 
+
 diff --git a/ggml/src/ggml-cpu/ggml-cpu.cpp b/ggml/src/ggml-cpu/ggml-cpu.cpp
 index 16cc5116c5451787c6a1dd1988e38b761f20ef12..f39002fc95a5f793e2f2ed68187bfa8b3df8201a 100644
 --- a/ggml/src/ggml-cpu/ggml-cpu.cpp
 +++ b/ggml/src/ggml-cpu/ggml-cpu.cpp
 @@ -107,6 +107,8 @@ struct ggml_backend_cpu_context {
      void *              abort_callback_data;
- 
+
      bool                use_ref;  // use reference implementation
 +
 +    ggml_siliangem_cache_state * siliangem_cache;
  };
- 
+
  static const char * ggml_backend_cpu_get_name(ggml_backend_t backend) {
 @@ -117,6 +119,7 @@ static const char * ggml_backend_cpu_get_name(ggml_backend_t backend) {
- 
+
  static void ggml_backend_cpu_free(ggml_backend_t backend) {
      struct ggml_backend_cpu_context * cpu_ctx = (struct ggml_backend_cpu_context *)backend->context;
 +    ggml_siliangem_cache_state_destroy(cpu_ctx->siliangem_cache);
@@ -1888,7 +1893,7 @@ index 16cc5116c5451787c6a1dd1988e38b761f20ef12..f39002fc95a5f793e2f2ed68187bfa8b
      cpu_plan->cplan.abort_callback_data = cpu_ctx->abort_callback_data;
      cpu_plan->cplan.use_ref             = cpu_ctx->use_ref;
 +    cpu_plan->cplan.siliangem_cache     = cpu_ctx->siliangem_cache;
- 
+
      return cpu_plan;
  }
 @@ -186,6 +190,7 @@ static enum ggml_status ggml_backend_cpu_graph_compute(ggml_backend_t backend, s
@@ -1896,7 +1901,7 @@ index 16cc5116c5451787c6a1dd1988e38b761f20ef12..f39002fc95a5f793e2f2ed68187bfa8b
      cplan.abort_callback_data = cpu_ctx->abort_callback_data;
      cplan.use_ref             = cpu_ctx->use_ref;
 +    cplan.siliangem_cache     = cpu_ctx->siliangem_cache;
- 
+
      return ggml_graph_compute(cgraph, &cplan);
  }
 @@ -230,6 +235,12 @@ ggml_backend_t ggml_backend_cpu_init(void) {
@@ -1909,12 +1914,12 @@ index 16cc5116c5451787c6a1dd1988e38b761f20ef12..f39002fc95a5f793e2f2ed68187bfa8b
 +        delete ctx;
 +        return NULL;
 +    }
- 
+
      ggml_backend_t cpu_backend = new ggml_backend {
          /* .guid    = */ ggml_backend_cpu_guid(),
 @@ -239,6 +250,7 @@ ggml_backend_t ggml_backend_cpu_init(void) {
      };
- 
+
      if (cpu_backend == NULL) {
 +        ggml_siliangem_cache_state_destroy(ctx->siliangem_cache);
          delete ctx;
@@ -1923,7 +1928,7 @@ index 16cc5116c5451787c6a1dd1988e38b761f20ef12..f39002fc95a5f793e2f2ed68187bfa8b
 @@ -246,6 +258,119 @@ ggml_backend_t ggml_backend_cpu_init(void) {
      return cpu_backend;
  }
- 
+
 +int ggml_backend_cpu_siliangem_configure(
 +        ggml_backend_t backend_cpu,
 +        const ggml_siliangem_cache_config * config,
@@ -2077,7 +2082,7 @@ index 16cc5116c5451787c6a1dd1988e38b761f20ef12..f39002fc95a5f793e2f2ed68187bfa8b
 +    if (strcmp(name, "ggml_backend_cpu_siliangem_cache_occupancy") == 0) {
 +        return (void *)ggml_backend_cpu_siliangem_cache_occupancy;
 +    }
- 
+
      // threadpool - TODO:  move to ggml-base
      if (strcmp(name, "ggml_threadpool_new") == 0) {
 diff --git a/ggml/src/ggml-cpu/siliangem_moe_cache.h b/ggml/src/ggml-cpu/siliangem_moe_cache.h
@@ -4097,7 +4102,7 @@ index 561ab7ac599f9e285d2a0296caee0ab0a14ea5c8..3ed2efc408af1388904873b03d324c23
 @@ -745,6 +746,443 @@ static bool ggml_backend_buffer_is_cuda(ggml_backend_buffer_t buffer) {
      return buffer->iface.free_buffer == ggml_backend_cuda_buffer_free_buffer;
  }
- 
+
 +struct ggml_backend_cuda_siliang_stream {
 +    cudaStream_t stream = nullptr;
 +    int device = -1;
@@ -4714,9 +4719,9 @@ index fb2ca38cee4f8ba84bb6178f1e345e066b0d07e5..cdf629e88ebbbff200a44261802e5077
 +        uint64_t submission_host_ns;
 +        uint64_t wait_enqueue_host_ns;
 +    };
- 
+
      typedef struct llama_memory_i * llama_memory_t;
- 
+
 @@ -406,6 +519,10 @@ extern "C" {
          // a source/target/parent context
          // can be utilized in various ways, for example by sharing results or llama_memory between 2 contexts
@@ -4726,12 +4731,12 @@ index fb2ca38cee4f8ba84bb6178f1e345e066b0d07e5..cdf629e88ebbbff200a44261802e5077
 +        // to be rebuilt together because llama_context_params is passed by value.
 +        struct llama_siliang_expert_cache_params expert_cache;
      };
- 
+
      struct llama_model_tensor_override {
 @@ -569,6 +686,72 @@ extern "C" {
      LLAMA_API           llama_memory_t   llama_get_memory  (const struct llama_context * ctx);
      LLAMA_API  enum llama_pooling_type   llama_pooling_type(const struct llama_context * ctx); // TODO: rename to llama_get_pooling_type
- 
+
 +    // Siliang routed-expert arena bridge. The native router still selects and
 +    // weights logical experts; the mapper only translates those IDs to caller-
 +    // owned physical CUDA slots. Bounded prefill is separately opt-in.
@@ -4800,7 +4805,7 @@ index fb2ca38cee4f8ba84bb6178f1e345e066b0d07e5..cdf629e88ebbbff200a44261802e5077
 +
      LLAMA_API const struct llama_vocab * llama_model_get_vocab(const struct llama_model * model);
      LLAMA_API enum llama_rope_type       llama_model_rope_type(const struct llama_model * model);
- 
+
 diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
 index 24f05cc91673217726b919229e1626b7f74a7bcb..4b620618f1304164881ac97692d397fa8152688f 100644
 --- a/src/CMakeLists.txt
@@ -4822,16 +4827,16 @@ index 19cca7df1e9deaafc1e8ee50d0c78ae5ffbc6cfb..ecdb8f92ecc2faeee71dee7b460efbf7
 +++ b/src/llama-context.cpp
 @@ -1,6 +1,7 @@
  #include "llama-context.h"
- 
+
  #include "ggml.h"
 +#include "ggml-cpu.h"
  #include "llama-arch.h"
  #include "llama-graph.h"
  #include "llama-impl.h"
 @@ -95,6 +96,87 @@ llama_context::llama_context(
- 
+
      const auto & hparams = model.hparams;
- 
+
 +    const auto & expert_cache = params.expert_cache;
 +    const auto valid_l2_policy = [](llama_siliang_expert_cache_policy policy) {
 +        return policy == LLAMA_SILIANG_EXPERT_CACHE_POLICY_LRU ||
@@ -4919,7 +4924,7 @@ index 19cca7df1e9deaafc1e8ee50d0c78ae5ffbc6cfb..ecdb8f92ecc2faeee71dee7b460efbf7
 @@ -138,6 +220,14 @@ llama_context::llama_context(
      cparams.cb_eval           = params.cb_eval;
      cparams.cb_eval_user_data = params.cb_eval_user_data;
- 
+
 +    cparams.expert_cache = params.expert_cache;
 +    cparams.siliang_moe_arena_state = &siliang_moe_arena_state;
 +    cparams.siliang_moe_arena_generation = 0;
@@ -4929,12 +4934,12 @@ index 19cca7df1e9deaafc1e8ee50d0c78ae5ffbc6cfb..ecdb8f92ecc2faeee71dee7b460efbf7
 +    cparams.siliang_ds4_front_slab_enabled = false;
 +
      cparams.ctx_other = nullptr;
- 
+
      // TODO: more generic
 @@ -352,6 +442,57 @@ llama_context::llama_context(
          }
          backends.emplace_back(backend_cpu);
- 
+
 +        if (cparams.expert_cache.enabled && cparams.expert_cache.l2_bytes > 0) {
 +            const auto & source = model.siliang_expert_source;
 +            if (!source.valid() || source.kind == llama_siliang_expert_source_kind::none) {
@@ -4992,7 +4997,7 @@ index 19cca7df1e9deaafc1e8ee50d0c78ae5ffbc6cfb..ecdb8f92ecc2faeee71dee7b460efbf7
 @@ -667,6 +808,11 @@ void llama_context::sched_reserve() {
          }
      }
- 
+
 +    if (siliang_ds4_front_slab_observer) {
 +        ggml_backend_sched_set_split_observer(
 +                sched.get(), siliang_ds4_front_slab_observer, siliang_ds4_front_slab_observer_user_data);
@@ -5004,7 +5009,7 @@ index 19cca7df1e9deaafc1e8ee50d0c78ae5ffbc6cfb..ecdb8f92ecc2faeee71dee7b460efbf7
 @@ -842,6 +988,536 @@ float * llama_context::get_logits() {
      return logits.data;
  }
- 
+
 +static bool siliang_moe_route_shape(
 +        const llama_model & model,
 +        int32_t & layer_count,
@@ -5537,11 +5542,11 @@ index 19cca7df1e9deaafc1e8ee50d0c78ae5ffbc6cfb..ecdb8f92ecc2faeee71dee7b460efbf7
 +
  int64_t llama_context::output_resolve_row(int32_t i) const {
      int64_t j = -1;
- 
+
 @@ -2472,9 +3148,28 @@ ggml_status llama_context::graph_compute(
          set_n_threads_fn.second(set_n_threads_fn.first, n_threads);
      }
- 
+
 +    if (cparams.siliang_moe_arena_enabled) {
 +        const int32_t failure = siliang_moe_arena_failure();
 +        if (failure != 0) {
@@ -5565,12 +5570,12 @@ index 19cca7df1e9deaafc1e8ee50d0c78ae5ffbc6cfb..ecdb8f92ecc2faeee71dee7b460efbf7
 +            status = GGML_STATUS_FAILED;
 +        }
      }
- 
+
      // fprintf(stderr, "splits: %d\n", ggml_backend_sched_get_n_splits(sched));
 @@ -3480,6 +4175,86 @@ void llama_context::opt_epoch(
  // interface implementation
  //
- 
+
 +int llama_siliang_moe_arena_get_model_info(
 +        const llama_model * model,
 +        llama_siliang_moe_arena_model_info * info) {
@@ -5675,12 +5680,12 @@ index 19cca7df1e9deaafc1e8ee50d0c78ae5ffbc6cfb..ecdb8f92ecc2faeee71dee7b460efbf7
 +            /*.deferred_wait =*/ true,
 +        },
      };
- 
+
      return result;
 @@ -3850,6 +4641,15 @@ int32_t llama_set_adapters_lora(
          GGML_ASSERT(n_adapters == 0 && "invalid llama_set_adapters_lora call");
      }
- 
+
 +    bool has_nonzero_adapter = false;
 +    for (size_t index = 0; index < n_adapters; ++index) {
 +        has_nonzero_adapter = has_nonzero_adapter || scales[index] != 0.0f;
@@ -5691,7 +5696,7 @@ index 19cca7df1e9deaafc1e8ee50d0c78ae5ffbc6cfb..ecdb8f92ecc2faeee71dee7b460efbf7
 +    }
 +
      ctx->set_adapters_lora(adapters, n_adapters, scales);
- 
+
      return 0;
 diff --git a/src/llama-context.h b/src/llama-context.h
 index bf91daa8b562aa66d15b08ca559b6baa09ab7855..7c566f561669941cec1196ee0fc88519c4b173ab 100644
@@ -5700,7 +5705,7 @@ index bf91daa8b562aa66d15b08ca559b6baa09ab7855..7c566f561669941cec1196ee0fc88519
 @@ -102,6 +102,36 @@ struct llama_context {
      const llama_token * get_sampled_candidates_ith(int32_t idx);
      size_t get_sampled_candidates_count(int32_t idx);
- 
+
 +    bool siliang_moe_arena_bind(
 +            const int32_t * managed_layers,
 +            size_t managed_layer_count,
@@ -5735,39 +5740,39 @@ index bf91daa8b562aa66d15b08ca559b6baa09ab7855..7c566f561669941cec1196ee0fc88519
              ggml_threadpool_t threadpool,
              ggml_threadpool_t threadpool_batch);
 @@ -281,6 +311,8 @@ private:
- 
+
      llama_cparams cparams;
- 
+
 +    llama_siliang_moe_arena_state siliang_moe_arena_state = {};
 +
      llama_adapter_cvec_ptr  cvec;
      llama_adapter_loras_ptr loras;
- 
+
 @@ -345,6 +377,9 @@ private:
- 
+
      bool sched_need_reserve = true;
- 
+
 +    ggml_backend_sched_split_observer_callback siliang_ds4_front_slab_observer = nullptr;
 +    void * siliang_ds4_front_slab_observer_user_data = nullptr;
 +
      ggml_backend_t backend_cpu = nullptr;
      std::vector<ggml_backend_ptr> backends;
- 
+
 diff --git a/src/llama-cparams.h b/src/llama-cparams.h
 index 5018170ed85e3b82abad65e6a3c71859067c9f71..2de4137861983ca96170eeb71b893ededb9dad29 100644
 --- a/src/llama-cparams.h
 +++ b/src/llama-cparams.h
 @@ -2,11 +2,63 @@
- 
+
  #include "llama.h"
- 
+
 +#include <array>
 +#include <atomic>
  #include <cstdint>
  #include <vector>
- 
+
  #define LLAMA_MAX_SEQ 256
- 
+
 +constexpr uint32_t LLAMA_SILIANG_MOE_PREFILL_MAX_EXPERTS = 256;
 +
 +struct llama_siliang_moe_arena_state;
@@ -5824,7 +5829,7 @@ index 5018170ed85e3b82abad65e6a3c71859067c9f71..2de4137861983ca96170eeb71b893ede
 @@ -61,5 +113,15 @@ struct llama_cparams {
      ggml_backend_sched_eval_callback cb_eval;
      void * cb_eval_user_data;
- 
+
 +    llama_siliang_expert_cache_params expert_cache;
 +
 +    llama_siliang_moe_arena_state * siliang_moe_arena_state;
@@ -5844,7 +5849,7 @@ index 2be3b75fb9825ccc9aa08cda294f46d6422c61ea..4258d05f5ff0f958dafdb621aeecd7d2
 @@ -229,6 +229,238 @@ bool llm_graph_input_out_ids::can_reuse(const llm_graph_params & params) {
      return res;
  }
- 
+
 +llm_graph_input_siliang_moe_arena::llm_graph_input_siliang_moe_arena(
 +        const llama_siliang_moe_arena_state * state,
 +        int32_t layer,
@@ -6083,7 +6088,7 @@ index 2be3b75fb9825ccc9aa08cda294f46d6422c61ea..4258d05f5ff0f958dafdb621aeecd7d2
 @@ -2072,6 +2304,69 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
          cb(weights, "ffn_moe_weights_scaled", il);
      }
- 
+
 +    ggml_tensor * dispatch_experts = selected_experts;
 +    auto * moe_arena = cparams.siliang_moe_arena_state;
 +    const bool moe_arena_phase_supported = n_tokens == 1 ||
@@ -6149,25 +6154,25 @@ index 2be3b75fb9825ccc9aa08cda294f46d6422c61ea..4258d05f5ff0f958dafdb621aeecd7d2
 +
      //call early so that topk-moe can be used
      ggml_build_forward_expand(gf, weights);
- 
+
 @@ -2089,7 +2384,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
- 
+
      if (gate_up_exps) {
          // merged gate_up path: one mul_mat_id, then split into gate and up views
 -        ggml_tensor * gate_up = build_lora_mm_id(gate_up_exps, cur, selected_experts, up_exps_s); // [n_ff*2, n_expert_used, n_tokens]
 +        ggml_tensor * gate_up = build_lora_mm_id(gate_up_exps, cur, dispatch_experts, up_exps_s); // [n_ff*2, n_expert_used, n_tokens]
          cb(gate_up, "ffn_moe_gate_up", il);
- 
+
          if (up_exps_s) {
 @@ -2097,7 +2392,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
          }
- 
+
          if (gate_up_exps_b) {
 -            gate_up = ggml_add_id(ctx0, gate_up, gate_up_exps_b, selected_experts);
 +            gate_up = ggml_add_id(ctx0, gate_up, gate_up_exps_b, dispatch_experts);
              cb(gate_up, "ffn_moe_gate_up_biased", il);
          }
- 
+
 @@ -2108,7 +2403,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
          cb(up, "ffn_moe_up", il);
      } else {
@@ -6175,17 +6180,17 @@ index 2be3b75fb9825ccc9aa08cda294f46d6422c61ea..4258d05f5ff0f958dafdb621aeecd7d2
 -        up = build_lora_mm_id(up_exps, cur, selected_experts, up_exps_s); // [n_ff, n_expert_used, n_tokens]
 +        up = build_lora_mm_id(up_exps, cur, dispatch_experts, up_exps_s); // [n_ff, n_expert_used, n_tokens]
          cb(up, "ffn_moe_up", il);
- 
+
          if (up_exps_s) {
 @@ -2116,12 +2411,12 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
          }
- 
+
          if (up_exps_b) {
 -            up = ggml_add_id(ctx0, up, up_exps_b, selected_experts);
 +            up = ggml_add_id(ctx0, up, up_exps_b, dispatch_experts);
              cb(up, "ffn_moe_up_biased", il);
          }
- 
+
          if (gate_exps) {
 -            cur = build_lora_mm_id(gate_exps, cur, selected_experts, gate_exps_s); // [n_ff, n_expert_used, n_tokens]
 +            cur = build_lora_mm_id(gate_exps, cur, dispatch_experts, gate_exps_s); // [n_ff, n_expert_used, n_tokens]
@@ -6194,7 +6199,7 @@ index 2be3b75fb9825ccc9aa08cda294f46d6422c61ea..4258d05f5ff0f958dafdb621aeecd7d2
              cur = up;
 @@ -2132,7 +2427,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
          }
- 
+
          if (gate_exps_b) {
 -            cur = ggml_add_id(ctx0, cur, gate_exps_b, selected_experts);
 +            cur = ggml_add_id(ctx0, cur, gate_exps_b, dispatch_experts);
@@ -6204,25 +6209,25 @@ index 2be3b75fb9825ccc9aa08cda294f46d6422c61ea..4258d05f5ff0f958dafdb621aeecd7d2
 @@ -2210,7 +2505,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
              GGML_ABORT("fatal error");
      }
- 
+
 -    experts = build_lora_mm_id(down_exps, cur, selected_experts, down_exps_s); // [n_embd, n_expert_used, n_tokens]
 +    experts = build_lora_mm_id(down_exps, cur, dispatch_experts, down_exps_s); // [n_embd, n_expert_used, n_tokens]
      cb(experts, "ffn_moe_down", il);
- 
+
      if (down_exps_s) {
 @@ -2218,7 +2513,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
      }
- 
+
      if (down_exps_b) {
 -        experts = ggml_add_id(ctx0, experts, down_exps_b, selected_experts);
 +        experts = ggml_add_id(ctx0, experts, down_exps_b, dispatch_experts);
          cb(experts, "ffn_moe_down_biased", il);
      }
- 
+
 @@ -2259,6 +2554,17 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
- 
+
      cb(moe_out, "ffn_moe_out", il);
- 
+
 +    if (moe_arena && moe_arena->post_compute_hook) {
 +        if (static_cast<size_t>(il) >= moe_arena->post_calls_by_layer.size()) {
 +            throw std::runtime_error("Siliang MoE arena post-compute contract mismatch");
@@ -6236,23 +6241,23 @@ index 2be3b75fb9825ccc9aa08cda294f46d6422c61ea..4258d05f5ff0f958dafdb621aeecd7d2
 +
      return moe_out;
  }
- 
+
 diff --git a/src/llama-graph.h b/src/llama-graph.h
 index 32d8d395aa4546ed7e90e7d26d24218fcd37547a..08c5d6968e6fde56d207c6607fdc6834e97287ca 100644
 --- a/src/llama-graph.h
 +++ b/src/llama-graph.h
 @@ -18,6 +18,7 @@ struct ggml_tensor;
- 
+
  struct llama_cparams;
  struct llama_layer;
 +struct llama_siliang_moe_arena_state;
- 
+
  struct llama_memory_context_i;
- 
+
 @@ -231,6 +232,22 @@ public:
      const uint32_t n_outputs;
  };
- 
+
 +class llm_graph_input_siliang_moe_arena : public llm_graph_input_i {
 +public:
 +    llm_graph_input_siliang_moe_arena(
@@ -6283,21 +6288,29 @@ index 32d8d395aa4546ed7e90e7d26d24218fcd37547a..08c5d6968e6fde56d207c6607fdc6834
              gtype == other.gtype &&
              cvec  == other.cvec  &&
 diff --git a/src/llama-model-loader.cpp b/src/llama-model-loader.cpp
-index b31e92e2da7ef42eabbb47173bb1f2088c952f39..630aa17427d80a56559813d67e3d97d25d9a76b9 100644
+index b31e92e2da7ef42eabbb47173bb1f2088c952f39..1f22894f6e1e99b42f89a878915a9d12b7fd6cd6 100644
 --- a/src/llama-model-loader.cpp
 +++ b/src/llama-model-loader.cpp
 @@ -2,6 +2,7 @@
- 
+
  #include "ggml-alloc.h"
  #include "ggml.h"
 +#include "ggml-cpu.h"
  #include "gguf.h"
  #include "llama-hparams.h"
  #include "llama.h"
-@@ -811,6 +812,270 @@ llama_model_loader::llama_model_loader(
+@@ -542,6 +543,7 @@ llama_model_loader::llama_model_loader(
+     }
+
+     tensor_buft_overrides = param_tensor_buft_overrides_p;
++    primary_source_path = fname;
+
+     this->use_mmap      = load_mode == LLAMA_LOAD_MODE_MMAP || load_mode == LLAMA_LOAD_MODE_MMAP_MLOCK;
+     this->use_direct_io = load_mode == LLAMA_LOAD_MODE_DIRECT_IO;
+@@ -811,6 +813,270 @@ llama_model_loader::llama_model_loader(
          this->use_mmap = false;
      }
- 
+
 +    // ---- Siliang expert-major layout -------------------------------------
 +    // Ordinary host tensors require mmap because expert-major projection views
 +    // are strided across the packed expert region. Siliang managed no-mmap is
@@ -6565,10 +6578,10 @@ index b31e92e2da7ef42eabbb47173bb1f2088c952f39..630aa17427d80a56559813d67e3d97d2
      this->check_tensors = check_tensors;
      this->no_alloc = no_alloc;
      this->load_mtp = load_mtp;
-@@ -1302,6 +1567,94 @@ struct ggml_tensor * llama_model_loader::create_tensor(
+@@ -1302,6 +1568,120 @@ struct ggml_tensor * llama_model_loader::create_tensor(
          n_created++;
      }
- 
+
 +    // ---- Siliang expert-major: correct the expert stride ------------------
 +    // ggml derived nb[2] assuming this tensor's experts are packed back to
 +    // back. In an expert-major file they are interleaved with the other
@@ -6657,10 +6670,36 @@ index b31e92e2da7ef42eabbb47173bb1f2088c952f39..630aa17427d80a56559813d67e3d97d2
 +        }
 +    }
 +
++    if (buft == ggml_backend_cpu_siliang_managed_buffer_type()) {
++        const auto & weight = require_weight(ggml_get_name(tensor));
++        const uint64_t bytes = static_cast<uint64_t>(ggml_nbytes(tensor));
++        if (use_mmap || primary_source_path.empty() || files.size() != 1 || weight.idx != 0 ||
++            bytes == 0 || weight.offs > files[0]->size() || bytes > files[0]->size() - weight.offs) {
++            throw std::runtime_error(format(
++                "%s: managed file tensor does not have a valid monolithic model-file receipt",
++                ggml_get_name(tensor)));
++        }
++        if (siliang_file_source.path.empty()) {
++            siliang_file_source.path = primary_source_path;
++        } else if (siliang_file_source.path != primary_source_path) {
++            throw std::runtime_error("managed file tensor source path changed during model load");
++        }
++        if (siliang_file_source.find(ggml_get_name(tensor)) != nullptr) {
++            throw std::runtime_error(format(
++                "%s: duplicate managed file tensor receipt", ggml_get_name(tensor)));
++        }
++        siliang_file_source.tensors.push_back({
++            /*.name   =*/ ggml_get_name(tensor),
++            /*.offset =*/ static_cast<uint64_t>(weight.offs),
++            /*.bytes  =*/ bytes,
++        });
++        file_managed_only.insert(tensor);
++    }
++
      return tensor;
  }
- 
-@@ -1354,6 +1707,13 @@ void llama_model_loader::init_mappings(bool prefetch, llama_mlocks * mlock_mmaps
+
+@@ -1354,6 +1734,13 @@ void llama_model_loader::init_mappings(bool prefetch, llama_mlocks * mlock_mmaps
      for (const auto & it : weights_map) {
          size_data += ggml_nbytes(it.second.tensor);
      }
@@ -6672,21 +6711,21 @@ index b31e92e2da7ef42eabbb47173bb1f2088c952f39..630aa17427d80a56559813d67e3d97d2
 +    GGML_ASSERT(size_data >= em_span_excess);
 +    size_data -= em_span_excess;
  }
- 
+
  void llama_model_loader::get_mapping_range(size_t * first, size_t * last, void ** addr, int idx, ggml_context * ctx) const {
-@@ -1525,6 +1885,23 @@ bool llama_model_loader::load_all_data(
+@@ -1525,6 +1912,23 @@ bool llama_model_loader::load_all_data(
          }
- 
+
          size_t n_size = ggml_nbytes(cur);
-+        const bool managed_only = em_managed_only.count(cur) > 0;
++        const bool managed_only = em_managed_only.count(cur) > 0 || file_managed_only.count(cur) > 0;
 +        if (managed_only) {
 +            if (!ggml_backend_buffer_is_siliang_managed(cur->buffer)) {
 +                throw std::runtime_error(format(
-+                    "%s: managed expert tensor lost its proxy buffer", ggml_get_name(cur)));
++                    "%s: managed tensor lost its proxy buffer", ggml_get_name(cur)));
 +            }
 +            if (check_tensors) {
 +                throw std::runtime_error(
-+                    "--check-tensors is not yet supported with Siliang managed no-mmap expert backing");
++                    "--check-tensors is not yet supported with Siliang managed no-mmap backing");
 +            }
 +            if (!em_managed_log_emitted) {
 +                LLAMA_LOG_INFO("%s: Siliang managed-source proxy active; routed expert tensor bytes are not materialized\n", __func__);
@@ -6695,13 +6734,13 @@ index b31e92e2da7ef42eabbb47173bb1f2088c952f39..630aa17427d80a56559813d67e3d97d2
 +            size_done += n_size;
 +            continue;
 +        }
- 
+
          if (use_mmap) {
              const auto & mapping = mappings.at(weight->idx);
-@@ -1534,14 +1911,43 @@ bool llama_model_loader::load_all_data(
+@@ -1534,14 +1938,43 @@ bool llama_model_loader::load_all_data(
              }
              uint8_t * data = (uint8_t *) mapping->addr() + weight->offs;
- 
+
 +            // An expert-major tensor bound for a device buffer was left
 +            // contiguous by create_tensor(), so its experts sit one stride
 +            // apart in the file but back to back in the destination. Both the
@@ -6735,7 +6774,7 @@ index b31e92e2da7ef42eabbb47173bb1f2088c952f39..630aa17427d80a56559813d67e3d97d2
 +                    }));
 +                }
              }
- 
+
              GGML_ASSERT(buf_mmap || cur->data); // either we have a buffer to allocate the tensor in, or it is already allocated
              if (buf_mmap && cur->data == nullptr) {
 +                // Host path: the tensor keeps the true stride in nb[2] and
@@ -6745,7 +6784,7 @@ index b31e92e2da7ef42eabbb47173bb1f2088c952f39..630aa17427d80a56559813d67e3d97d2
                  ggml_backend_tensor_alloc(buf_mmap, cur, data);
                  if (lmlocks) {
                      const auto & lmlock = lmlocks->at(weight->idx);
-@@ -1551,6 +1957,10 @@ bool llama_model_loader::load_all_data(
+@@ -1551,6 +1984,10 @@ bool llama_model_loader::load_all_data(
                  auto & mmap_used = mmaps_used[weight->idx];
                  mmap_used.first  = std::min(mmap_used.first,  weight->offs);
                  mmap_used.second = std::max(mmap_used.second, weight->offs + n_size);
@@ -6757,16 +6796,16 @@ index b31e92e2da7ef42eabbb47173bb1f2088c952f39..630aa17427d80a56559813d67e3d97d2
                  ggml_backend_tensor_set(cur, data, 0, n_size);
              }
 diff --git a/src/llama-model-loader.h b/src/llama-model-loader.h
-index d6b31c2311186608f48e88d1a37c23adc7e1b0c7..fec9ae9ee9550f8a7cb930f9a0334aa3c5c157be 100644
+index d6b31c2311186608f48e88d1a37c23adc7e1b0c7..f03513c4a7dde82fa69d38480592bf8a5dc48c35 100644
 --- a/src/llama-model-loader.h
 +++ b/src/llama-model-loader.h
 @@ -1,5 +1,7 @@
  #pragma once
- 
+
 +#include "siliang-expert-source.h"
 +
  #include "llama.h"
- 
+
  #include "llama-impl.h"
 @@ -12,6 +14,7 @@
  #include <cstddef>
@@ -6775,11 +6814,11 @@ index d6b31c2311186608f48e88d1a37c23adc7e1b0c7..fec9ae9ee9550f8a7cb930f9a0334aa3
 +#include <set>
  #include <stdexcept>
  #include <unordered_map>
- 
+
 @@ -36,6 +39,14 @@ struct llama_model_loader {
- 
+
          ggml_tensor * tensor;
- 
+
 +        // Direct construction, for entries that are SYNTHESISED rather than
 +        // read from the tensor directory. The Siliang expert-major layout
 +        // stores each layer's experts as one opaque packed tensor; the loader
@@ -6791,10 +6830,10 @@ index d6b31c2311186608f48e88d1a37c23adc7e1b0c7..fec9ae9ee9550f8a7cb930f9a0334aa3
          llama_tensor_weight(const llama_file * file, uint16_t idx, const struct gguf_context * gguf_ctx, ggml_tensor * tensor) : idx(idx), tensor(tensor) {
              const int tensor_idx = gguf_find_tensor(gguf_ctx,  ggml_get_name(tensor));
              if (tensor_idx < 0) {
-@@ -88,6 +99,45 @@ struct llama_model_loader {
- 
+@@ -88,6 +99,49 @@ struct llama_model_loader {
+
      llama_mmaps mappings;
- 
+
 +    // ---- Siliang expert-major layout ------------------------------------
 +    // An expert-major GGUF stores each layer's experts interleaved:
 +    //   [e0: gate|up|down|pad][e1: ...]
@@ -6805,6 +6844,10 @@ index d6b31c2311186608f48e88d1a37c23adc7e1b0c7..fec9ae9ee9550f8a7cb930f9a0334aa3
 +    // Everything in llama.cpp then works unchanged EXCEPT nb[2], which is
 +    // derived assuming contiguity. This map supplies the true expert stride
 +    // per layer; create_tensor() writes it into nb[2].
++    std::string primary_source_path;
++    llama_siliang_file_source_receipt siliang_file_source;
++    std::set<const struct ggml_tensor *> file_managed_only;
++
 +    bool expert_major = false;
 +    bool expert_major_managed_only = false;
 +    std::map<int, uint64_t> expert_stride;   // layer -> bytes between experts
@@ -6856,7 +6899,7 @@ index dda311c47bbf64c0333c2c48b23f16bf24153e42..1626b09eb0b0c618303c5fe8d583c3b0
 +            }
          }
      }
- 
+
 @@ -1726,8 +1731,12 @@ std::map<ggml_backend_buffer_type_t, size_t> llama_model::memory_breakdown() con
              ret[buft] += ggml_backend_alloc_ctx_tensors_from_buft_size(ctx.get(), buft);
          } else {
@@ -6873,52 +6916,66 @@ index dda311c47bbf64c0333c2c48b23f16bf24153e42..1626b09eb0b0c618303c5fe8d583c3b0
          }
      }
 diff --git a/src/llama-model.h b/src/llama-model.h
-index 6b9e94a0a6921745fd20f58aba38490480c36a38..f14b607ded2574b98290f9eb5e9237989e9313d6 100644
+index 6b9e94a0a6921745fd20f58aba38490480c36a38..f10d49771cc26af6cb7d1856d84c4a8cd4653473 100644
 --- a/src/llama-model.h
 +++ b/src/llama-model.h
 @@ -1,5 +1,7 @@
  #pragma once
- 
+
 +#include "siliang-expert-source.h"
 +
  #include "llama.h"
  #include "llama-arch.h"
  #include "llama-graph.h"
-@@ -557,6 +559,8 @@ struct llama_model {
+@@ -557,6 +559,9 @@ struct llama_model {
      llama_hparams hparams = {};
      llama_vocab   vocab;
- 
+
 +    llama_siliang_expert_source siliang_expert_source;
++    llama_siliang_file_source_receipt siliang_file_source;
 +
      // for classifier models
      std::vector<std::string> classifier_labels;
- 
+
 diff --git a/src/llama.cpp b/src/llama.cpp
-index d6e0bbfefa729329fe6b83e46e603a85dab0f2e3..3113ca8d1cacc2a8c42ef815e4aba9a6c22a88bb 100644
+index d6e0bbfefa729329fe6b83e46e603a85dab0f2e3..f86fb3124cf4e5f35b22098391af07cae3c3a9cc 100644
 --- a/src/llama.cpp
 +++ b/src/llama.cpp
 @@ -309,6 +309,7 @@ static std::pair<int, llama_model *> llama_model_load(struct gguf_context * meta
- 
+
          ml.print_info();
          std::unique_ptr<llama_model> model_ptr(llama_model_create(ml, params));
 +        model_ptr->siliang_expert_source = ml.siliang_expert_source;
- 
+
          bool ok = llama_prepare_model_devices(params, model_ptr.get());
          if (!ok) {
+@@ -355,6 +356,10 @@ static std::pair<int, llama_model *> llama_model_load(struct gguf_context * meta
+         if (!model->load_tensors(ml)) {
+             return {-2, nullptr};
+         }
++        // Generic managed-file receipts are populated while tensors are
++        // created, so publish them only after load_tensors() has finalized the
++        // loader-owned receipt. Expert-source geometry is available earlier.
++        model_ptr->siliang_file_source = ml.siliang_file_source;
+
+         return {0, model_ptr.release()};
+     } catch (const std::exception & err) {
 diff --git a/src/models/deepseek4.cpp b/src/models/deepseek4.cpp
-index 89cd461765adfe8c32fa2e6c6b6d2e962de4b0ac..e0ae251cb500c5eb55d6b2c8b36a24a6f6005b84 100644
+index 89cd461765adfe8c32fa2e6c6b6d2e962de4b0ac..10d8f5ef0b34c9a989d11856ba9dcebddb59723c 100644
 --- a/src/models/deepseek4.cpp
 +++ b/src/models/deepseek4.cpp
-@@ -15,6 +15,20 @@ static float dsv4_rope_attn_factor(float freq_scale, float ext_factor) {
+@@ -15,6 +15,22 @@ static float dsv4_rope_attn_factor(float freq_scale, float ext_factor) {
      return 1.0f / (1.0f + 0.1f*logf(1.0f/freq_scale));
  }
- 
+
 +static const llama_layer & ds4_front_slab_layer(
 +        const llama_model & model,
 +        const llama_cparams & cparams,
-+        int il,
-+        bool managed_graph) {
-+    if (!cparams.siliang_ds4_front_slab_enabled || !managed_graph) {
++        int il) {
++    // FRONT ownership is independent from routed-expert prefill policy. Once
++    // the slab is enabled the model-owned FRONT tensors may be metadata-only
++    // proxies, so every graph must consume the slab aliases.
++    if (!cparams.siliang_ds4_front_slab_enabled) {
 +        return model.layers[il];
 +    }
 +    if (il < 0 || il >= 43 || cparams.siliang_ds4_front_slab_layers[il] == nullptr) {
@@ -6930,39 +6987,39 @@ index 89cd461765adfe8c32fa2e6c6b6d2e962de4b0ac..e0ae251cb500c5eb55d6b2c8b36a24a6
  void llama_model_deepseek4::load_arch_hparams(llama_model_loader & ml) {
      ml.get_key(LLM_KV_NEXTN_PREDICT_LAYERS, hparams.n_layer_nextn, false);
      if (hparams.n_layer_nextn > 0 && hparams.n_layer_nextn < hparams.n_layer_all) {
-@@ -612,7 +626,8 @@ ggml_tensor * llama_model_deepseek4::graph::build_lid_top_k(
+@@ -612,7 +628,8 @@ ggml_tensor * llama_model_deepseek4::graph::build_lid_top_k(
          ggml_tensor * cur,
          ggml_tensor * inp_pos,
          int il) const {
 -    const auto & layer = model.layers[il];
 +    const auto & layer = ds4_front_slab_layer(
-+            model, cparams, il, n_tokens == 1 || cparams.expert_cache.prefill);
++            model, cparams, il);
      const auto & inp_lid = inp_dsv4->get_lid();
      const int64_t n_embd_indexer_head      = hparams.indexer_head_size;
      const int64_t n_embd_indexer_head_rope = hparams.n_rot();
-@@ -910,7 +925,8 @@ ggml_tensor * llama_model_deepseek4::graph::build_attention_impl(
+@@ -910,7 +927,8 @@ ggml_tensor * llama_model_deepseek4::graph::build_attention_impl(
          int il) const {
      GGML_ASSERT((inp_dsv4 == nullptr) != (inp_mtp == nullptr));
- 
+
 -    const auto & layer = model.layers[il];
 +    const auto & layer = ds4_front_slab_layer(
-+            model, cparams, il, n_tokens == 1 || cparams.expert_cache.prefill);
++            model, cparams, il);
      llm_graph_input_dsv4_raw * inp_attn = inp_dsv4 ? inp_dsv4->get_raw() : nullptr;
- 
+
      const int64_t n_embd_head      = hparams.n_embd_head_k();
-@@ -1288,6 +1304,9 @@ llama_model_deepseek4::graph::graph(const llama_model & model, const llm_graph_p
+@@ -1288,6 +1306,9 @@ llama_model_deepseek4::graph::graph(const llama_model & model, const llm_graph_p
      cb(inpL, "hc_init", -1);
- 
+
      for (int il = 0; il < n_layer; ++il) {
 +        const auto & front_layer = ds4_front_slab_layer(
-+                model, cparams, il, n_tokens == 1 || cparams.expert_cache.prefill);
++                model, cparams, il);
 +
          if ((size_t) il < cparams.embeddings_layer_inp.size() && cparams.embeddings_layer_inp[il]) {
              res->t_layer_inp[il] = dsv4_hc_mean(ctx0, inpL);
              cb(res->t_layer_inp[il], "layer_inp", il);
-@@ -1299,13 +1318,13 @@ llama_model_deepseek4::graph::graph(const llama_model & model, const llm_graph_p
+@@ -1299,13 +1320,13 @@ llama_model_deepseek4::graph::graph(const llama_model & model, const llm_graph_p
          ggml_tensor * comb = nullptr;
- 
+
          cur = build_hc_pre(inpL,
 -                model.layers[il].hc_attn_fn,
 -                model.layers[il].hc_attn_scale,
@@ -6972,18 +7029,18 @@ index 89cd461765adfe8c32fa2e6c6b6d2e962de4b0ac..e0ae251cb500c5eb55d6b2c8b36a24a6
 +                front_layer.hc_attn_base,
                  &post, &comb, il);
          cb(cur, "hc_attn_pre", il);
- 
+
 -        cur = build_norm(cur, model.layers[il].attn_norm, nullptr, LLM_NORM_RMS, il);
 +        cur = build_norm(cur, front_layer.attn_norm, nullptr, LLM_NORM_RMS, il);
          cb(cur, "attn_norm", il);
- 
+
          cur = build_attention(model, inp_dsv4, cur, inp_pos, il);
 diff --git a/src/siliang-ds4-front-slab.cpp b/src/siliang-ds4-front-slab.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..91d6640557077aa6c2f2afad77d8130df46f2ab9
+index 0000000000000000000000000000000000000000..6f9a6ad9aaf1afe20f5e29ed950489f8e5a03075
 --- /dev/null
 +++ b/src/siliang-ds4-front-slab.cpp
-@@ -0,0 +1,940 @@
+@@ -0,0 +1,1042 @@
 +#include "siliang-ds4-front-slab.h"
 +
 +#include "ggml-cpp.h"
@@ -7166,6 +7223,8 @@ index 0000000000000000000000000000000000000000..91d6640557077aa6c2f2afad77d8130d
 +        size_t offset = 0;
 +        size_t alloc_size = 0;
 +        size_t payload_size = 0;
++        uint64_t source_file_offset = 0;
++        bool source_file_managed = false;
 +    };
 +
 +    struct layer_plan {
@@ -7209,7 +7268,6 @@ index 0000000000000000000000000000000000000000..91d6640557077aa6c2f2afad77d8130d
 +    bool graph_mode_known = false;
 +    bool graph_managed = false;
 +    bool graph_decode = false;
-+    bool prefill_enabled = false;
 +    int64_t graph_tokens = 0;
 +    int64_t max_graph_tokens = 1;
 +    int32_t waited_layer = -1;
@@ -7236,6 +7294,31 @@ index 0000000000000000000000000000000000000000..91d6640557077aa6c2f2afad77d8130d
 +    static bool cuda_ok(ggml_backend_cuda_siliang_status status) {
 +        return status == GGML_BACKEND_CUDA_SILIANG_STATUS_SUCCESS;
 +    }
++
++#if defined(_WIN32)
++    static bool read_file_range(HANDLE file, uint64_t offset, void * destination, size_t bytes) {
++        if (file == INVALID_HANDLE_VALUE || destination == nullptr || bytes == 0 ||
++            offset > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
++            return false;
++        }
++        LARGE_INTEGER position = {};
++        position.QuadPart = static_cast<LONGLONG>(offset);
++        if (!SetFilePointerEx(file, position, nullptr, FILE_BEGIN)) {
++            return false;
++        }
++        auto * output = static_cast<uint8_t *>(destination);
++        size_t completed = 0;
++        while (completed < bytes) {
++            const DWORD chunk = static_cast<DWORD>(std::min<size_t>(bytes - completed, 64u * 1024u * 1024u));
++            DWORD read = 0;
++            if (!ReadFile(file, output + completed, chunk, &read, nullptr) || read != chunk) {
++                return false;
++            }
++            completed += read;
++        }
++        return true;
++    }
++#endif
 +
 +    template <typename T>
 +    static void load_proc(ggml_backend_reg_t reg, const char * name, T & proc) {
@@ -7298,9 +7381,30 @@ index 0000000000000000000000000000000000000000..91d6640557077aa6c2f2afad77d8130d
 +                if (source == nullptr) {
 +                    continue;
 +                }
-+                if (source->buffer == nullptr || source->data == nullptr ||
-+                    !ggml_is_contiguous(source) || !ggml_backend_buffer_is_host(source->buffer)) {
++                const bool managed_source = source->buffer != nullptr &&
++                    ggml_backend_buffer_is_siliang_managed(source->buffer);
++                const bool contiguous = ggml_is_contiguous(source);
++                const bool host_buffer = source->buffer != nullptr && ggml_backend_buffer_is_host(source->buffer);
++                if (source->buffer == nullptr || !contiguous ||
++                    (!managed_source && (source->data == nullptr || !host_buffer))) {
++                    LLAMA_LOG_ERROR(
++                        "siliang_ds4_front_slab: source placement reject layer=%d field=%s tensor=%s buffer=%s "
++                        "managed=%d host=%d contiguous=%d data=%p\n",
++                        layer, field.name, source->name,
++                        source->buffer ? ggml_backend_buffer_name(source->buffer) : "<null>",
++                        managed_source ? 1 : 0, host_buffer ? 1 : 0, contiguous ? 1 : 0, source->data);
 +                    return fail(FAILURE_FRONT_PLACEMENT);
++                }
++                if (managed_source) {
++                    const auto * receipt = model->siliang_file_source.find(source->name);
++                    if (receipt == nullptr || receipt->bytes != ggml_nbytes(source)) {
++                        LLAMA_LOG_ERROR(
++                            "siliang_ds4_front_slab: source receipt reject layer=%d field=%s tensor=%s receipt=%p "
++                            "receipt_bytes=%" PRIu64 " tensor_bytes=%zu\n",
++                            layer, field.name, source->name, static_cast<const void *>(receipt),
++                            receipt ? receipt->bytes : 0, ggml_nbytes(source));
++                        return fail(FAILURE_FRONT_PLACEMENT);
++                    }
 +                }
 +                ++tensor_count;
 +            }
@@ -7346,7 +7450,24 @@ index 0000000000000000000000000000000000000000..91d6640557077aa6c2f2afad77d8130d
 +                    !checked_add(plan.payload, payload_size, plan.payload)) {
 +                    return fail(FAILURE_ALLOCATION);
 +                }
-+                plan.segments.push_back({ alias, source, offset, alloc_size, payload_size });
++                const bool managed_source = ggml_backend_buffer_is_siliang_managed(source->buffer);
++                uint64_t source_file_offset = 0;
++                if (managed_source) {
++                    const auto * receipt = model->siliang_file_source.find(source->name);
++                    if (receipt == nullptr || receipt->bytes != payload_size) {
++                        return fail(FAILURE_FRONT_PLACEMENT);
++                    }
++                    source_file_offset = receipt->offset;
++                }
++                plan.segments.push_back({
++                    /*.tensor              =*/ alias,
++                    /*.source              =*/ source,
++                    /*.offset              =*/ offset,
++                    /*.alloc_size          =*/ alloc_size,
++                    /*.payload_size        =*/ payload_size,
++                    /*.source_file_offset  =*/ source_file_offset,
++                    /*.source_file_managed =*/ managed_source,
++                });
 +                alternate_layers[layer].*(field.member) = alias;
 +            }
 +            if (plan.segments.empty() || !align_up(cursor, alignment, plan.span)) {
@@ -7380,14 +7501,55 @@ index 0000000000000000000000000000000000000000..91d6640557077aa6c2f2afad77d8130d
 +        return fail(FAILURE_ALLOCATION);
 +#endif
 +        std::memset(host_store, 0, host_store_size);
++#if defined(_WIN32)
++        bool needs_model_file = false;
 +        for (const layer_plan & plan : plans) {
 +            for (const segment & item : plan.segments) {
-+                std::memcpy(
-+                    host_store + plan.store_offset + item.offset,
-+                    item.source->data,
-+                    item.payload_size);
++                needs_model_file = needs_model_file || item.source_file_managed;
 +            }
 +        }
++        HANDLE source_file = INVALID_HANDLE_VALUE;
++        if (needs_model_file) {
++            if (!model->siliang_file_source.valid()) {
++                return fail(FAILURE_FRONT_PLACEMENT);
++            }
++            source_file = CreateFileA(
++                model->siliang_file_source.path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
++                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
++            if (source_file == INVALID_HANDLE_VALUE) {
++                return fail(FAILURE_FRONT_PLACEMENT);
++            }
++        }
++        bool source_ok = true;
++        for (const layer_plan & plan : plans) {
++            for (const segment & item : plan.segments) {
++                void * destination = host_store + plan.store_offset + item.offset;
++                if (item.source_file_managed) {
++                    if (!read_file_range(source_file, item.source_file_offset, destination, item.payload_size)) {
++                        source_ok = false;
++                        break;
++                    }
++                } else {
++                    std::memcpy(destination, item.source->data, item.payload_size);
++                }
++            }
++            if (!source_ok) {
++                break;
++            }
++        }
++        if (source_file != INVALID_HANDLE_VALUE) {
++            CloseHandle(source_file);
++        }
++        if (!source_ok) {
++            return fail(FAILURE_FRONT_PLACEMENT);
++        }
++        if (needs_model_file) {
++            LLAMA_LOG_INFO("siliang_ds4_front_slab: populated FRONT host store from model-owned GGUF receipt (%zu MiB)\n",
++                    host_store_size / (1024 * 1024));
++        }
++#else
++        return fail(FAILURE_ALLOCATION);
++#endif
 +        if (!cuda_ok(cuda.host_register(cuda_backend, host_store, host_store_size))) {
 +            return fail(FAILURE_ALLOCATION);
 +        }
@@ -7593,8 +7755,7 @@ index 0000000000000000000000000000000000000000..91d6640557077aa6c2f2afad77d8130d
 +            graph_mode_known = true;
 +            graph_tokens = marker_tokens;
 +            graph_decode = marker_tokens == 1;
-+            graph_managed = graph_decode ||
-+                (prefill_enabled && marker_tokens > 1 && marker_tokens <= max_graph_tokens);
++            graph_managed = marker_tokens > 0 && marker_tokens <= max_graph_tokens;
 +            if (!graph_managed) {
 +                pending_layer = -1;
 +                waited_layer = -1;
@@ -7707,7 +7868,6 @@ index 0000000000000000000000000000000000000000..91d6640557077aa6c2f2afad77d8130d
 +        graph_mode_known = false;
 +        graph_managed = false;
 +        graph_decode = false;
-+        prefill_enabled = false;
 +        graph_tokens = 0;
 +        max_graph_tokens = 1;
 +        bound.store(false, std::memory_order_release);
@@ -7746,7 +7906,6 @@ index 0000000000000000000000000000000000000000..91d6640557077aa6c2f2afad77d8130d
 +        return impl_->fail(FAILURE_INVALID_STATE);
 +    }
 +    impl_->ctx = &ctx;
-+    impl_->prefill_enabled = ctx.get_cparams().expert_cache.prefill;
 +    impl_->max_graph_tokens = std::max<int64_t>(1, ctx.n_ubatch());
 +    if (!impl_->load_cuda_bridge(ctx) || !impl_->build_storage() || !impl_->create_cuda_objects()) {
 +        impl_->release_binding();
@@ -8007,16 +8166,47 @@ index 0000000000000000000000000000000000000000..a3c1052be580ed7ceecbd3d64d01350e
 +};
 diff --git a/src/siliang-expert-source.h b/src/siliang-expert-source.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..01b630212a342f9eb0770985995098a049734064
+index 0000000000000000000000000000000000000000..72b1d213be6b1d40f687f040e8913e648aeaefd3
 --- /dev/null
 +++ b/src/siliang-expert-source.h
-@@ -0,0 +1,45 @@
+@@ -0,0 +1,76 @@
 +#pragma once
 +
 +#include <cstddef>
 +#include <cstdint>
 +#include <string>
 +#include <vector>
++
++
++// Non-owning receipt for tensor bytes that remain owned by the model file.
++// Managed residency layers may use these verified offsets to materialize their
++// own transient/resident copies, but do not become semantic/source owners.
++struct llama_siliang_file_tensor_ref {
++    std::string name;
++    uint64_t offset = 0;
++    uint64_t bytes = 0;
++};
++
++struct llama_siliang_file_source_receipt {
++    std::string path;
++    std::vector<llama_siliang_file_tensor_ref> tensors;
++
++    const llama_siliang_file_tensor_ref * find(const char * name) const {
++        if (name == nullptr) {
++            return nullptr;
++        }
++        for (const auto & tensor : tensors) {
++            if (tensor.name == name) {
++                return &tensor;
++            }
++        }
++        return nullptr;
++    }
++
++    bool valid() const {
++        return !path.empty() && !tensors.empty();
++    }
++};
 +
 +enum class llama_siliang_expert_source_kind : uint8_t {
 +    none = 0,
@@ -11258,7 +11448,7 @@ index 419e1eba4c2cdb465d20453004eeeca5af28037f..b66f6c8fa62a68fcc95194cf5d568903
 +++ b/tests/CMakeLists.txt
 @@ -258,6 +258,7 @@ llama_build_and_test(test-thread-safety.cpp ARGS -m "${MODEL_DEST}" -ngl 99 -p "
  set_tests_properties(test-thread-safety PROPERTIES FIXTURES_REQUIRED test-download-model)
- 
+
  llama_build_and_test(test-arg-parser.cpp)
 +llama_build_and_test(test-siliang-prefill.cpp)
  llama_build_and_test(test-model-resolution.cpp)
@@ -11273,16 +11463,16 @@ index fd5adb740eab632505cd0a4d999fb55a093a5f84..d1c58a368d236b6ded05c7353b610840
  #include "download.h"
  #include "llama.h"
 +#include "../src/siliang-moe-runtime.h"
- 
+
  #include <string>
  #include <vector>
  #include <sstream>
  #include <unordered_set>
 +#include <limits>
- 
+
  #undef NDEBUG
  #include <cassert>
- 
+
 +static void test_wtinylfu_policy() {
 +    using siliang_moe_policy::cache_slot;
 +    using siliang_moe_policy::slot_segment;
@@ -11437,12 +11627,12 @@ index fd5adb740eab632505cd0a4d999fb55a093a5f84..d1c58a368d236b6ded05c7353b610840
 +    test_lfu_policy_split();
 +
      common_params params;
- 
+
      printf("test-arg-parser: make sure there is no duplicated arguments in any examples\n\n");
 @@ -85,6 +239,293 @@ static void test(void) {
- 
+
      std::vector<std::string> argv;
- 
+
 +    printf("test-arg-parser: test expert cache option contract\n\n");
 +
 +    {
@@ -11731,7 +11921,7 @@ index fd5adb740eab632505cd0a4d999fb55a093a5f84..d1c58a368d236b6ded05c7353b610840
 +    }
 +
      printf("test-arg-parser: test invalid usage\n\n");
- 
+
      // missing value
 diff --git a/tests/test-siliang-prefill.cpp b/tests/test-siliang-prefill.cpp
 new file mode 100644
@@ -11855,16 +12045,16 @@ index 5d2798cc14e9295646bb8e570bbec166c9ecc72c..1162ccd4b1dc37d203f048d9fbe47f73
 @@ -1421,6 +1421,10 @@ private:
          model_aliases = params_base.model_alias;
          model_tags    = params_base.model_tags;
- 
+
 +        // Server capability and slot setup can execute small route probes after
 +        // common initialization. Establish the final serving telemetry scope.
 +        llama_init->reset_expert_cache_prefill_trace();
 +
          // propagate new defaults back to caller
          params = params_base;
- 
+
 @@ -2835,7 +2839,12 @@ private:
- 
+
              // TODO @ngxson : alora handling is too messy, need to refactor it to be more clear and maintainable
              // apply lora, only need to do it once per batch
 -            common_set_adapter_lora(ctx_tgt, slot_batched->lora);
@@ -11874,6 +12064,6 @@ index 5d2798cc14e9295646bb8e570bbec166c9ecc72c..1162ccd4b1dc37d203f048d9fbe47f73
 +                abort_all_slots(reason);
 +                return;
 +            }
- 
+
              // if the lora is temporarily disabled for an alora, re-enable it
              // for next time

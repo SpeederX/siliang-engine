@@ -1299,19 +1299,19 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
     static const char * const ds4_front_regex =
         "^blk\\.[0-9]+\\.(hc_attn_fn|hc_attn_scale|hc_attn_base|attn_norm|attn_q_a|attn_q_a_norm|attn_q_b|attn_kv|attn_kv_a_norm|attn_sinks|attn_compressor_ape|attn_compressor_gate|attn_compressor_kv|attn_compressor_norm|indexer\\.attn_q_b|indexer\\.proj|indexer_compressor_ape|indexer_compressor_gate|indexer_compressor_kv|indexer_compressor_norm)\\.weight$";
     const bool l1_enabled = !model_only && params.expert_cache.enabled && params.expert_cache.l1_k > 0;
-    const bool managed_expert_source = !model_only && params.expert_cache.enabled &&
+    const bool managed_no_mmap_source = !model_only && params.expert_cache.enabled &&
         params.expert_cache.l2_mib > 0 && params.load_mode == LLAMA_LOAD_MODE_NONE;
     if (l1_enabled && !params.lora_adapters.empty()) {
         COM_ERR("%s", "expert cache: L1 K/R/P does not support LoRA adapters\n");
         return;
     }
-    if (l1_enabled && params.fit_params) {
-        COM_WRN("%s", "expert cache: disabling automatic fit because the K+R arena is allocated after model load\n");
+    if ((l1_enabled || managed_no_mmap_source) && params.fit_params) {
+        COM_WRN("%s", "expert cache: disabling automatic fit because managed arena/proxy memory is allocated outside model fit\n");
         params.fit_params = false;
     }
     static const std::string managed_expert_regex =
         std::string(R"(^blk\.[0-9]+)") + LLM_FFN_EXPS_REGEX + R"(\.weight$)";
-    if (managed_expert_source) {
+    if (managed_no_mmap_source) {
         static std::list<std::string> managed_override_patterns;
         ggml_backend_buffer_type_t managed_buft = ggml_backend_cpu_siliang_managed_buffer_type();
         for (auto & current : params.tensor_buft_overrides) {
@@ -1330,32 +1330,37 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
         }
     }
 
-    if (l1_enabled || managed_expert_source) {
-        const char * pattern = managed_expert_source ? managed_expert_regex.c_str() : LLM_FFN_EXPS_REGEX;
-        ggml_backend_buffer_type_t buft = managed_expert_source ?
+    if (l1_enabled || managed_no_mmap_source) {
+        const char * pattern = managed_no_mmap_source ? managed_expert_regex.c_str() : LLM_FFN_EXPS_REGEX;
+        ggml_backend_buffer_type_t buft = managed_no_mmap_source ?
             ggml_backend_cpu_siliang_managed_buffer_type() : ggml_backend_cpu_buffer_type();
         if (!common_append_tensor_buft_override(
-                params, pattern, buft, managed_expert_source ? "managed routed-expert source" : "routed-expert CPU")) {
+                params, pattern, buft, managed_no_mmap_source ? "managed routed-expert source" : "routed-expert CPU")) {
             return;
         }
-        if (managed_expert_source) {
+        if (managed_no_mmap_source) {
             // Keep scale/bias/other expert sidecars ordinary CPU tensors. The
             // managed proxy is only for the large routed expert weight tensors.
             if (!common_append_tensor_buft_override(
                     params, LLM_FFN_EXPS_REGEX, ggml_backend_cpu_buffer_type(), "routed-expert sidecar CPU")) {
                 return;
             }
-            COM_INF("%s", "expert cache: no-mmap managed routed-expert proxy prepared; GGUF/SiliangEM owns weight bytes\n");
+            COM_INF("%s", "expert cache: no-mmap managed routed-expert proxy prepared; model-owned GGUF source is materialized through SiliangEM\n");
         } else {
             COM_INF("%s", "expert cache: routed-expert CPU placement rule prepared; runtime will validate effective placement\n");
         }
     }
     if (l1_enabled && params.expert_cache.roll == COMMON_EXPERT_CACHE_ROLL_DEEPSEEK4) {
+        ggml_backend_buffer_type_t front_buft = managed_no_mmap_source ?
+            ggml_backend_cpu_siliang_managed_buffer_type() : ggml_backend_cpu_buffer_type();
         if (!common_append_tensor_buft_override(
-                params, ds4_front_regex, ggml_backend_cpu_buffer_type(), "DeepSeek-V4 FRONT CPU")) {
+                params, ds4_front_regex, front_buft,
+                managed_no_mmap_source ? "managed DeepSeek-V4 FRONT source" : "DeepSeek-V4 FRONT CPU")) {
             return;
         }
-        COM_INF("%s", "expert cache: exact DeepSeek-V4 FRONT CPU placement rule prepared; runtime will validate effective placement\n");
+        COM_INF("%s", managed_no_mmap_source ?
+            "expert cache: DeepSeek-V4 FRONT model-file receipt/proxy prepared; roller will materialize its host store directly\n" :
+            "expert cache: exact DeepSeek-V4 FRONT CPU placement rule prepared; runtime will validate effective placement\n");
     }
 
     auto mparams = common_model_params_to_llama(params);

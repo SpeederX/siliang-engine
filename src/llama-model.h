@@ -560,6 +560,7 @@ struct llama_model {
     llama_vocab   vocab;
 
     llama_siliang_expert_source siliang_expert_source;
+    llama_siliang_file_source_receipt siliang_file_source;
 
     // for classifier models
     std::vector<std::string> classifier_labels;

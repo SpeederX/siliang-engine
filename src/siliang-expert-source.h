@@ -5,6 +5,37 @@
 #include <string>
 #include <vector>
 
+
+// Non-owning receipt for tensor bytes that remain owned by the model file.
+// Managed residency layers may use these verified offsets to materialize their
+// own transient/resident copies, but do not become semantic/source owners.
+struct llama_siliang_file_tensor_ref {
+    std::string name;
+    uint64_t offset = 0;
+    uint64_t bytes = 0;
+};
+
+struct llama_siliang_file_source_receipt {
+    std::string path;
+    std::vector<llama_siliang_file_tensor_ref> tensors;
+
+    const llama_siliang_file_tensor_ref * find(const char * name) const {
+        if (name == nullptr) {
+            return nullptr;
+        }
+        for (const auto & tensor : tensors) {
+            if (tensor.name == name) {
+                return &tensor;
+            }
+        }
+        return nullptr;
+    }
+
+    bool valid() const {
+        return !path.empty() && !tensors.empty();
+    }
+};
+
 enum class llama_siliang_expert_source_kind : uint8_t {
     none = 0,
     legacy_slab,

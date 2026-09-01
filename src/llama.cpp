@@ -356,6 +356,10 @@ static std::pair<int, llama_model *> llama_model_load(struct gguf_context * meta
         if (!model->load_tensors(ml)) {
             return {-2, nullptr};
         }
+        // Generic managed-file receipts are populated while tensors are
+        // created, so publish them only after load_tensors() has finalized the
+        // loader-owned receipt. Expert-source geometry is available earlier.
+        model_ptr->siliang_file_source = ml.siliang_file_source;
 
         return {0, model_ptr.release()};
     } catch (const std::exception & err) {

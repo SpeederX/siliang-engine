@@ -14,11 +14,11 @@
   "source": {
     "canonicalPatch": {
       "path": "patches/siliang-engine.patch",
-      "sha256": "98413ABA53FCD432DE6EB05E0E2D25791F7C26DBBB6888529FFAD2C65B5F4AF1",
-      "gitBlob": "9690f097d6af1c93207f1d7ba151f2b9184a6f5b"
+      "sha256": "4FB0DC53C831DBFD9869ABC3B4823D5CE66E35CDA15FE097336ECD469BD6EF0F",
+      "gitBlob": "43e416ebf3d1f0d493b7d7572dae2954228e0037"
     },
     "engineDelta": {
-      "insertions": 10899,
+      "insertions": 11075,
       "deletions": 29,
       "files": [
         {
@@ -34,8 +34,8 @@
           "status": "modified",
           "mode": "100644",
           "baseBlob": "d9ce5755161edc853dbcf629819ee75971ba413d",
-          "finalBlob": "3c25ea9519bca36bffdca6f3ce1230bcce112a38",
-          "previousBlob": "702a52c5e1cf0603862c294fe56d82a040de2098"
+          "finalBlob": "2a7248fff647e177c3b7e37d634178d078566724",
+          "previousBlob": "3c25ea9519bca36bffdca6f3ce1230bcce112a38"
         },
         {
           "path": "common/common.h",
@@ -174,16 +174,16 @@
           "status": "modified",
           "mode": "100644",
           "baseBlob": "b31e92e2da7ef42eabbb47173bb1f2088c952f39",
-          "finalBlob": "630aa17427d80a56559813d67e3d97d25d9a76b9",
-          "previousBlob": "709db618f656f22e02fbcea1101db185341a8afb"
+          "finalBlob": "1f22894f6e1e99b42f89a878915a9d12b7fd6cd6",
+          "previousBlob": "630aa17427d80a56559813d67e3d97d25d9a76b9"
         },
         {
           "path": "src/llama-model-loader.h",
           "status": "modified",
           "mode": "100644",
           "baseBlob": "d6b31c2311186608f48e88d1a37c23adc7e1b0c7",
-          "finalBlob": "fec9ae9ee9550f8a7cb930f9a0334aa3c5c157be",
-          "previousBlob": "aa1772d1377724450c2f3b9b3013e771607f8c3f"
+          "finalBlob": "f03513c4a7dde82fa69d38480592bf8a5dc48c35",
+          "previousBlob": "fec9ae9ee9550f8a7cb930f9a0334aa3c5c157be"
         },
         {
           "path": "src/llama-model.cpp",
@@ -198,29 +198,32 @@
           "status": "modified",
           "mode": "100644",
           "baseBlob": "6b9e94a0a6921745fd20f58aba38490480c36a38",
-          "finalBlob": "f14b607ded2574b98290f9eb5e9237989e9313d6"
+          "finalBlob": "f10d49771cc26af6cb7d1856d84c4a8cd4653473",
+          "previousBlob": "f14b607ded2574b98290f9eb5e9237989e9313d6"
         },
         {
           "path": "src/llama.cpp",
           "status": "modified",
           "mode": "100644",
           "baseBlob": "d6e0bbfefa729329fe6b83e46e603a85dab0f2e3",
-          "finalBlob": "3113ca8d1cacc2a8c42ef815e4aba9a6c22a88bb"
+          "finalBlob": "f86fb3124cf4e5f35b22098391af07cae3c3a9cc",
+          "previousBlob": "3113ca8d1cacc2a8c42ef815e4aba9a6c22a88bb"
         },
         {
           "path": "src/models/deepseek4.cpp",
           "status": "modified",
           "mode": "100644",
           "baseBlob": "89cd461765adfe8c32fa2e6c6b6d2e962de4b0ac",
-          "finalBlob": "e0ae251cb500c5eb55d6b2c8b36a24a6f6005b84"
+          "finalBlob": "10d8f5ef0b34c9a989d11856ba9dcebddb59723c",
+          "previousBlob": "e0ae251cb500c5eb55d6b2c8b36a24a6f6005b84"
         },
         {
           "path": "src/siliang-ds4-front-slab.cpp",
           "status": "added",
           "mode": "100644",
           "baseBlob": null,
-          "finalBlob": "91d6640557077aa6c2f2afad77d8130df46f2ab9",
-          "previousBlob": "8068e77bc74bc1198b79c80deb50431551a03c32"
+          "finalBlob": "6f9a6ad9aaf1afe20f5e29ed950489f8e5a03075",
+          "previousBlob": "91d6640557077aa6c2f2afad77d8130df46f2ab9"
         },
         {
           "path": "src/siliang-ds4-front-slab.h",
@@ -234,7 +237,8 @@
           "status": "added",
           "mode": "100644",
           "baseBlob": null,
-          "finalBlob": "01b630212a342f9eb0770985995098a049734064"
+          "finalBlob": "72b1d213be6b1d40f687f040e8913e648aeaefd3",
+          "previousBlob": "01b630212a342f9eb0770985995098a049734064"
         },
         {
           "path": "src/siliang-moe-runtime.cpp",

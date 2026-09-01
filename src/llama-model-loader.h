@@ -109,6 +109,10 @@ struct llama_model_loader {
     // Everything in llama.cpp then works unchanged EXCEPT nb[2], which is
     // derived assuming contiguity. This map supplies the true expert stride
     // per layer; create_tensor() writes it into nb[2].
+    std::string primary_source_path;
+    llama_siliang_file_source_receipt siliang_file_source;
+    std::set<const struct ggml_tensor *> file_managed_only;
+
     bool expert_major = false;
     bool expert_major_managed_only = false;
     std::map<int, uint64_t> expert_stride;   // layer -> bytes between experts

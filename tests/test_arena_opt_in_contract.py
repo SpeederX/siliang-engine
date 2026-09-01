@@ -22,6 +22,10 @@ BACKEND_SOURCE = (REPOSITORY_ROOT / "ggml/src/ggml-backend.cpp").read_text(encod
 CPU_SOURCE = (REPOSITORY_ROOT / "ggml/src/ggml-cpu/ggml-cpu.c").read_text(encoding="utf-8")
 MODEL_LOADER = (REPOSITORY_ROOT / "src/llama-model-loader.cpp").read_text(encoding="utf-8")
 MODEL_SOURCE = (REPOSITORY_ROOT / "src/llama-model.cpp").read_text(encoding="utf-8")
+LLAMA_SOURCE = (REPOSITORY_ROOT / "src/llama.cpp").read_text(encoding="utf-8")
+DEEPSEEK4_SOURCE = (REPOSITORY_ROOT / "src/models/deepseek4.cpp").read_text(encoding="utf-8")
+FRONT_SOURCE = (REPOSITORY_ROOT / "src/siliang-ds4-front-slab.cpp").read_text(encoding="utf-8")
+EXPERT_SOURCE_HEADER = (REPOSITORY_ROOT / "src/siliang-expert-source.h").read_text(encoding="utf-8")
 CLI_HELP_DOC = (REPOSITORY_ROOT / "tools/cli/README.md").read_text(encoding="utf-8")
 SERVER_HELP_DOC = (REPOSITORY_ROOT / "tools/server/README.md").read_text(encoding="utf-8")
 SERVER_SOURCE = (REPOSITORY_ROOT / "tools/server/server-context.cpp").read_text(encoding="utf-8")
@@ -75,7 +79,7 @@ class ArenaOptInContractTests(unittest.TestCase):
         self.assertIn("PAGE_NOACCESS", reserve)
         self.assertNotIn("MEM_COMMIT", reserve)
 
-        self.assertIn("managed_expert_source", COMMON_SOURCE)
+        self.assertIn("managed_no_mmap_source", COMMON_SOURCE)
         self.assertIn("params.load_mode == LLAMA_LOAD_MODE_NONE", COMMON_SOURCE)
         self.assertIn("params.expert_cache.l2_mib > 0", COMMON_SOURCE)
         self.assertIn("managed_override_patterns", COMMON_SOURCE)
@@ -85,7 +89,7 @@ class ArenaOptInContractTests(unittest.TestCase):
         self.assertIn("expert_major_managed_only", MODEL_LOADER)
         self.assertIn("em_managed_only", MODEL_LOADER)
         self.assertIn("routed expert tensor bytes are not materialized", MODEL_LOADER)
-        self.assertIn("managed expert tensor lost its proxy buffer", MODEL_LOADER)
+        self.assertIn("managed tensor lost its proxy buffer", MODEL_LOADER)
 
         self.assertIn("const int managed_only = ggml_backend_buffer_is_siliang_managed", CPU_SOURCE)
         self.assertIn("refusing model-backing fallback", CPU_SOURCE)
@@ -95,6 +99,27 @@ class ArenaOptInContractTests(unittest.TestCase):
         self.assertIn("proxy reserves only the logical projection size", MODEL_LOADER)
         self.assertIn("proxy VA reserve", MODEL_SOURCE)
         self.assertIn("committed = 0 MiB", MODEL_SOURCE)
+
+
+    def test_ds4_front_managed_file_source_is_independent_from_routed_prefill(self) -> None:
+        selector = function_body(DEEPSEEK4_SOURCE, "static const llama_layer & ds4_front_slab_layer(")
+        observer = function_body(FRONT_SOURCE, "void observe(int split_index, ggml_backend_t backend, const ggml_cgraph * graph)")
+
+        self.assertIn("siliang_ds4_front_slab_enabled", selector)
+        self.assertNotIn("expert_cache.prefill", selector)
+        self.assertNotIn("managed_graph", selector)
+        self.assertIn("marker_tokens > 0 && marker_tokens <= max_graph_tokens", observer)
+        self.assertNotIn("prefill_enabled", observer)
+
+        self.assertIn("managed DeepSeek-V4 FRONT source", COMMON_SOURCE)
+        self.assertIn("roller will materialize its host store directly", COMMON_SOURCE)
+        self.assertIn("llama_siliang_file_source_receipt", EXPERT_SOURCE_HEADER)
+        self.assertIn("populated FRONT host store from model-owned GGUF receipt", FRONT_SOURCE)
+        self.assertIn("read_file_range", FRONT_SOURCE)
+
+        load_pos = LLAMA_SOURCE.index("if (!model->load_tensors(ml))")
+        receipt_pos = LLAMA_SOURCE.index("model_ptr->siliang_file_source = ml.siliang_file_source")
+        self.assertGreater(receipt_pos, load_pos)
 
     def test_public_cpu_api_uses_typed_configuration(self) -> None:
         self.assertIn("struct ggml_siliangem_cache_config", CPU_HEADER)
