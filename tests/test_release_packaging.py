@@ -161,6 +161,19 @@ class ReleasePackagingContractTests(unittest.TestCase):
         self.assertIn("cpu_dispatch_build_host_selection=$selectedCpuVariant", text)
         self.assertIn("Copy-Item -LiteralPath $buildReceiptPath -Destination $provenanceTarget", text)
 
+    def test_list_devices_flushes_async_log_before_exit(self) -> None:
+        arg_source = (ROOT / "common" / "arg.cpp").read_text(encoding="utf-8")
+        start = arg_source.index('{"--list-devices"}')
+        end = arg_source.index('    add_opt(common_arg(', start + 1)
+        list_devices = arg_source[start:end]
+
+        self.assertIn("common_print_available_devices();", list_devices)
+        self.assertIn("common_log_flush(common_log_main());", list_devices)
+        self.assertLess(
+            list_devices.index("common_log_flush(common_log_main());"),
+            list_devices.index("exit(0);")
+        )
+
     def test_publish_workflow_uses_native_process_capture_for_package_smoke(self) -> None:
         text = PUBLISH_WORKFLOW.read_text(encoding="utf-8")
 

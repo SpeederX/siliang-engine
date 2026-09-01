@@ -2902,6 +2902,9 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         "print list of available devices and exit",
         [](common_params &) {
             common_print_available_devices();
+            // The logger is asynchronous. Flush before this short-lived exit so
+            // --log-file and redirected stderr retain backend-dispatch evidence.
+            common_log_flush(common_log_main());
             exit(0);
         }
     ));
