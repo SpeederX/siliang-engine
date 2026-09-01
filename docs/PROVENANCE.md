@@ -26,11 +26,11 @@ canonical engine-only delta from the pinned upstream base.
 
 | Identity | Value |
 | --- | --- |
-| SHA-256 | `F857F01F180724BDEA2A25303BA61774533890085456C3D7E5E41D1EEA16CF20` |
-| Git blob | `1ad533211c33348b109ec9bf3d5497e4ac4c6b2b` |
+| SHA-256 | `2816F51B22F10EA599D56FDDD0DD5F95284237D1789DD7BB75ECCA4F4DF36379` |
+| Git blob | `0a4dbd40b22567451b47efb98c86c3bc1bd14250` |
 
 The patch uses full Git object IDs and LF line endings. It contains exactly
-**10,548 insertions and 24 deletions** across 34 paths.
+**10,551 insertions and 24 deletions** across 34 paths.
 
 ## Engine delta
 
@@ -45,7 +45,7 @@ patch.
 
 | Path | Base Git blob | Siliang Git blob |
 | --- | --- | --- |
-| `common/arg.cpp` | `86af0ba10a327283f2500f0bb8e48095df547017` | `21881e865fd7f870b4f25c0cbeeb7b1e707df7dc` |
+| `common/arg.cpp` | `86af0ba10a327283f2500f0bb8e48095df547017` | `6cbfc21a81c449b46cfa3456f40030161765995b` |
 | `common/common.cpp` | `d9ce5755161edc853dbcf629819ee75971ba413d` | `1ffabac36f8c0382bc284104391fd7f00cbf5106` |
 | `common/common.h` | `3444aa157e9b73727ea2ca6107eb0dc9f9b36a74` | `86bbf4a9c35e7abc35e0cd1521a6557d41602ca9` |
 | `common/speculative.cpp` | `70dc0ac3b1b74fdd5f08b470308786c3f12411e7` | `3f7c5f87559b224c038b86f958557abbad2c13a4` |

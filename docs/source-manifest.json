@@ -14,11 +14,11 @@
   "source": {
     "canonicalPatch": {
       "path": "patches/siliang-engine.patch",
-      "sha256": "F857F01F180724BDEA2A25303BA61774533890085456C3D7E5E41D1EEA16CF20",
-      "gitBlob": "1ad533211c33348b109ec9bf3d5497e4ac4c6b2b"
+      "sha256": "2816F51B22F10EA599D56FDDD0DD5F95284237D1789DD7BB75ECCA4F4DF36379",
+      "gitBlob": "0a4dbd40b22567451b47efb98c86c3bc1bd14250"
     },
     "engineDelta": {
-      "insertions": 10548,
+      "insertions": 10551,
       "deletions": 24,
       "files": [
         {
@@ -26,7 +26,8 @@
           "status": "modified",
           "mode": "100644",
           "baseBlob": "86af0ba10a327283f2500f0bb8e48095df547017",
-          "finalBlob": "21881e865fd7f870b4f25c0cbeeb7b1e707df7dc"
+          "finalBlob": "6cbfc21a81c449b46cfa3456f40030161765995b",
+          "previousBlob": "21881e865fd7f870b4f25c0cbeeb7b1e707df7dc"
         },
         {
           "path": "common/common.cpp",
