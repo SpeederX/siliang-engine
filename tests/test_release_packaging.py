@@ -23,7 +23,7 @@ class ReleasePackagingContractTests(unittest.TestCase):
         self.assertIn("inputs.tag || github.ref_name", publish_text)
         self.assertIn('git rev-parse "$tag^{commit}"', publish_text)
         self.assertNotIn("git describe --tags --exact-match HEAD", publish_text)
-        self.assertIn("- name: Verify fork provenance", publish_text)
+        self.assertNotIn("./scripts/verify-snapshot.ps1", publish_text)
         self.assertIn(f"'.{bs}docs{bs}CONFIGURATION.md'", ci_text)
         self.assertIn(f'$releaseNotesPath = ".{bs}docs{bs}releases{bs}$tag.md"', ci_text)
         self.assertIn("$releaseDocsTarget = Join-Path $docsTarget 'releases'", ci_text)

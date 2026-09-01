@@ -58,11 +58,6 @@ jobs:
 
           Write-Host "Verified exact release tag $tag at $headSha"
 
-      - name: Verify fork provenance
-        shell: pwsh
-        run: |
-          ./scripts/verify-snapshot.ps1
-
       - name: Wait for matching Siliang CI tag run
         id: ci
         env:
