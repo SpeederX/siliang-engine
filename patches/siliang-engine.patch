@@ -295,7 +295,7 @@ index 86af0ba10a327283f2500f0bb8e48095df547017..6cbfc21a81c449b46cfa3456f4003016
          }
      ));
 diff --git a/common/common.cpp b/common/common.cpp
-index d9ce5755161edc853dbcf629819ee75971ba413d..1ffabac36f8c0382bc284104391fd7f00cbf5106 100644
+index d9ce5755161edc853dbcf629819ee75971ba413d..702a52c5e1cf0603862c294fe56d82a040de2098 100644
 --- a/common/common.cpp
 +++ b/common/common.cpp
 @@ -9,6 +9,7 @@
@@ -414,7 +414,7 @@ index d9ce5755161edc853dbcf629819ee75971ba413d..1ffabac36f8c0382bc284104391fd7f0
      auto mparams = common_model_params_to_llama(params);
      auto cparams = common_context_params_to_llama(params);
  
-@@ -1334,6 +1422,38 @@ common_init_result::common_init_result(common_params & params, bool model_only)
+@@ -1334,6 +1422,39 @@ common_init_result::common_init_result(common_params & params, bool model_only)
      }
  
      pimpl->context.reset(lctx);
@@ -445,15 +445,16 @@ index d9ce5755161edc853dbcf629819ee75971ba413d..1ffabac36f8c0382bc284104391fd7f0
 +        }
 +        llama_siliang_ds4_front_slab_metrics metrics = {};
 +        if (llama_siliang_ds4_front_slab_runtime_metrics(pimpl->front_runtime.get(), &metrics)) {
-+            COM_INF("expert cache: DeepSeek-V4 FRONT slab armed bank=%zu MiB host=%zu MiB resident_layer=%d\n",
++            COM_INF("expert cache: DeepSeek-V4 FRONT slab armed bank=%zu MiB host=%zu MiB resident_layer=%d "
++                    "banks=2 total=%zu MiB\n",
 +                    metrics.bank_bytes / (1024 * 1024), metrics.host_store_bytes / (1024 * 1024),
-+                    metrics.resident_layer);
++                    metrics.resident_layer, 2 * metrics.bank_bytes / (1024 * 1024));
 +        }
 +    }
  }
  
  llama_model * common_init_result::model() {
-@@ -1344,6 +1464,16 @@ llama_context * common_init_result::context() {
+@@ -1344,6 +1465,16 @@ llama_context * common_init_result::context() {
      return pimpl->context.get();
  }
  
@@ -470,7 +471,7 @@ index d9ce5755161edc853dbcf629819ee75971ba413d..1ffabac36f8c0382bc284104391fd7f0
  common_sampler * common_init_result::sampler(llama_seq_id seq_id) {
      if (seq_id < 0 || seq_id >= (int) pimpl->samplers.size()) {
          return nullptr;
-@@ -1432,8 +1562,10 @@ common_init_result_ptr common_init_from_params(common_params & params, bool mode
+@@ -1432,8 +1563,10 @@ common_init_result_ptr common_init_from_params(common_params & params, bool mode
          }
      }
  
@@ -483,7 +484,7 @@ index d9ce5755161edc853dbcf629819ee75971ba413d..1ffabac36f8c0382bc284104391fd7f0
      }
  
      if (params.warmup) {
-@@ -1474,6 +1606,10 @@ common_init_result_ptr common_init_from_params(common_params & params, bool mode
+@@ -1474,6 +1607,10 @@ common_init_result_ptr common_init_from_params(common_params & params, bool mode
          res->reset_samplers();
      }
  
@@ -494,7 +495,7 @@ index d9ce5755161edc853dbcf629819ee75971ba413d..1ffabac36f8c0382bc284104391fd7f0
      return res;
  }
  
-@@ -1593,7 +1729,7 @@ void common_memory::seq_add(llama_seq_id seq_id, llama_pos p0, llama_pos p1, lla
+@@ -1593,7 +1730,7 @@ void common_memory::seq_add(llama_seq_id seq_id, llama_pos p0, llama_pos p1, lla
      }
  }
  
@@ -503,7 +504,7 @@ index d9ce5755161edc853dbcf629819ee75971ba413d..1ffabac36f8c0382bc284104391fd7f0
      std::vector<llama_adapter_lora *> loras;
      std::vector<float> scales;
  
-@@ -1602,7 +1738,7 @@ void common_set_adapter_lora(struct llama_context * ctx, std::vector<common_adap
+@@ -1602,7 +1739,7 @@ void common_set_adapter_lora(struct llama_context * ctx, std::vector<common_adap
          scales.push_back(la.scale);
      }
  
@@ -512,7 +513,7 @@ index d9ce5755161edc853dbcf629819ee75971ba413d..1ffabac36f8c0382bc284104391fd7f0
  }
  
  struct llama_model_params common_model_params_to_llama(common_params & params) {
-@@ -1646,6 +1782,20 @@ struct llama_model_params common_model_params_to_llama(common_params & params) {
+@@ -1646,6 +1783,20 @@ struct llama_model_params common_model_params_to_llama(common_params & params) {
  struct llama_context_params common_context_params_to_llama(const common_params & params) {
      auto cparams = llama_context_default_params();
  
@@ -533,7 +534,7 @@ index d9ce5755161edc853dbcf629819ee75971ba413d..1ffabac36f8c0382bc284104391fd7f0
      cparams.n_ctx             = params.n_ctx;
      cparams.n_seq_max         = params.n_parallel;
      cparams.n_rs_seq          = params.speculative.need_n_rs_seq();
-@@ -1675,6 +1825,22 @@ struct llama_context_params common_context_params_to_llama(const common_params &
+@@ -1675,6 +1826,22 @@ struct llama_context_params common_context_params_to_llama(const common_params &
      cparams.swa_full          = params.swa_full;
      cparams.kv_unified        = params.kv_unified;
  
@@ -824,10 +825,10 @@ index dc6453c6eaa16667f720f987659ad42d03a403a2..8f1634660f907e8e2d52ad8c20c122e5
      GGML_BACKEND_API int ggml_cpu_has_avx_vnni   (void);
      GGML_BACKEND_API int ggml_cpu_has_avx2       (void);
 diff --git a/ggml/include/ggml-cuda.h b/ggml/include/ggml-cuda.h
-index 1cd81eeaebcdf4abcd46c87ba1a9a46e275aa12b..9377ba5b12d4ce22025852ecef7b5f15b3cab6cc 100644
+index 1cd81eeaebcdf4abcd46c87ba1a9a46e275aa12b..6c4776a86af28a6485d8cfb8b4242b2080e7bd16 100644
 --- a/ggml/include/ggml-cuda.h
 +++ b/ggml/include/ggml-cuda.h
-@@ -40,6 +40,73 @@ GGML_BACKEND_API void ggml_backend_cuda_get_device_memory(int device, size_t * f
+@@ -40,6 +40,76 @@ GGML_BACKEND_API void ggml_backend_cuda_get_device_memory(int device, size_t * f
  GGML_BACKEND_API bool ggml_backend_cuda_register_host_buffer(void * buffer, size_t size);
  GGML_BACKEND_API void ggml_backend_cuda_unregister_host_buffer(void * buffer);
  
@@ -864,6 +865,9 @@ index 1cd81eeaebcdf4abcd46c87ba1a9a46e275aa12b..9377ba5b12d4ce22025852ecef7b5f15
 +        ggml_backend_cuda_siliang_stream_t stream,
 +        ggml_backend_cuda_siliang_event_t event);
 +GGML_BACKEND_API enum ggml_backend_cuda_siliang_status ggml_backend_cuda_siliang_main_stream_event_record(
++        ggml_backend_t backend,
++        ggml_backend_cuda_siliang_event_t event);
++GGML_BACKEND_API enum ggml_backend_cuda_siliang_status ggml_backend_cuda_siliang_all_streams_event_record(
 +        ggml_backend_t backend,
 +        ggml_backend_cuda_siliang_event_t event);
 +GGML_BACKEND_API enum ggml_backend_cuda_siliang_status ggml_backend_cuda_siliang_stream_wait_event(
@@ -3901,7 +3905,7 @@ index 0000000000000000000000000000000000000000..f0d97e499332959d836ec8d97aa4f63f
 +
 +#endif /* _WIN32 */
 diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
-index 561ab7ac599f9e285d2a0296caee0ab0a14ea5c8..d3d2cb63b8ec6a9e9621d29a44af510b607423ca 100644
+index 561ab7ac599f9e285d2a0296caee0ab0a14ea5c8..3ed2efc408af1388904873b03d324c23fa69c6de 100644
 --- a/ggml/src/ggml-cuda/ggml-cuda.cu
 +++ b/ggml/src/ggml-cuda/ggml-cuda.cu
 @@ -83,6 +83,7 @@
@@ -3912,7 +3916,7 @@ index 561ab7ac599f9e285d2a0296caee0ab0a14ea5c8..d3d2cb63b8ec6a9e9621d29a44af510b
  #include <cstdarg>
  #include <cstdio>
  #include <cstdlib>
-@@ -745,6 +746,391 @@ static bool ggml_backend_buffer_is_cuda(ggml_backend_buffer_t buffer) {
+@@ -745,6 +746,443 @@ static bool ggml_backend_buffer_is_cuda(ggml_backend_buffer_t buffer) {
      return buffer->iface.free_buffer == ggml_backend_cuda_buffer_free_buffer;
  }
  
@@ -3923,6 +3927,7 @@ index 561ab7ac599f9e285d2a0296caee0ab0a14ea5c8..d3d2cb63b8ec6a9e9621d29a44af510b
 +
 +struct ggml_backend_cuda_siliang_event {
 +    cudaEvent_t event = nullptr;
++    cudaEvent_t join_events[GGML_CUDA_MAX_STREAMS - 1] = {};
 +    int device = -1;
 +};
 +
@@ -4037,7 +4042,20 @@ index 561ab7ac599f9e285d2a0296caee0ab0a14ea5c8..d3d2cb63b8ec6a9e9621d29a44af510b
 +    }
 +
 +    ggml_cuda_set_device(value->device);
-+    const cudaError_t error = cudaEventDestroy(value->event);
++    cudaError_t error = cudaSuccess;
++    for (cudaEvent_t & join_event : value->join_events) {
++        if (join_event != nullptr) {
++            const cudaError_t join_error = cudaEventDestroy(join_event);
++            if (error == cudaSuccess && join_error != cudaSuccess) {
++                error = join_error;
++            }
++            join_event = nullptr;
++        }
++    }
++    const cudaError_t event_error = cudaEventDestroy(value->event);
++    if (error == cudaSuccess && event_error != cudaSuccess) {
++        error = event_error;
++    }
 +    delete value;
 +    return error == cudaSuccess
 +        ? GGML_BACKEND_CUDA_SILIANG_STATUS_SUCCESS
@@ -4094,6 +4112,44 @@ index 561ab7ac599f9e285d2a0296caee0ab0a14ea5c8..d3d2cb63b8ec6a9e9621d29a44af510b
 +
 +    ggml_cuda_set_device(context->device);
 +    return cudaEventRecord(event_value->event, context->stream(context->device, 0)) == cudaSuccess
++        ? GGML_BACKEND_CUDA_SILIANG_STATUS_SUCCESS
++        : GGML_BACKEND_CUDA_SILIANG_STATUS_CUDA_ERROR;
++}
++
++enum ggml_backend_cuda_siliang_status ggml_backend_cuda_siliang_all_streams_event_record(
++        ggml_backend_t backend,
++        ggml_backend_cuda_siliang_event_t event) {
++    ggml_backend_cuda_context * context = nullptr;
++    auto * event_value = static_cast<ggml_backend_cuda_siliang_event *>(event);
++    const enum ggml_backend_cuda_siliang_status status =
++        ggml_backend_cuda_siliang_get_context(backend, &context);
++    if (event_value == nullptr) {
++        return GGML_BACKEND_CUDA_SILIANG_STATUS_INVALID_ARGUMENT;
++    }
++    if (status != GGML_BACKEND_CUDA_SILIANG_STATUS_SUCCESS) {
++        return status;
++    }
++    if (context->device != event_value->device) {
++        return GGML_BACKEND_CUDA_SILIANG_STATUS_WRONG_DEVICE;
++    }
++
++    ggml_cuda_set_device(context->device);
++    cudaStream_t main_stream = context->stream(context->device, 0);
++    for (int stream_index = 1; stream_index < GGML_CUDA_MAX_STREAMS; ++stream_index) {
++        cudaStream_t stream = context->streams[context->device][stream_index];
++        if (stream == nullptr) {
++            continue;
++        }
++        cudaEvent_t & join_event = event_value->join_events[stream_index - 1];
++        if (join_event == nullptr && cudaEventCreateWithFlags(&join_event, cudaEventDisableTiming) != cudaSuccess) {
++            return GGML_BACKEND_CUDA_SILIANG_STATUS_CUDA_ERROR;
++        }
++        if (cudaEventRecord(join_event, stream) != cudaSuccess ||
++            cudaStreamWaitEvent(main_stream, join_event, 0) != cudaSuccess) {
++            return GGML_BACKEND_CUDA_SILIANG_STATUS_CUDA_ERROR;
++        }
++    }
++    return cudaEventRecord(event_value->event, main_stream) == cudaSuccess
 +        ? GGML_BACKEND_CUDA_SILIANG_STATUS_SUCCESS
 +        : GGML_BACKEND_CUDA_SILIANG_STATUS_CUDA_ERROR;
 +}
@@ -4304,7 +4360,7 @@ index 561ab7ac599f9e285d2a0296caee0ab0a14ea5c8..d3d2cb63b8ec6a9e9621d29a44af510b
  static void * ggml_backend_cuda_buffer_get_base(ggml_backend_buffer_t buffer) {
      ggml_backend_cuda_buffer_context * ctx = (ggml_backend_cuda_buffer_context *)buffer->context;
      return ctx->dev_ptr;
-@@ -5347,6 +5733,51 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
+@@ -5347,6 +5785,54 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
      if (strcmp(name, "ggml_backend_unregister_host_buffer") == 0) {
          return (void *)ggml_backend_cuda_unregister_host_buffer;
      }
@@ -4331,6 +4387,9 @@ index 561ab7ac599f9e285d2a0296caee0ab0a14ea5c8..d3d2cb63b8ec6a9e9621d29a44af510b
 +    }
 +    if (strcmp(name, "ggml_backend_cuda_siliang_main_stream_event_record") == 0) {
 +        return (void *)ggml_backend_cuda_siliang_main_stream_event_record;
++    }
++    if (strcmp(name, "ggml_backend_cuda_siliang_all_streams_event_record") == 0) {
++        return (void *)ggml_backend_cuda_siliang_all_streams_event_record;
 +    }
 +    if (strcmp(name, "ggml_backend_cuda_siliang_stream_wait_event") == 0) {
 +        return (void *)ggml_backend_cuda_siliang_stream_wait_event;
@@ -6639,10 +6698,10 @@ index 89cd461765adfe8c32fa2e6c6b6d2e962de4b0ac..e0ae251cb500c5eb55d6b2c8b36a24a6
          cur = build_attention(model, inp_dsv4, cur, inp_pos, il);
 diff --git a/src/siliang-ds4-front-slab.cpp b/src/siliang-ds4-front-slab.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..8068e77bc74bc1198b79c80deb50431551a03c32
+index 0000000000000000000000000000000000000000..91d6640557077aa6c2f2afad77d8130df46f2ab9
 --- /dev/null
 +++ b/src/siliang-ds4-front-slab.cpp
-@@ -0,0 +1,887 @@
+@@ -0,0 +1,940 @@
 +#include "siliang-ds4-front-slab.h"
 +
 +#include "ggml-cpp.h"
@@ -6675,6 +6734,7 @@ index 0000000000000000000000000000000000000000..8068e77bc74bc1198b79c80deb504315
 +namespace {
 +
 +constexpr int k_ds4_layer_count = 43;
++constexpr int k_front_bank_count = 2;
 +
 +struct front_field {
 +    const char * name;
@@ -6787,6 +6847,7 @@ index 0000000000000000000000000000000000000000..8068e77bc74bc1198b79c80deb504315
 +    using event_synchronize_fn = decltype(&ggml_backend_cuda_siliang_event_synchronize);
 +    using event_record_fn = decltype(&ggml_backend_cuda_siliang_event_record);
 +    using main_event_record_fn = decltype(&ggml_backend_cuda_siliang_main_stream_event_record);
++    using all_streams_event_record_fn = decltype(&ggml_backend_cuda_siliang_all_streams_event_record);
 +    using stream_wait_fn = decltype(&ggml_backend_cuda_siliang_stream_wait_event);
 +    using main_wait_fn = decltype(&ggml_backend_cuda_siliang_main_stream_wait_event);
 +    using h2d_fn = decltype(&ggml_backend_cuda_siliang_h2d_async);
@@ -6802,6 +6863,7 @@ index 0000000000000000000000000000000000000000..8068e77bc74bc1198b79c80deb504315
 +        event_synchronize_fn event_synchronize = nullptr;
 +        event_record_fn event_record = nullptr;
 +        main_event_record_fn main_event_record = nullptr;
++        all_streams_event_record_fn all_streams_event_record = nullptr;
 +        stream_wait_fn stream_wait = nullptr;
 +        main_wait_fn main_wait = nullptr;
 +        h2d_fn h2d = nullptr;
@@ -6811,7 +6873,7 @@ index 0000000000000000000000000000000000000000..8068e77bc74bc1198b79c80deb504315
 +        bool complete() const {
 +            return stream_create && stream_destroy && stream_synchronize &&
 +                event_create && event_destroy && event_synchronize && event_record &&
-+                main_event_record && stream_wait && main_wait && h2d &&
++                main_event_record && all_streams_event_record && stream_wait && main_wait && h2d &&
 +                host_register && host_unregister;
 +        }
 +    };
@@ -6847,8 +6909,8 @@ index 0000000000000000000000000000000000000000..8068e77bc74bc1198b79c80deb504315
 +    std::array<layer_plan, k_ds4_layer_count> plans = {};
 +
 +    ggml_backend_cuda_siliang_stream_t copy_stream = nullptr;
-+    ggml_backend_cuda_siliang_event_t copy_done = nullptr;
-+    ggml_backend_cuda_siliang_event_t use_done = nullptr;
++    std::array<ggml_backend_cuda_siliang_event_t, k_front_bank_count> copy_done = {};
++    std::array<ggml_backend_cuda_siliang_event_t, k_front_bank_count> use_done = {};
 +
 +    size_t alignment = 0;
 +    size_t bank_stride = 0;
@@ -6859,7 +6921,9 @@ index 0000000000000000000000000000000000000000..8068e77bc74bc1198b79c80deb504315
 +    std::atomic<bool> bound { false };
 +    std::atomic<bool> active { false };
 +    bool context_bound = false;
-+    bool copy_valid = false;
++    std::array<bool, k_front_bank_count> copy_valid = {};
++    std::array<bool, k_front_bank_count> use_done_recorded = {};
++    std::array<int32_t, k_front_bank_count> bank_resident_layer = {{ -1, -1 }};
 +    bool graph_mode_known = false;
 +    bool graph_managed = false;
 +    bool graph_decode = false;
@@ -6920,6 +6984,7 @@ index 0000000000000000000000000000000000000000..8068e77bc74bc1198b79c80deb504315
 +            load_proc(reg, "ggml_backend_cuda_siliang_event_synchronize", candidate.event_synchronize);
 +            load_proc(reg, "ggml_backend_cuda_siliang_event_record", candidate.event_record);
 +            load_proc(reg, "ggml_backend_cuda_siliang_main_stream_event_record", candidate.main_event_record);
++            load_proc(reg, "ggml_backend_cuda_siliang_all_streams_event_record", candidate.all_streams_event_record);
 +            load_proc(reg, "ggml_backend_cuda_siliang_stream_wait_event", candidate.stream_wait);
 +            load_proc(reg, "ggml_backend_cuda_siliang_main_stream_wait_event", candidate.main_wait);
 +            load_proc(reg, "ggml_backend_cuda_siliang_h2d_async", candidate.h2d);
@@ -7046,12 +7111,17 @@ index 0000000000000000000000000000000000000000..8068e77bc74bc1198b79c80deb504315
 +        }
 +        host_registered = true;
 +
-+        carrier = ggml_new_tensor_1d(metadata.get(), GGML_TYPE_I8, static_cast<int64_t>(bank_stride));
++        size_t gpu_bank_bytes = 0;
++        if (!checked_add(bank_stride, bank_stride, gpu_bank_bytes) ||
++            gpu_bank_bytes > static_cast<size_t>(std::numeric_limits<int64_t>::max())) {
++            return fail(FAILURE_ALLOCATION);
++        }
++        carrier = ggml_new_tensor_1d(metadata.get(), GGML_TYPE_I8, static_cast<int64_t>(gpu_bank_bytes));
 +        if (carrier == nullptr) {
 +            return fail(FAILURE_ALLOCATION);
 +        }
 +        const size_t gpu_size = ggml_backend_buft_get_alloc_size(gpu_buft, carrier);
-+        if (gpu_size < bank_stride) {
++        if (gpu_size < gpu_bank_bytes) {
 +            return fail(FAILURE_ALLOCATION);
 +        }
 +        gpu_buffer.reset(ggml_backend_buft_alloc_buffer(gpu_buft, gpu_size));
@@ -7064,9 +7134,11 @@ index 0000000000000000000000000000000000000000..8068e77bc74bc1198b79c80deb504315
 +            ggml_backend_tensor_alloc(gpu_buffer.get(), carrier, gpu_base) != GGML_STATUS_SUCCESS) {
 +            return fail(FAILURE_ALLOCATION);
 +        }
-+        for (const layer_plan & plan : plans) {
-+            for (const segment & item : plan.segments) {
-+                if (ggml_backend_tensor_alloc(gpu_buffer.get(), item.tensor, gpu_base + item.offset) != GGML_STATUS_SUCCESS) {
++        for (size_t layer = 0; layer < plans.size(); ++layer) {
++            const size_t bank_offset = (layer % k_front_bank_count) * bank_stride;
++            for (const segment & item : plans[layer].segments) {
++                if (ggml_backend_tensor_alloc(
++                        gpu_buffer.get(), item.tensor, gpu_base + bank_offset + item.offset) != GGML_STATUS_SUCCESS) {
 +                    return fail(FAILURE_ALLOCATION);
 +                }
 +            }
@@ -7075,10 +7147,14 @@ index 0000000000000000000000000000000000000000..8068e77bc74bc1198b79c80deb504315
 +    }
 +
 +    bool create_cuda_objects() {
-+        if (!cuda_ok(cuda.stream_create(cuda_backend, &copy_stream)) || copy_stream == nullptr ||
-+            !cuda_ok(cuda.event_create(cuda_backend, &copy_done)) || copy_done == nullptr ||
-+            !cuda_ok(cuda.event_create(cuda_backend, &use_done)) || use_done == nullptr) {
++        if (!cuda_ok(cuda.stream_create(cuda_backend, &copy_stream)) || copy_stream == nullptr) {
 +            return fail(FAILURE_CUDA_BRIDGE);
++        }
++        for (size_t bank = 0; bank < k_front_bank_count; ++bank) {
++            if (!cuda_ok(cuda.event_create(cuda_backend, &copy_done[bank])) || copy_done[bank] == nullptr ||
++                !cuda_ok(cuda.event_create(cuda_backend, &use_done[bank])) || use_done[bank] == nullptr) {
++                return fail(FAILURE_CUDA_BRIDGE);
++            }
 +        }
 +        return true;
 +    }
@@ -7096,14 +7172,17 @@ index 0000000000000000000000000000000000000000..8068e77bc74bc1198b79c80deb504315
 +    }
 +
 +    bool preload_layer_zero() {
++        constexpr size_t bank = 0;
 +        const layer_plan & plan = plans[0];
 +        if (host_store == nullptr || !cuda_ok(cuda.h2d(
-+                copy_stream, carrier, host_store + plan.store_offset, 0, plan.span)) ||
-+            !cuda_ok(cuda.event_record(copy_stream, copy_done)) ||
-+            !cuda_ok(cuda.event_synchronize(copy_done))) {
++                copy_stream, carrier, host_store + plan.store_offset, bank * bank_stride, plan.span)) ||
++            !cuda_ok(cuda.event_record(copy_stream, copy_done[bank])) ||
++            !cuda_ok(cuda.event_synchronize(copy_done[bank]))) {
 +            return fail(FAILURE_CUDA_RUNTIME);
 +        }
-+        copy_valid = true;
++        copy_valid[bank] = true;
++        use_done_recorded[bank] = false;
++        bank_resident_layer[bank] = 0;
 +        resident_layer.store(0, std::memory_order_release);
 +        waited_layer = -1;
 +        pending_layer = -1;
@@ -7114,19 +7193,23 @@ index 0000000000000000000000000000000000000000..8068e77bc74bc1198b79c80deb504315
 +        if (target_layer < 0 || target_layer >= k_ds4_layer_count) {
 +            return fail(FAILURE_MARKER_SEQUENCE);
 +        }
++        const size_t bank = static_cast<size_t>(target_layer % k_front_bank_count);
++        if (copy_valid[bank] && bank_resident_layer[bank] == target_layer) {
++            pending_layer = -1;
++            waited_layer = -1;
++            return true;
++        }
 +        const layer_plan & plan = plans[target_layer];
 +        const auto start = std::chrono::steady_clock::now();
 +
-+        // A single FRONT bank must not be overwritten until every CUDA consumer
-+        // from the preceding scheduler split has completed. A stream-0 event is
-+        // insufficient because graph execution may use additional backend streams.
-+        ggml_backend_synchronize(cuda_backend);
-+
++        if (copy_valid[bank] &&
++            (!use_done_recorded[bank] || !cuda_ok(cuda.stream_wait(copy_stream, use_done[bank])))) {
++            return fail(FAILURE_CUDA_RUNTIME);
++        }
 +        if (host_store == nullptr ||
-+            !cuda_ok(cuda.main_event_record(cuda_backend, use_done)) ||
-+            !cuda_ok(cuda.stream_wait(copy_stream, use_done)) ||
-+            !cuda_ok(cuda.h2d(copy_stream, carrier, host_store + plan.store_offset, 0, plan.span)) ||
-+            !cuda_ok(cuda.event_record(copy_stream, copy_done))) {
++            !cuda_ok(cuda.h2d(
++                copy_stream, carrier, host_store + plan.store_offset, bank * bank_stride, plan.span)) ||
++            !cuda_ok(cuda.event_record(copy_stream, copy_done[bank]))) {
 +            return fail(FAILURE_CUDA_RUNTIME);
 +        }
 +        const uint64_t elapsed = static_cast<uint64_t>(
@@ -7136,10 +7219,25 @@ index 0000000000000000000000000000000000000000..8068e77bc74bc1198b79c80deb504315
 +        payload_h2d_bytes.fetch_add(plan.payload, std::memory_order_relaxed);
 +        wire_h2d_bytes.fetch_add(plan.span, std::memory_order_relaxed);
 +        copies.fetch_add(1, std::memory_order_relaxed);
++        copy_valid[bank] = true;
++        use_done_recorded[bank] = false;
++        bank_resident_layer[bank] = target_layer;
 +        resident_layer.store(target_layer, std::memory_order_release);
 +        pending_layer = -1;
 +        waited_layer = -1;
-+        copy_valid = true;
++        return true;
++    }
++
++    bool record_layer_use_done(int32_t layer) {
++        if (layer < 0 || layer >= k_ds4_layer_count) {
++            return fail(FAILURE_MARKER_SEQUENCE);
++        }
++        const size_t bank = static_cast<size_t>(layer % k_front_bank_count);
++        if (!copy_valid[bank] || bank_resident_layer[bank] != layer ||
++            !cuda_ok(cuda.all_streams_event_record(cuda_backend, use_done[bank]))) {
++            return fail(FAILURE_CUDA_RUNTIME);
++        }
++        use_done_recorded[bank] = true;
 +        return true;
 +    }
 +
@@ -7152,11 +7250,15 @@ index 0000000000000000000000000000000000000000..8068e77bc74bc1198b79c80deb504315
 +    }
 +
 +    bool wait_for_layer(int32_t layer) {
-+        if (!copy_valid || resident_layer.load(std::memory_order_acquire) != layer) {
++        if (layer < 0 || layer >= k_ds4_layer_count) {
++            return fail(FAILURE_MARKER_SEQUENCE);
++        }
++        const size_t bank = static_cast<size_t>(layer % k_front_bank_count);
++        if (!copy_valid[bank] || bank_resident_layer[bank] != layer) {
 +            return fail(FAILURE_MARKER_SEQUENCE);
 +        }
 +        const auto start = std::chrono::steady_clock::now();
-+        if (!cuda_ok(cuda.main_wait(cuda_backend, copy_done))) {
++        if (!cuda_ok(cuda.main_wait(cuda_backend, copy_done[bank]))) {
 +            return fail(FAILURE_CUDA_RUNTIME);
 +        }
 +        const uint64_t elapsed = static_cast<uint64_t>(
@@ -7235,11 +7337,12 @@ index 0000000000000000000000000000000000000000..8068e77bc74bc1198b79c80deb504315
 +            return;
 +        }
 +
-+        // A pending layer was marked in the preceding attn_out split. This
-+        // callback runs after that split was submitted, so the main-stream
-+        // event orders the private overwrite behind all prior FRONT users.
++        // A pending layer was marked in the preceding attn_out split. Layers
++        // alternate between two physical banks, so layer N+2 can be copied into
++        // N's bank after the all-stream completion event for N reaches the copy stream.
 +        if (first_managed_marker) {
-+            if (!copy_valid || resident_layer.load(std::memory_order_acquire) != 0 || pending_layer >= 0) {
++            constexpr size_t first_bank = 0;
++            if (!copy_valid[first_bank] || bank_resident_layer[first_bank] != 0 || pending_layer >= 0) {
 +                pending_layer = -1;
 +                if (!issue_layer(0)) {
 +                    return;
@@ -7259,6 +7362,9 @@ index 0000000000000000000000000000000000000000..8068e77bc74bc1198b79c80deb504315
 +                fail(FAILURE_MARKER_SEQUENCE);
 +                return;
 +            }
++            if (!record_layer_use_done(out_layer)) {
++                return;
++            }
 +            pending_layer = (out_layer + 1) % k_ds4_layer_count;
 +            if (out_layer + 1 == k_ds4_layer_count) {
 +                tokens.fetch_add(static_cast<uint64_t>(graph_tokens), std::memory_order_relaxed);
@@ -7271,17 +7377,21 @@ index 0000000000000000000000000000000000000000..8068e77bc74bc1198b79c80deb504315
 +        if (copy_stream && cuda.stream_synchronize) {
 +            (void) cuda.stream_synchronize(copy_stream);
 +        }
-+        if (copy_done && cuda.event_destroy) {
-+            (void) cuda.event_destroy(copy_done);
-+        }
-+        if (use_done && cuda.event_destroy) {
-+            (void) cuda.event_destroy(use_done);
++        if (cuda.event_destroy) {
++            for (size_t bank = 0; bank < k_front_bank_count; ++bank) {
++                if (copy_done[bank]) {
++                    (void) cuda.event_destroy(copy_done[bank]);
++                    copy_done[bank] = nullptr;
++                }
++                if (use_done[bank]) {
++                    (void) cuda.event_destroy(use_done[bank]);
++                    use_done[bank] = nullptr;
++                }
++            }
 +        }
 +        if (copy_stream && cuda.stream_destroy) {
 +            (void) cuda.stream_destroy(copy_stream);
 +        }
-+        copy_done = nullptr;
-+        use_done = nullptr;
 +        copy_stream = nullptr;
 +        carrier = nullptr;
 +        if (host_registered && host_store != nullptr && cuda.host_unregister && cuda_backend) {
@@ -7306,7 +7416,9 @@ index 0000000000000000000000000000000000000000..8068e77bc74bc1198b79c80deb504315
 +        alignment = 0;
 +        bank_stride = 0;
 +        host_store_size = 0;
-+        copy_valid = false;
++        copy_valid.fill(false);
++        use_done_recorded.fill(false);
++        bank_resident_layer.fill(-1);
 +        waited_layer = -1;
 +        pending_layer = -1;
 +        resident_layer.store(-1, std::memory_order_release);

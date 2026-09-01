@@ -47,14 +47,17 @@ class ArenaOptInContractTests(unittest.TestCase):
         self.assertIn("siliangem_tls_state->capacity_mib == 0", body)
         self.assertNotIn("getenv(", body)
 
-    def test_ds4_front_single_bank_overwrite_has_full_cuda_fence(self) -> None:
+    def test_ds4_front_double_bank_reuse_is_event_ordered_without_full_cuda_fence(self) -> None:
         front = (REPOSITORY_ROOT / "src/siliang-ds4-front-slab.cpp").read_text(encoding="utf-8")
+        cuda_header = (REPOSITORY_ROOT / "ggml/include/ggml-cuda.h").read_text(encoding="utf-8")
         issue = function_body(front, "bool issue_layer(int32_t target_layer)")
-        fence = "ggml_backend_synchronize(cuda_backend);"
-        copy = "cuda.h2d(copy_stream, carrier, host_store + plan.store_offset, 0, plan.span)"
-        self.assertIn(fence, issue)
-        self.assertIn(copy, issue)
-        self.assertLess(issue.index(fence), issue.index(copy))
+        use_done = function_body(front, "bool record_layer_use_done(int32_t layer)")
+        self.assertIn("constexpr int k_front_bank_count = 2;", front)
+        self.assertIn("bank * bank_stride", issue)
+        self.assertIn("cuda.stream_wait(copy_stream, use_done[bank])", issue)
+        self.assertIn("cuda.all_streams_event_record(cuda_backend, use_done[bank])", use_done)
+        self.assertIn("ggml_backend_cuda_siliang_all_streams_event_record", cuda_header)
+        self.assertNotIn("ggml_backend_synchronize(cuda_backend);", issue)
 
     def test_public_cpu_api_uses_typed_configuration(self) -> None:
         self.assertIn("struct ggml_siliangem_cache_config", CPU_HEADER)

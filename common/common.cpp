@@ -1449,9 +1449,10 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
         }
         llama_siliang_ds4_front_slab_metrics metrics = {};
         if (llama_siliang_ds4_front_slab_runtime_metrics(pimpl->front_runtime.get(), &metrics)) {
-            COM_INF("expert cache: DeepSeek-V4 FRONT slab armed bank=%zu MiB host=%zu MiB resident_layer=%d\n",
+            COM_INF("expert cache: DeepSeek-V4 FRONT slab armed bank=%zu MiB host=%zu MiB resident_layer=%d "
+                    "banks=2 total=%zu MiB\n",
                     metrics.bank_bytes / (1024 * 1024), metrics.host_store_bytes / (1024 * 1024),
-                    metrics.resident_layer);
+                    metrics.resident_layer, 2 * metrics.bank_bytes / (1024 * 1024));
         }
     }
 }

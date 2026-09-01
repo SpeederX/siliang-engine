@@ -30,6 +30,7 @@
 namespace {
 
 constexpr int k_ds4_layer_count = 43;
+constexpr int k_front_bank_count = 2;
 
 struct front_field {
     const char * name;
@@ -142,6 +143,7 @@ struct siliang_ds4_front_slab::impl {
     using event_synchronize_fn = decltype(&ggml_backend_cuda_siliang_event_synchronize);
     using event_record_fn = decltype(&ggml_backend_cuda_siliang_event_record);
     using main_event_record_fn = decltype(&ggml_backend_cuda_siliang_main_stream_event_record);
+    using all_streams_event_record_fn = decltype(&ggml_backend_cuda_siliang_all_streams_event_record);
     using stream_wait_fn = decltype(&ggml_backend_cuda_siliang_stream_wait_event);
     using main_wait_fn = decltype(&ggml_backend_cuda_siliang_main_stream_wait_event);
     using h2d_fn = decltype(&ggml_backend_cuda_siliang_h2d_async);
@@ -157,6 +159,7 @@ struct siliang_ds4_front_slab::impl {
         event_synchronize_fn event_synchronize = nullptr;
         event_record_fn event_record = nullptr;
         main_event_record_fn main_event_record = nullptr;
+        all_streams_event_record_fn all_streams_event_record = nullptr;
         stream_wait_fn stream_wait = nullptr;
         main_wait_fn main_wait = nullptr;
         h2d_fn h2d = nullptr;
@@ -166,7 +169,7 @@ struct siliang_ds4_front_slab::impl {
         bool complete() const {
             return stream_create && stream_destroy && stream_synchronize &&
                 event_create && event_destroy && event_synchronize && event_record &&
-                main_event_record && stream_wait && main_wait && h2d &&
+                main_event_record && all_streams_event_record && stream_wait && main_wait && h2d &&
                 host_register && host_unregister;
         }
     };
@@ -202,8 +205,8 @@ struct siliang_ds4_front_slab::impl {
     std::array<layer_plan, k_ds4_layer_count> plans = {};
 
     ggml_backend_cuda_siliang_stream_t copy_stream = nullptr;
-    ggml_backend_cuda_siliang_event_t copy_done = nullptr;
-    ggml_backend_cuda_siliang_event_t use_done = nullptr;
+    std::array<ggml_backend_cuda_siliang_event_t, k_front_bank_count> copy_done = {};
+    std::array<ggml_backend_cuda_siliang_event_t, k_front_bank_count> use_done = {};
 
     size_t alignment = 0;
     size_t bank_stride = 0;
@@ -214,7 +217,9 @@ struct siliang_ds4_front_slab::impl {
     std::atomic<bool> bound { false };
     std::atomic<bool> active { false };
     bool context_bound = false;
-    bool copy_valid = false;
+    std::array<bool, k_front_bank_count> copy_valid = {};
+    std::array<bool, k_front_bank_count> use_done_recorded = {};
+    std::array<int32_t, k_front_bank_count> bank_resident_layer = {{ -1, -1 }};
     bool graph_mode_known = false;
     bool graph_managed = false;
     bool graph_decode = false;
@@ -275,6 +280,7 @@ struct siliang_ds4_front_slab::impl {
             load_proc(reg, "ggml_backend_cuda_siliang_event_synchronize", candidate.event_synchronize);
             load_proc(reg, "ggml_backend_cuda_siliang_event_record", candidate.event_record);
             load_proc(reg, "ggml_backend_cuda_siliang_main_stream_event_record", candidate.main_event_record);
+            load_proc(reg, "ggml_backend_cuda_siliang_all_streams_event_record", candidate.all_streams_event_record);
             load_proc(reg, "ggml_backend_cuda_siliang_stream_wait_event", candidate.stream_wait);
             load_proc(reg, "ggml_backend_cuda_siliang_main_stream_wait_event", candidate.main_wait);
             load_proc(reg, "ggml_backend_cuda_siliang_h2d_async", candidate.h2d);
@@ -401,12 +407,17 @@ struct siliang_ds4_front_slab::impl {
         }
         host_registered = true;
 
-        carrier = ggml_new_tensor_1d(metadata.get(), GGML_TYPE_I8, static_cast<int64_t>(bank_stride));
+        size_t gpu_bank_bytes = 0;
+        if (!checked_add(bank_stride, bank_stride, gpu_bank_bytes) ||
+            gpu_bank_bytes > static_cast<size_t>(std::numeric_limits<int64_t>::max())) {
+            return fail(FAILURE_ALLOCATION);
+        }
+        carrier = ggml_new_tensor_1d(metadata.get(), GGML_TYPE_I8, static_cast<int64_t>(gpu_bank_bytes));
         if (carrier == nullptr) {
             return fail(FAILURE_ALLOCATION);
         }
         const size_t gpu_size = ggml_backend_buft_get_alloc_size(gpu_buft, carrier);
-        if (gpu_size < bank_stride) {
+        if (gpu_size < gpu_bank_bytes) {
             return fail(FAILURE_ALLOCATION);
         }
         gpu_buffer.reset(ggml_backend_buft_alloc_buffer(gpu_buft, gpu_size));
@@ -419,9 +430,11 @@ struct siliang_ds4_front_slab::impl {
             ggml_backend_tensor_alloc(gpu_buffer.get(), carrier, gpu_base) != GGML_STATUS_SUCCESS) {
             return fail(FAILURE_ALLOCATION);
         }
-        for (const layer_plan & plan : plans) {
-            for (const segment & item : plan.segments) {
-                if (ggml_backend_tensor_alloc(gpu_buffer.get(), item.tensor, gpu_base + item.offset) != GGML_STATUS_SUCCESS) {
+        for (size_t layer = 0; layer < plans.size(); ++layer) {
+            const size_t bank_offset = (layer % k_front_bank_count) * bank_stride;
+            for (const segment & item : plans[layer].segments) {
+                if (ggml_backend_tensor_alloc(
+                        gpu_buffer.get(), item.tensor, gpu_base + bank_offset + item.offset) != GGML_STATUS_SUCCESS) {
                     return fail(FAILURE_ALLOCATION);
                 }
             }
@@ -430,10 +443,14 @@ struct siliang_ds4_front_slab::impl {
     }
 
     bool create_cuda_objects() {
-        if (!cuda_ok(cuda.stream_create(cuda_backend, &copy_stream)) || copy_stream == nullptr ||
-            !cuda_ok(cuda.event_create(cuda_backend, &copy_done)) || copy_done == nullptr ||
-            !cuda_ok(cuda.event_create(cuda_backend, &use_done)) || use_done == nullptr) {
+        if (!cuda_ok(cuda.stream_create(cuda_backend, &copy_stream)) || copy_stream == nullptr) {
             return fail(FAILURE_CUDA_BRIDGE);
+        }
+        for (size_t bank = 0; bank < k_front_bank_count; ++bank) {
+            if (!cuda_ok(cuda.event_create(cuda_backend, &copy_done[bank])) || copy_done[bank] == nullptr ||
+                !cuda_ok(cuda.event_create(cuda_backend, &use_done[bank])) || use_done[bank] == nullptr) {
+                return fail(FAILURE_CUDA_BRIDGE);
+            }
         }
         return true;
     }
@@ -451,14 +468,17 @@ struct siliang_ds4_front_slab::impl {
     }
 
     bool preload_layer_zero() {
+        constexpr size_t bank = 0;
         const layer_plan & plan = plans[0];
         if (host_store == nullptr || !cuda_ok(cuda.h2d(
-                copy_stream, carrier, host_store + plan.store_offset, 0, plan.span)) ||
-            !cuda_ok(cuda.event_record(copy_stream, copy_done)) ||
-            !cuda_ok(cuda.event_synchronize(copy_done))) {
+                copy_stream, carrier, host_store + plan.store_offset, bank * bank_stride, plan.span)) ||
+            !cuda_ok(cuda.event_record(copy_stream, copy_done[bank])) ||
+            !cuda_ok(cuda.event_synchronize(copy_done[bank]))) {
             return fail(FAILURE_CUDA_RUNTIME);
         }
-        copy_valid = true;
+        copy_valid[bank] = true;
+        use_done_recorded[bank] = false;
+        bank_resident_layer[bank] = 0;
         resident_layer.store(0, std::memory_order_release);
         waited_layer = -1;
         pending_layer = -1;
@@ -469,19 +489,23 @@ struct siliang_ds4_front_slab::impl {
         if (target_layer < 0 || target_layer >= k_ds4_layer_count) {
             return fail(FAILURE_MARKER_SEQUENCE);
         }
+        const size_t bank = static_cast<size_t>(target_layer % k_front_bank_count);
+        if (copy_valid[bank] && bank_resident_layer[bank] == target_layer) {
+            pending_layer = -1;
+            waited_layer = -1;
+            return true;
+        }
         const layer_plan & plan = plans[target_layer];
         const auto start = std::chrono::steady_clock::now();
 
-        // A single FRONT bank must not be overwritten until every CUDA consumer
-        // from the preceding scheduler split has completed. A stream-0 event is
-        // insufficient because graph execution may use additional backend streams.
-        ggml_backend_synchronize(cuda_backend);
-
+        if (copy_valid[bank] &&
+            (!use_done_recorded[bank] || !cuda_ok(cuda.stream_wait(copy_stream, use_done[bank])))) {
+            return fail(FAILURE_CUDA_RUNTIME);
+        }
         if (host_store == nullptr ||
-            !cuda_ok(cuda.main_event_record(cuda_backend, use_done)) ||
-            !cuda_ok(cuda.stream_wait(copy_stream, use_done)) ||
-            !cuda_ok(cuda.h2d(copy_stream, carrier, host_store + plan.store_offset, 0, plan.span)) ||
-            !cuda_ok(cuda.event_record(copy_stream, copy_done))) {
+            !cuda_ok(cuda.h2d(
+                copy_stream, carrier, host_store + plan.store_offset, bank * bank_stride, plan.span)) ||
+            !cuda_ok(cuda.event_record(copy_stream, copy_done[bank]))) {
             return fail(FAILURE_CUDA_RUNTIME);
         }
         const uint64_t elapsed = static_cast<uint64_t>(
@@ -491,10 +515,25 @@ struct siliang_ds4_front_slab::impl {
         payload_h2d_bytes.fetch_add(plan.payload, std::memory_order_relaxed);
         wire_h2d_bytes.fetch_add(plan.span, std::memory_order_relaxed);
         copies.fetch_add(1, std::memory_order_relaxed);
+        copy_valid[bank] = true;
+        use_done_recorded[bank] = false;
+        bank_resident_layer[bank] = target_layer;
         resident_layer.store(target_layer, std::memory_order_release);
         pending_layer = -1;
         waited_layer = -1;
-        copy_valid = true;
+        return true;
+    }
+
+    bool record_layer_use_done(int32_t layer) {
+        if (layer < 0 || layer >= k_ds4_layer_count) {
+            return fail(FAILURE_MARKER_SEQUENCE);
+        }
+        const size_t bank = static_cast<size_t>(layer % k_front_bank_count);
+        if (!copy_valid[bank] || bank_resident_layer[bank] != layer ||
+            !cuda_ok(cuda.all_streams_event_record(cuda_backend, use_done[bank]))) {
+            return fail(FAILURE_CUDA_RUNTIME);
+        }
+        use_done_recorded[bank] = true;
         return true;
     }
 
@@ -507,11 +546,15 @@ struct siliang_ds4_front_slab::impl {
     }
 
     bool wait_for_layer(int32_t layer) {
-        if (!copy_valid || resident_layer.load(std::memory_order_acquire) != layer) {
+        if (layer < 0 || layer >= k_ds4_layer_count) {
+            return fail(FAILURE_MARKER_SEQUENCE);
+        }
+        const size_t bank = static_cast<size_t>(layer % k_front_bank_count);
+        if (!copy_valid[bank] || bank_resident_layer[bank] != layer) {
             return fail(FAILURE_MARKER_SEQUENCE);
         }
         const auto start = std::chrono::steady_clock::now();
-        if (!cuda_ok(cuda.main_wait(cuda_backend, copy_done))) {
+        if (!cuda_ok(cuda.main_wait(cuda_backend, copy_done[bank]))) {
             return fail(FAILURE_CUDA_RUNTIME);
         }
         const uint64_t elapsed = static_cast<uint64_t>(
@@ -590,11 +633,12 @@ struct siliang_ds4_front_slab::impl {
             return;
         }
 
-        // A pending layer was marked in the preceding attn_out split. This
-        // callback runs after that split was submitted, so the main-stream
-        // event orders the private overwrite behind all prior FRONT users.
+        // A pending layer was marked in the preceding attn_out split. Layers
+        // alternate between two physical banks, so layer N+2 can be copied into
+        // N's bank after the all-stream completion event for N reaches the copy stream.
         if (first_managed_marker) {
-            if (!copy_valid || resident_layer.load(std::memory_order_acquire) != 0 || pending_layer >= 0) {
+            constexpr size_t first_bank = 0;
+            if (!copy_valid[first_bank] || bank_resident_layer[first_bank] != 0 || pending_layer >= 0) {
                 pending_layer = -1;
                 if (!issue_layer(0)) {
                     return;
@@ -614,6 +658,9 @@ struct siliang_ds4_front_slab::impl {
                 fail(FAILURE_MARKER_SEQUENCE);
                 return;
             }
+            if (!record_layer_use_done(out_layer)) {
+                return;
+            }
             pending_layer = (out_layer + 1) % k_ds4_layer_count;
             if (out_layer + 1 == k_ds4_layer_count) {
                 tokens.fetch_add(static_cast<uint64_t>(graph_tokens), std::memory_order_relaxed);
@@ -626,17 +673,21 @@ struct siliang_ds4_front_slab::impl {
         if (copy_stream && cuda.stream_synchronize) {
             (void) cuda.stream_synchronize(copy_stream);
         }
-        if (copy_done && cuda.event_destroy) {
-            (void) cuda.event_destroy(copy_done);
-        }
-        if (use_done && cuda.event_destroy) {
-            (void) cuda.event_destroy(use_done);
+        if (cuda.event_destroy) {
+            for (size_t bank = 0; bank < k_front_bank_count; ++bank) {
+                if (copy_done[bank]) {
+                    (void) cuda.event_destroy(copy_done[bank]);
+                    copy_done[bank] = nullptr;
+                }
+                if (use_done[bank]) {
+                    (void) cuda.event_destroy(use_done[bank]);
+                    use_done[bank] = nullptr;
+                }
+            }
         }
         if (copy_stream && cuda.stream_destroy) {
             (void) cuda.stream_destroy(copy_stream);
         }
-        copy_done = nullptr;
-        use_done = nullptr;
         copy_stream = nullptr;
         carrier = nullptr;
         if (host_registered && host_store != nullptr && cuda.host_unregister && cuda_backend) {
@@ -661,7 +712,9 @@ struct siliang_ds4_front_slab::impl {
         alignment = 0;
         bank_stride = 0;
         host_store_size = 0;
-        copy_valid = false;
+        copy_valid.fill(false);
+        use_done_recorded.fill(false);
+        bank_resident_layer.fill(-1);
         waited_layer = -1;
         pending_layer = -1;
         resident_layer.store(-1, std::memory_order_release);

@@ -26,11 +26,11 @@ canonical engine-only delta from the pinned upstream base.
 
 | Identity | Value |
 | --- | --- |
-| SHA-256 | `2816F51B22F10EA599D56FDDD0DD5F95284237D1789DD7BB75ECCA4F4DF36379` |
-| Git blob | `0a4dbd40b22567451b47efb98c86c3bc1bd14250` |
+| SHA-256 | `C85906670F4896B365FE8A74C1A9C520C81E2B8870AB7DD246EFED0CDA84ED8C` |
+| Git blob | `982d19a4eb45ee168ff4d5a6fc463445aab150eb` |
 
 The patch uses full Git object IDs and LF line endings. It contains exactly
-**10,551 insertions and 24 deletions** across 34 paths.
+**10,663 insertions and 24 deletions** across 34 paths.
 
 ## Engine delta
 
@@ -46,18 +46,18 @@ patch.
 | Path | Base Git blob | Siliang Git blob |
 | --- | --- | --- |
 | `common/arg.cpp` | `86af0ba10a327283f2500f0bb8e48095df547017` | `6cbfc21a81c449b46cfa3456f40030161765995b` |
-| `common/common.cpp` | `d9ce5755161edc853dbcf629819ee75971ba413d` | `1ffabac36f8c0382bc284104391fd7f00cbf5106` |
+| `common/common.cpp` | `d9ce5755161edc853dbcf629819ee75971ba413d` | `702a52c5e1cf0603862c294fe56d82a040de2098` |
 | `common/common.h` | `3444aa157e9b73727ea2ca6107eb0dc9f9b36a74` | `86bbf4a9c35e7abc35e0cd1521a6557d41602ca9` |
 | `common/speculative.cpp` | `70dc0ac3b1b74fdd5f08b470308786c3f12411e7` | `3f7c5f87559b224c038b86f958557abbad2c13a4` |
 | `ggml/include/ggml-backend.h` | `2924fdbe9884df40abf505fd89d277f5281a835b` | `d04327dbc6ca76b1831ccd1fd8571a107e4982a9` |
 | `ggml/include/ggml-cpu.h` | `dc6453c6eaa16667f720f987659ad42d03a403a2` | `8f1634660f907e8e2d52ad8c20c122e576544184` |
-| `ggml/include/ggml-cuda.h` | `1cd81eeaebcdf4abcd46c87ba1a9a46e275aa12b` | `9377ba5b12d4ce22025852ecef7b5f15b3cab6cc` |
+| `ggml/include/ggml-cuda.h` | `1cd81eeaebcdf4abcd46c87ba1a9a46e275aa12b` | `6c4776a86af28a6485d8cfb8b4242b2080e7bd16` |
 | `ggml/src/ggml-backend.cpp` | `f6fb91798ca484fd1298d7012be3ae8d73cb0ea4` | `4e3d46d30679d3097395409f0382bcd3ddaea2a3` |
 | `ggml/src/ggml-cpu/ggml-cpu-impl.h` | `5d1ca5ffcc368b9f0249d6cf6ccc4549bb9a3ab4` | `97a2a0b1b72df88a9af3cb6ab825ee4b474a40ae` |
 | `ggml/src/ggml-cpu/ggml-cpu.c` | `491316f7491252248d6f74a60440d3efa7aa6177` | `83518e829c9f9a72a606514cef178260d3f73a37` |
 | `ggml/src/ggml-cpu/ggml-cpu.cpp` | `16cc5116c5451787c6a1dd1988e38b761f20ef12` | `f39002fc95a5f793e2f2ed68187bfa8b3df8201a` |
 | `ggml/src/ggml-cpu/siliangem_moe_cache.h` | absent | `f0d97e499332959d836ec8d97aa4f63f13b5629d` |
-| `ggml/src/ggml-cuda/ggml-cuda.cu` | `561ab7ac599f9e285d2a0296caee0ab0a14ea5c8` | `d3d2cb63b8ec6a9e9621d29a44af510b607423ca` |
+| `ggml/src/ggml-cuda/ggml-cuda.cu` | `561ab7ac599f9e285d2a0296caee0ab0a14ea5c8` | `3ed2efc408af1388904873b03d324c23fa69c6de` |
 | `include/llama.h` | `fb2ca38cee4f8ba84bb6178f1e345e066b0d07e5` | `cdf629e88ebbbff200a44261802e5077b67e7fbd` |
 | `src/CMakeLists.txt` | `24f05cc91673217726b919229e1626b7f74a7bcb` | `4b620618f1304164881ac97692d397fa8152688f` |
 | `src/llama-context.cpp` | `19cca7df1e9deaafc1e8ee50d0c78ae5ffbc6cfb` | `ecdb8f92ecc2faeee71dee7b460efbf7b194a822` |
@@ -70,7 +70,7 @@ patch.
 | `src/llama-model.h` | `6b9e94a0a6921745fd20f58aba38490480c36a38` | `f14b607ded2574b98290f9eb5e9237989e9313d6` |
 | `src/llama.cpp` | `d6e0bbfefa729329fe6b83e46e603a85dab0f2e3` | `3113ca8d1cacc2a8c42ef815e4aba9a6c22a88bb` |
 | `src/models/deepseek4.cpp` | `89cd461765adfe8c32fa2e6c6b6d2e962de4b0ac` | `e0ae251cb500c5eb55d6b2c8b36a24a6f6005b84` |
-| `src/siliang-ds4-front-slab.cpp` | absent | `8068e77bc74bc1198b79c80deb50431551a03c32` |
+| `src/siliang-ds4-front-slab.cpp` | absent | `91d6640557077aa6c2f2afad77d8130df46f2ab9` |
 | `src/siliang-ds4-front-slab.h` | absent | `a3c1052be580ed7ceecbd3d64d01350e439a5a74` |
 | `src/siliang-expert-source.h` | absent | `01b630212a342f9eb0770985995098a049734064` |
 | `src/siliang-moe-runtime.cpp` | absent | `6cf14959d265c2f97b7ed3846d057bffcead8944` |

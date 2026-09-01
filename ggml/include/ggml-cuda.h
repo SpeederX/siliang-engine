@@ -75,6 +75,9 @@ GGML_BACKEND_API enum ggml_backend_cuda_siliang_status ggml_backend_cuda_siliang
 GGML_BACKEND_API enum ggml_backend_cuda_siliang_status ggml_backend_cuda_siliang_main_stream_event_record(
         ggml_backend_t backend,
         ggml_backend_cuda_siliang_event_t event);
+GGML_BACKEND_API enum ggml_backend_cuda_siliang_status ggml_backend_cuda_siliang_all_streams_event_record(
+        ggml_backend_t backend,
+        ggml_backend_cuda_siliang_event_t event);
 GGML_BACKEND_API enum ggml_backend_cuda_siliang_status ggml_backend_cuda_siliang_stream_wait_event(
         ggml_backend_cuda_siliang_stream_t stream,
         ggml_backend_cuda_siliang_event_t event);

@@ -753,6 +753,7 @@ struct ggml_backend_cuda_siliang_stream {
 
 struct ggml_backend_cuda_siliang_event {
     cudaEvent_t event = nullptr;
+    cudaEvent_t join_events[GGML_CUDA_MAX_STREAMS - 1] = {};
     int device = -1;
 };
 
@@ -867,7 +868,20 @@ enum ggml_backend_cuda_siliang_status ggml_backend_cuda_siliang_event_destroy(
     }
 
     ggml_cuda_set_device(value->device);
-    const cudaError_t error = cudaEventDestroy(value->event);
+    cudaError_t error = cudaSuccess;
+    for (cudaEvent_t & join_event : value->join_events) {
+        if (join_event != nullptr) {
+            const cudaError_t join_error = cudaEventDestroy(join_event);
+            if (error == cudaSuccess && join_error != cudaSuccess) {
+                error = join_error;
+            }
+            join_event = nullptr;
+        }
+    }
+    const cudaError_t event_error = cudaEventDestroy(value->event);
+    if (error == cudaSuccess && event_error != cudaSuccess) {
+        error = event_error;
+    }
     delete value;
     return error == cudaSuccess
         ? GGML_BACKEND_CUDA_SILIANG_STATUS_SUCCESS
@@ -924,6 +938,44 @@ enum ggml_backend_cuda_siliang_status ggml_backend_cuda_siliang_main_stream_even
 
     ggml_cuda_set_device(context->device);
     return cudaEventRecord(event_value->event, context->stream(context->device, 0)) == cudaSuccess
+        ? GGML_BACKEND_CUDA_SILIANG_STATUS_SUCCESS
+        : GGML_BACKEND_CUDA_SILIANG_STATUS_CUDA_ERROR;
+}
+
+enum ggml_backend_cuda_siliang_status ggml_backend_cuda_siliang_all_streams_event_record(
+        ggml_backend_t backend,
+        ggml_backend_cuda_siliang_event_t event) {
+    ggml_backend_cuda_context * context = nullptr;
+    auto * event_value = static_cast<ggml_backend_cuda_siliang_event *>(event);
+    const enum ggml_backend_cuda_siliang_status status =
+        ggml_backend_cuda_siliang_get_context(backend, &context);
+    if (event_value == nullptr) {
+        return GGML_BACKEND_CUDA_SILIANG_STATUS_INVALID_ARGUMENT;
+    }
+    if (status != GGML_BACKEND_CUDA_SILIANG_STATUS_SUCCESS) {
+        return status;
+    }
+    if (context->device != event_value->device) {
+        return GGML_BACKEND_CUDA_SILIANG_STATUS_WRONG_DEVICE;
+    }
+
+    ggml_cuda_set_device(context->device);
+    cudaStream_t main_stream = context->stream(context->device, 0);
+    for (int stream_index = 1; stream_index < GGML_CUDA_MAX_STREAMS; ++stream_index) {
+        cudaStream_t stream = context->streams[context->device][stream_index];
+        if (stream == nullptr) {
+            continue;
+        }
+        cudaEvent_t & join_event = event_value->join_events[stream_index - 1];
+        if (join_event == nullptr && cudaEventCreateWithFlags(&join_event, cudaEventDisableTiming) != cudaSuccess) {
+            return GGML_BACKEND_CUDA_SILIANG_STATUS_CUDA_ERROR;
+        }
+        if (cudaEventRecord(join_event, stream) != cudaSuccess ||
+            cudaStreamWaitEvent(main_stream, join_event, 0) != cudaSuccess) {
+            return GGML_BACKEND_CUDA_SILIANG_STATUS_CUDA_ERROR;
+        }
+    }
+    return cudaEventRecord(event_value->event, main_stream) == cudaSuccess
         ? GGML_BACKEND_CUDA_SILIANG_STATUS_SUCCESS
         : GGML_BACKEND_CUDA_SILIANG_STATUS_CUDA_ERROR;
 }
@@ -5756,6 +5808,9 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
     }
     if (strcmp(name, "ggml_backend_cuda_siliang_main_stream_event_record") == 0) {
         return (void *)ggml_backend_cuda_siliang_main_stream_event_record;
+    }
+    if (strcmp(name, "ggml_backend_cuda_siliang_all_streams_event_record") == 0) {
+        return (void *)ggml_backend_cuda_siliang_all_streams_event_record;
     }
     if (strcmp(name, "ggml_backend_cuda_siliang_stream_wait_event") == 0) {
         return (void *)ggml_backend_cuda_siliang_stream_wait_event;

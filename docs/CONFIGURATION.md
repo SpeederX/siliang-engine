@@ -178,6 +178,13 @@ to Gemma/Qwen/Ornith without an architecture-name allowlist. The current bitmap
 caps this path at 256 experts per layer. Unsupported geometry or capacity fails
 closed.
 
+**Prefill sizing rule:** size K for the intended ubatch, not only for startup.
+On DS4 (top-k 6, 256 experts), K216 permits at most `-ub 36` (`-ub 32` is
+safe), while K256 permits `-ub 512` because `min(512 * 6, 256) = 256`. The
+larger ubatch avoids repeating staging/admission across many small sweeps. On
+the RTX 2070 reference machine, the current double-bank FRONT path reached
+24.90 prompt tok/s over 1,101 tokens with K256/`-ub 512`.
+
 Use this bounded diagnostic command on the current 8 GB test machine:
 
 ```powershell
@@ -202,15 +209,10 @@ Use this bounded diagnostic command on the current 8 GB test machine:
     --host 127.0.0.1 --port 18081 --no-webui
 ```
 
-There are two distinct controls. Replace `--expert-cache-prefill` with
-`--no-expert-cache-prefill` while retaining `-ub 32` to isolate the new path.
-Then compare both with the operational `-ub 512` configuration with prefill
-disabled. Keep `-tb 12` in every arm: a separate completed prompt reached 4.57
-tok/s with twelve batch threads versus 1.87 tok/s with two on a different
-prompt, making batch-thread count a critical control. Smaller microbatches may
-repeat expert admissions and increase total storage traffic, so this mechanism
-is not a throughput claim until fixed-prompt output equivalence and fresh-start
-A/B timing pass.
+The command above is the low-K diagnostic profile. For DS4 prompt throughput,
+use K256/`-ub 512` when VRAM headroom permits it. To isolate bounded prefill,
+toggle `--expert-cache-prefill` / `--no-expert-cache-prefill` while keeping K,
+ubatch, and `-tb 12` unchanged.
 
 ## Pi and the OpenAI-compatible server
 

@@ -14,11 +14,11 @@
   "source": {
     "canonicalPatch": {
       "path": "patches/siliang-engine.patch",
-      "sha256": "2816F51B22F10EA599D56FDDD0DD5F95284237D1789DD7BB75ECCA4F4DF36379",
-      "gitBlob": "0a4dbd40b22567451b47efb98c86c3bc1bd14250"
+      "sha256": "C85906670F4896B365FE8A74C1A9C520C81E2B8870AB7DD246EFED0CDA84ED8C",
+      "gitBlob": "982d19a4eb45ee168ff4d5a6fc463445aab150eb"
     },
     "engineDelta": {
-      "insertions": 10551,
+      "insertions": 10663,
       "deletions": 24,
       "files": [
         {
@@ -34,7 +34,8 @@
           "status": "modified",
           "mode": "100644",
           "baseBlob": "d9ce5755161edc853dbcf629819ee75971ba413d",
-          "finalBlob": "1ffabac36f8c0382bc284104391fd7f00cbf5106"
+          "finalBlob": "702a52c5e1cf0603862c294fe56d82a040de2098",
+          "previousBlob": "1ffabac36f8c0382bc284104391fd7f00cbf5106"
         },
         {
           "path": "common/common.h",
@@ -69,7 +70,8 @@
           "status": "modified",
           "mode": "100644",
           "baseBlob": "1cd81eeaebcdf4abcd46c87ba1a9a46e275aa12b",
-          "finalBlob": "9377ba5b12d4ce22025852ecef7b5f15b3cab6cc"
+          "finalBlob": "6c4776a86af28a6485d8cfb8b4242b2080e7bd16",
+          "previousBlob": "9377ba5b12d4ce22025852ecef7b5f15b3cab6cc"
         },
         {
           "path": "ggml/src/ggml-backend.cpp",
@@ -112,7 +114,8 @@
           "status": "modified",
           "mode": "100644",
           "baseBlob": "561ab7ac599f9e285d2a0296caee0ab0a14ea5c8",
-          "finalBlob": "d3d2cb63b8ec6a9e9621d29a44af510b607423ca"
+          "finalBlob": "3ed2efc408af1388904873b03d324c23fa69c6de",
+          "previousBlob": "d3d2cb63b8ec6a9e9621d29a44af510b607423ca"
         },
         {
           "path": "include/llama.h",
@@ -203,7 +206,8 @@
           "status": "added",
           "mode": "100644",
           "baseBlob": null,
-          "finalBlob": "8068e77bc74bc1198b79c80deb50431551a03c32"
+          "finalBlob": "91d6640557077aa6c2f2afad77d8130df46f2ab9",
+          "previousBlob": "8068e77bc74bc1198b79c80deb50431551a03c32"
         },
         {
           "path": "src/siliang-ds4-front-slab.h",
