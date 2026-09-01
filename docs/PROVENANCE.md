@@ -34,7 +34,7 @@ The patch uses full Git object IDs and LF line endings. It contains exactly
 
 ## Engine delta
 
-The v0.1.4 engine boundary covers the shared typed argument and context
+The v0.1.5 engine boundary covers the shared typed argument and context
 configuration, CPU/CUDA backend transfer hooks, model-owned expert sources,
 the generic K/R/P runtime, the DeepSeek4 FRONT slab, graph and server error
 propagation, the C++ argument-parser contract test, and the focused bounded-
