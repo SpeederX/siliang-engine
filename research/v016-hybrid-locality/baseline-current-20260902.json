@@ -1,0 +1,161 @@
+{
+  "schema": "siliang-v016-maintainer-continuity-baseline-v1",
+  "date": "2026-09-02",
+  "model": "DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731-siliang-expert-major.gguf",
+  "current_commit": "132ff512e2",
+  "protocol": {
+    "runner": "llama-server",
+    "fresh_server_per_replica": true,
+    "replicas": 3,
+    "decode_tokens": 256,
+    "context": 4096,
+    "batch": 512,
+    "ubatch": 512,
+    "threads": 2,
+    "batch_threads": 2,
+    "K": 216,
+    "R": 12,
+    "P": 12,
+    "L2_MiB": 8192,
+    "L2_policy": "lru",
+    "L1_policy": "slfu",
+    "admit_k_cold": "on",
+    "demote_k_hot": "off",
+    "roll": "deepseek4",
+    "expert_cache_prefill": false,
+    "load_mode": "none/no-mmap managed",
+    "sampling": "default natural; ignore_eos=true",
+    "prompt": "Write a detailed technical discussion of cache locality, memory hierarchy, and data movement in local mixture-of-experts inference. Continue for several paragraphs and include concrete examples."
+  },
+  "current": {
+    "replicas": [
+      {
+        "replica": 1,
+        "server_tps": 1.8994223515326536,
+        "cp256_cumulative_tps": 1.896236,
+        "cp128_256_window_tps": 1.848664,
+        "l1_pct": 25.56,
+        "l2_pct": 39.5,
+        "cold_pct": 34.94
+      },
+      {
+        "replica": 2,
+        "server_tps": 1.8804592772036073,
+        "cp256_cumulative_tps": 1.873114,
+        "cp128_256_window_tps": 1.809393,
+        "l1_pct": 26.49,
+        "l2_pct": 36.77,
+        "cold_pct": 36.74
+      },
+      {
+        "replica": 3,
+        "server_tps": 1.8724658533542966,
+        "cp256_cumulative_tps": 1.865152,
+        "cp128_256_window_tps": 1.818379,
+        "l1_pct": 25.14,
+        "l2_pct": 35.34,
+        "cold_pct": 39.52
+      }
+    ],
+    "summary": {
+      "server_tps": {
+        "median": 1.8804592772036073,
+        "min": 1.8724658533542966,
+        "max": 1.8994223515326536
+      },
+      "cp256_cumulative_tps": {
+        "median": 1.873114,
+        "min": 1.865152,
+        "max": 1.896236
+      },
+      "cp128_256_window_tps": {
+        "median": 1.818379,
+        "min": 1.809393,
+        "max": 1.848664
+      },
+      "l1_pct": {
+        "median": 25.56,
+        "min": 25.14,
+        "max": 26.49
+      },
+      "l2_pct": {
+        "median": 36.77,
+        "min": 35.34,
+        "max": 39.5
+      },
+      "cold_pct": {
+        "median": 36.74,
+        "min": 34.94,
+        "max": 39.52
+      }
+    }
+  },
+  "historical_same_policy_mmap": {
+    "replicas": [
+      {
+        "replica": 1,
+        "server_tps": 1.9196886642925224,
+        "cp256_cumulative_tps": 1.997047,
+        "cp128_256_window_tps": 1.970739,
+        "l1_pct": 33.25,
+        "l2_pct": 32.92,
+        "cold_pct": 33.83
+      },
+      {
+        "replica": 2,
+        "server_tps": 2.314436036551115,
+        "cp256_cumulative_tps": 2.262722,
+        "cp128_256_window_tps": 2.299617,
+        "l1_pct": 37.23,
+        "l2_pct": 44.85,
+        "cold_pct": 17.92
+      },
+      {
+        "replica": 3,
+        "server_tps": 1.9754636152667933,
+        "cp256_cumulative_tps": 2.024947,
+        "cp128_256_window_tps": 2.050125,
+        "l1_pct": 30.93,
+        "l2_pct": 36.52,
+        "cold_pct": 32.54
+      }
+    ],
+    "summary": {
+      "server_tps": {
+        "median": 1.9754636152667933,
+        "min": 1.9196886642925224,
+        "max": 2.314436036551115
+      },
+      "cp256_cumulative_tps": {
+        "median": 2.024947,
+        "min": 1.997047,
+        "max": 2.262722
+      },
+      "cp128_256_window_tps": {
+        "median": 2.050125,
+        "min": 1.970739,
+        "max": 2.299617
+      },
+      "l1_pct": {
+        "median": 33.25,
+        "min": 30.93,
+        "max": 37.23
+      },
+      "l2_pct": {
+        "median": 36.52,
+        "min": 32.92,
+        "max": 44.85
+      },
+      "cold_pct": {
+        "median": 32.54,
+        "min": 17.92,
+        "max": 33.83
+      }
+    },
+    "note": "historical 2048-token server-policy curve; values here are its 256-token checkpoints"
+  },
+  "target": {
+    "decode_tps": 2.5,
+    "tpot_ms": 400.0
+  }
+}
