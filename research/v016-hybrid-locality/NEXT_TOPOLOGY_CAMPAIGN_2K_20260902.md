@@ -116,38 +116,44 @@ The maintainer baseline is not one global number. Siliang should retain separate
 
 These are different strategies, not rankings of the same configuration. Performance documentation must report which envelope a number belongs to.
 
-### Arm B: analytical all-static-CPU / max-K projection
+### Arm B: analytical all-static-CPU / max-K projection — corrected after Nsight C probe
+
+**This section supersedes the earlier pre-Nsight projection.** The first calculation added the full CPU-static debt to the current ~390 ms/token hybrid TPOT but failed to subtract the FRONT H2D traffic that disappears when those static weights remain on CPU. That made Arm B incorrectly look much worse than it is.
 
 The retained DS4 static LUT projects the measured static families at:
 
 - CPU static compute: **413.56 ms/token**;
 - corresponding GPU-wall compute: **66.37 ms/token**;
-- gross CPU placement debt: **+347.19 ms/token**.
+- gross CPU-vs-GPU compute debt: **+347.19 ms/token**.
 
-The current v0.1.6 K256 profile accounts ~4685.05 MiB of static CUDA model allocation. Removing the ~155 MiB FRONT double banks as well gives ~4840 MiB that could theoretically be repurposed. At 6.75 MiB/expert-slot payload, this buys ~717 additional slots, putting the arithmetic K envelope around **K973** from K256. This is a capacity projection, not a WDDM qualification; workspace and allocator changes can move it.
+The C Nsight probe on the current K256/L2/FRONT topology identifies the large H2D stream at about **2.8-2.9 GB/token** and ~**232 ms/token of device H2D time**, matching the ~2.699-GiB FRONT payload. Arm B with all static weights CPU-resident and FRONT rolling disabled removes this transfer from the current critical path.
 
-The 250-token natural route trace, simulated with the retained cumulative-frequency / SLFU-like admission rule, gives:
+The current v0.1.6 K256 profile accounts ~4685.05 MiB of static CUDA model allocation. Removing the ~155 MiB FRONT double banks as well gives ~4840 MiB that could theoretically be repurposed. At 6.75 MiB/expert-slot payload this buys ~717 additional slots, putting the arithmetic K envelope near **K973**. This is a capacity projection, not a WDDM qualification.
 
-| K | projected K hit |
-|---:|---:|
-| 256 | ~33.34% |
-| 660 | ~48.96% |
-| 788 | ~52.43% |
-| 950 | ~56.30% |
-| 973 | **~56.81%** |
-| 1060 | ~58.61% |
+Moving the ~4685 MiB currently GPU-resident static payload into host memory requires giving back roughly the same amount of L2 capacity on the 24-GiB maintainer machine. Starting from the measured 8-GiB / 1210-slot L2, this yields roughly **516 L2 slots (~3.4 GiB)** while K grows from 256 to ~973. Total expert-capacity slot-equivalents therefore stay nearly constant rather than collapsing.
 
-K973 therefore captures ~60.6 more routed selections/token than K256. Using the retained compute-only value of ~0.41147 ms per CPU->GPU selected-expert shift, the larger K saves only **~24.9 ms/token** of routed compute relative to K256.
+A 250-token natural-route simulation using cumulative-frequency K admission plus exclusive LRU L2 gives:
 
-Compute-only trade against all-static CPU is consequently approximately:
+| topology proxy | K | L2 slots | K hit | L2 hit | cold |
+|---|---:|---:|---:|---:|---:|
+| current C | 256 | 1210 | ~33.34% | ~33.91% | ~32.76% |
+| B K788 | 788 | 678 | ~52.43% | ~15.90% | ~31.67% |
+| B K950 | 950 | 516 | ~56.30% | ~12.57% | ~31.13% |
+| **B K973** | **973** | **516** | **~56.81%** | **~12.43%** | **~30.76%** |
 
-`+347.2 ms static debt - 24.9 ms extra-K benefit = +322.3 ms/token`.
+This is the important result: the hierarchy can shift a large amount of locality from L2 to K **without increasing cold miss rate** in this trace. It directly supports the user's proposed strategy of reducing L2 to buy host room for static weights while using the freed VRAM to maximize K.
 
-Applied to the current ~390 ms/token hybrid reference, the no-overlap projection is ~712 ms/token (~1.40 tok/s). The shared expert is a sibling FFN branch and its ~62 ms CPU-vs-GPU debt can overlap routed work; granting nearly complete overlap gives an optimistic floor around ~650 ms/token (~1.54 tok/s). Therefore **Arm B is expected around 650-715 ms/token before source/workspace side effects**.
+K973 captures about 60.6 more routed selections/token than K256. Using the retained ~0.41147 ms compute-only CPU->GPU value per selected expert, this is about **24.9 ms/token** of additional routed-compute benefit.
 
-The important result is not the exact K maximum. The route curve is already flattening: K788 -> K973 buys only ~4.4 percentage points of K hit, roughly **4.7 ms/token** compute-only. Chasing K1060 is unlikely to rescue the all-static-CPU topology.
+The corrected first-order Arm-B delta relative to the current ~390.24-ms hybrid reference is therefore:
 
-This makes Arm B a falsification/profiling cell rather than a mandatory 3x2K qualification arm unless real profiling contradicts the projection.
+`+347.19 static CPU-vs-GPU compute debt - ~232 FRONT H2D removed - ~24.9 extra-K benefit ~= +90.3 ms/token`.
+
+That projects to roughly **480.5 ms/token / 2.08 tok/s** before dependency overlap and secondary source/workspace effects. The shared expert is a sibling FFN branch; if most of its ~62.1-ms CPU-vs-GPU debt overlaps routed work, an optimistic bound is about **418.5 ms/token / 2.39 tok/s**.
+
+Therefore Arm B is **not** a throwaway falsification cell. Its plausible range is now approximately **2.1-2.4 tok/s**, and profiling it is justified. The remaining uncertainty is dominated by graph dependency/overlap of the CPU static chain, not K hit-rate arithmetic.
+
+The K curve still flattens: K788 -> K973 buys only ~4.4 percentage points of K hit, around 4.7 ms/token compute-only. Exact K1060 capacity is therefore not strategically important unless the pre-bake finds additional near-zero-debt VRAM victims.
 
 ### Static host placement semantics
 
