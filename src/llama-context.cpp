@@ -1,6 +1,7 @@
 #include "llama-context.h"
 
 #include "ggml.h"
+#include "ggml-backend.h"
 #include "ggml-cpu.h"
 #include "llama-arch.h"
 #include "llama-graph.h"
@@ -16,6 +17,7 @@
 #include <cinttypes>
 #include <cmath>
 #include <cstring>
+#include <fstream>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -1994,6 +1996,68 @@ bool llama_context::set_adapter_cvec(
     return res;
 }
 
+static bool siliang_materialize_managed_token_embeddings(
+        const llama_model & model,
+        const llama_ubatch & ubatch,
+        std::ifstream & file,
+        std::vector<float> & embeddings,
+        std::string & error) {
+    const ggml_tensor * weight = model.tok_embd;
+    if (weight == nullptr || weight->buffer == nullptr ||
+        !ggml_backend_buffer_is_siliang_managed(weight->buffer) || ubatch.token == nullptr) {
+        return true;
+    }
+    if (model.arch != LLM_ARCH_DEEPSEEK4 || ubatch.embd != nullptr || weight->type != GGML_TYPE_F16 ||
+        weight->ne[0] <= 0 || weight->ne[1] <= 0) {
+        error = "managed token-embedding source has unsupported model/batch geometry";
+        return false;
+    }
+    const auto * receipt = model.siliang_file_source.find(weight->name);
+    const size_t row_bytes = ggml_row_size(weight->type, weight->ne[0]);
+    if (receipt == nullptr || !model.siliang_file_source.valid() || row_bytes == 0 ||
+        receipt->bytes != row_bytes * static_cast<uint64_t>(weight->ne[1])) {
+        error = "managed token-embedding source receipt is missing or inconsistent";
+        return false;
+    }
+
+    if (!file.is_open()) {
+        file.open(model.siliang_file_source.path, std::ios::binary);
+    }
+    if (!file) {
+        error = "managed token-embedding model file could not be opened";
+        return false;
+    }
+
+    const size_t width = static_cast<size_t>(weight->ne[0]);
+    if (ubatch.n_tokens > std::numeric_limits<size_t>::max() / width) {
+        error = "managed token-embedding output size overflow";
+        return false;
+    }
+    embeddings.resize(static_cast<size_t>(ubatch.n_tokens) * width);
+    std::vector<ggml_fp16_t> row(width);
+    for (uint32_t index = 0; index < ubatch.n_tokens; ++index) {
+        const llama_token token = ubatch.token[index];
+        if (token < 0 || static_cast<int64_t>(token) >= weight->ne[1]) {
+            error = "managed token-embedding token id is out of range";
+            return false;
+        }
+        const uint64_t offset = receipt->offset + static_cast<uint64_t>(token) * row_bytes;
+        if (offset > static_cast<uint64_t>(std::numeric_limits<std::streamoff>::max())) {
+            error = "managed token-embedding file offset is out of range";
+            return false;
+        }
+        file.clear();
+        file.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+        file.read(reinterpret_cast<char *>(row.data()), static_cast<std::streamsize>(row_bytes));
+        if (!file || file.gcount() != static_cast<std::streamsize>(row_bytes)) {
+            error = "managed token-embedding row read failed";
+            return false;
+        }
+        ggml_fp16_to_fp32_row(row.data(), embeddings.data() + static_cast<size_t>(index) * width, weight->ne[0]);
+    }
+    return true;
+}
+
 llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, llm_graph_type gtype, llama_memory_context_i * mctx, ggml_status & ret) {
     if (mctx && !mctx->apply()) {
         LLAMA_LOG_ERROR("%s: failed to apply memory context\n", __func__);
@@ -2001,12 +2065,26 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         return nullptr;
     }
 
+    llama_ubatch effective_ubatch = ubatch;
+    std::vector<float> managed_token_embeddings;
+    std::string managed_token_error;
+    if (!siliang_materialize_managed_token_embeddings(
+            model, ubatch, siliang_token_embedding_file,
+            managed_token_embeddings, managed_token_error)) {
+        LLAMA_LOG_ERROR("%s: %s\n", __func__, managed_token_error.c_str());
+        ret = GGML_STATUS_FAILED;
+        return nullptr;
+    }
+    if (!managed_token_embeddings.empty()) {
+        effective_ubatch.embd = managed_token_embeddings.data();
+    }
+
     auto * res = gf_res_prev.get();
     auto * gf  = res->get_gf();
 
     // the new graph parameters
     // in order to correctly reuse a graph, it's full topology has to be uniquely determined by these parameters
-    const auto gparams = graph_params(res, ubatch, mctx, gtype);
+    const auto gparams = graph_params(res, effective_ubatch, mctx, gtype);
 
     if (!graph_reuse_disable && res->can_reuse(gparams)) {
         //LLAMA_LOG_DEBUG("%s: reusing previous graph\n", __func__);
@@ -2049,12 +2127,12 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         //const auto t_start_us = ggml_time_us();
 
         // FIXME this call causes a crash if any model inputs were not used in the graph and were therefore not allocated
-        res->set_inputs(&ubatch);
+        res->set_inputs(&effective_ubatch);
 
         //LLAMA_LOG_INFO("graph set inputs time: %.3f ms\n", (ggml_time_us() - t_start_us)/1000.0);
     }
 
-    const auto status = graph_compute(res->get_gf(), ubatch.n_tokens > 1);
+    const auto status = graph_compute(res->get_gf(), effective_ubatch.n_tokens > 1);
     if (status != GGML_STATUS_SUCCESS) {
         LLAMA_LOG_ERROR("%s: failed to compute graph, compute status: %d\n", __func__, status);
         ret = status;

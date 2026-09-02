@@ -295,7 +295,7 @@ index 86af0ba10a327283f2500f0bb8e48095df547017..6cbfc21a81c449b46cfa3456f4003016
          }
      ));
 diff --git a/common/common.cpp b/common/common.cpp
-index d9ce5755161edc853dbcf629819ee75971ba413d..2a7248fff647e177c3b7e37d634178d078566724 100644
+index d9ce5755161edc853dbcf629819ee75971ba413d..2bfd6329fcfdd5a8e97c9a51268bd9a1f3dda8e7 100644
 --- a/common/common.cpp
 +++ b/common/common.cpp
 @@ -9,6 +9,7 @@
@@ -389,7 +389,7 @@ index d9ce5755161edc853dbcf629819ee75971ba413d..2a7248fff647e177c3b7e37d634178d0
 
      std::vector<llama_adapter_lora_ptr> lora;
 
-@@ -1233,6 +1296,73 @@ struct common_init_result::impl {
+@@ -1233,6 +1296,81 @@ struct common_init_result::impl {
 
  common_init_result::common_init_result(common_params & params, bool model_only) :
      pimpl(new impl{}) {
@@ -448,6 +448,14 @@ index d9ce5755161edc853dbcf629819ee75971ba413d..2a7248fff647e177c3b7e37d634178d0
 +        }
 +    }
 +    if (l1_enabled && params.expert_cache.roll == COMMON_EXPERT_CACHE_ROLL_DEEPSEEK4) {
++        if (managed_no_mmap_source) {
++            if (!common_append_tensor_buft_override(
++                    params, R"(^token_embd\.weight$)", ggml_backend_cpu_siliang_managed_buffer_type(),
++                    "managed token-embedding source")) {
++                return;
++            }
++            COM_INF("%s", "expert cache: token embedding model-file proxy prepared; rows will be materialized per ubatch\n");
++        }
 +        ggml_backend_buffer_type_t front_buft = managed_no_mmap_source ?
 +            ggml_backend_cpu_siliang_managed_buffer_type() : ggml_backend_cpu_buffer_type();
 +        if (!common_append_tensor_buft_override(
@@ -463,7 +471,7 @@ index d9ce5755161edc853dbcf629819ee75971ba413d..2a7248fff647e177c3b7e37d634178d0
      auto mparams = common_model_params_to_llama(params);
      auto cparams = common_context_params_to_llama(params);
 
-@@ -1334,6 +1464,39 @@ common_init_result::common_init_result(common_params & params, bool model_only)
+@@ -1334,6 +1472,39 @@ common_init_result::common_init_result(common_params & params, bool model_only)
      }
 
      pimpl->context.reset(lctx);
@@ -503,7 +511,7 @@ index d9ce5755161edc853dbcf629819ee75971ba413d..2a7248fff647e177c3b7e37d634178d0
  }
 
  llama_model * common_init_result::model() {
-@@ -1344,6 +1507,16 @@ llama_context * common_init_result::context() {
+@@ -1344,6 +1515,16 @@ llama_context * common_init_result::context() {
      return pimpl->context.get();
  }
 
@@ -520,7 +528,7 @@ index d9ce5755161edc853dbcf629819ee75971ba413d..2a7248fff647e177c3b7e37d634178d0
  common_sampler * common_init_result::sampler(llama_seq_id seq_id) {
      if (seq_id < 0 || seq_id >= (int) pimpl->samplers.size()) {
          return nullptr;
-@@ -1432,8 +1605,10 @@ common_init_result_ptr common_init_from_params(common_params & params, bool mode
+@@ -1432,8 +1613,10 @@ common_init_result_ptr common_init_from_params(common_params & params, bool mode
          }
      }
 
@@ -533,7 +541,7 @@ index d9ce5755161edc853dbcf629819ee75971ba413d..2a7248fff647e177c3b7e37d634178d0
      }
 
      if (params.warmup) {
-@@ -1474,6 +1649,10 @@ common_init_result_ptr common_init_from_params(common_params & params, bool mode
+@@ -1474,6 +1657,10 @@ common_init_result_ptr common_init_from_params(common_params & params, bool mode
          res->reset_samplers();
      }
 
@@ -544,7 +552,7 @@ index d9ce5755161edc853dbcf629819ee75971ba413d..2a7248fff647e177c3b7e37d634178d0
      return res;
  }
 
-@@ -1593,7 +1772,7 @@ void common_memory::seq_add(llama_seq_id seq_id, llama_pos p0, llama_pos p1, lla
+@@ -1593,7 +1780,7 @@ void common_memory::seq_add(llama_seq_id seq_id, llama_pos p0, llama_pos p1, lla
      }
  }
 
@@ -553,7 +561,7 @@ index d9ce5755161edc853dbcf629819ee75971ba413d..2a7248fff647e177c3b7e37d634178d0
      std::vector<llama_adapter_lora *> loras;
      std::vector<float> scales;
 
-@@ -1602,7 +1781,7 @@ void common_set_adapter_lora(struct llama_context * ctx, std::vector<common_adap
+@@ -1602,7 +1789,7 @@ void common_set_adapter_lora(struct llama_context * ctx, std::vector<common_adap
          scales.push_back(la.scale);
      }
 
@@ -562,7 +570,7 @@ index d9ce5755161edc853dbcf629819ee75971ba413d..2a7248fff647e177c3b7e37d634178d0
  }
 
  struct llama_model_params common_model_params_to_llama(common_params & params) {
-@@ -1646,6 +1825,20 @@ struct llama_model_params common_model_params_to_llama(common_params & params) {
+@@ -1646,6 +1833,20 @@ struct llama_model_params common_model_params_to_llama(common_params & params) {
  struct llama_context_params common_context_params_to_llama(const common_params & params) {
      auto cparams = llama_context_default_params();
 
@@ -583,7 +591,7 @@ index d9ce5755161edc853dbcf629819ee75971ba413d..2a7248fff647e177c3b7e37d634178d0
      cparams.n_ctx             = params.n_ctx;
      cparams.n_seq_max         = params.n_parallel;
      cparams.n_rs_seq          = params.speculative.need_n_rs_seq();
-@@ -1675,6 +1868,22 @@ struct llama_context_params common_context_params_to_llama(const common_params &
+@@ -1675,6 +1876,22 @@ struct llama_context_params common_context_params_to_llama(const common_params &
      cparams.swa_full          = params.swa_full;
      cparams.kv_unified        = params.kv_unified;
 
@@ -4822,18 +4830,27 @@ index 24f05cc91673217726b919229e1626b7f74a7bcb..4b620618f1304164881ac97692d397fa
              unicode.cpp
              unicode.h
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index 19cca7df1e9deaafc1e8ee50d0c78ae5ffbc6cfb..ecdb8f92ecc2faeee71dee7b460efbf7b194a822 100644
+index 19cca7df1e9deaafc1e8ee50d0c78ae5ffbc6cfb..84e4c6ee069fbaa05ea350bff700b8cf6632831c 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
-@@ -1,6 +1,7 @@
+@@ -1,6 +1,8 @@
  #include "llama-context.h"
 
  #include "ggml.h"
++#include "ggml-backend.h"
 +#include "ggml-cpu.h"
  #include "llama-arch.h"
  #include "llama-graph.h"
  #include "llama-impl.h"
-@@ -95,6 +96,87 @@ llama_context::llama_context(
+@@ -15,6 +17,7 @@
+ #include <cinttypes>
+ #include <cmath>
+ #include <cstring>
++#include <fstream>
+ #include <limits>
+ #include <stdexcept>
+ #include <string>
+@@ -95,6 +98,87 @@ llama_context::llama_context(
 
      const auto & hparams = model.hparams;
 
@@ -4921,7 +4938,7 @@ index 19cca7df1e9deaafc1e8ee50d0c78ae5ffbc6cfb..ecdb8f92ecc2faeee71dee7b460efbf7
      cparams.n_seq_max = std::max(1u, params.n_seq_max);
      if (cparams.n_seq_max > LLAMA_MAX_SEQ) {
          throw std::runtime_error("n_seq_max must be <= " + std::to_string(LLAMA_MAX_SEQ));
-@@ -138,6 +220,14 @@ llama_context::llama_context(
+@@ -138,6 +222,14 @@ llama_context::llama_context(
      cparams.cb_eval           = params.cb_eval;
      cparams.cb_eval_user_data = params.cb_eval_user_data;
 
@@ -4936,7 +4953,7 @@ index 19cca7df1e9deaafc1e8ee50d0c78ae5ffbc6cfb..ecdb8f92ecc2faeee71dee7b460efbf7
      cparams.ctx_other = nullptr;
 
      // TODO: more generic
-@@ -352,6 +442,57 @@ llama_context::llama_context(
+@@ -352,6 +444,57 @@ llama_context::llama_context(
          }
          backends.emplace_back(backend_cpu);
 
@@ -4994,7 +5011,7 @@ index 19cca7df1e9deaafc1e8ee50d0c78ae5ffbc6cfb..ecdb8f92ecc2faeee71dee7b460efbf7
          // create a list of the set_n_threads functions in the backends
          for (auto & backend : backends) {
              ggml_backend_dev_t dev = ggml_backend_get_device(backend.get());
-@@ -667,6 +808,11 @@ void llama_context::sched_reserve() {
+@@ -667,6 +810,11 @@ void llama_context::sched_reserve() {
          }
      }
 
@@ -5006,7 +5023,7 @@ index 19cca7df1e9deaafc1e8ee50d0c78ae5ffbc6cfb..ecdb8f92ecc2faeee71dee7b460efbf7
      for (size_t i = 0; i < backend_ptrs.size(); ++i) {
          ggml_backend_t             backend = backend_ptrs[i];
          ggml_backend_buffer_type_t buft    = backend_buft[i];
-@@ -842,6 +988,536 @@ float * llama_context::get_logits() {
+@@ -842,6 +990,536 @@ float * llama_context::get_logits() {
      return logits.data;
  }
 
@@ -5543,7 +5560,119 @@ index 19cca7df1e9deaafc1e8ee50d0c78ae5ffbc6cfb..ecdb8f92ecc2faeee71dee7b460efbf7
  int64_t llama_context::output_resolve_row(int32_t i) const {
      int64_t j = -1;
 
-@@ -2472,9 +3148,28 @@ ggml_status llama_context::graph_compute(
+@@ -1318,6 +1996,68 @@ bool llama_context::set_adapter_cvec(
+     return res;
+ }
+
++static bool siliang_materialize_managed_token_embeddings(
++        const llama_model & model,
++        const llama_ubatch & ubatch,
++        std::ifstream & file,
++        std::vector<float> & embeddings,
++        std::string & error) {
++    const ggml_tensor * weight = model.tok_embd;
++    if (weight == nullptr || weight->buffer == nullptr ||
++        !ggml_backend_buffer_is_siliang_managed(weight->buffer) || ubatch.token == nullptr) {
++        return true;
++    }
++    if (model.arch != LLM_ARCH_DEEPSEEK4 || ubatch.embd != nullptr || weight->type != GGML_TYPE_F16 ||
++        weight->ne[0] <= 0 || weight->ne[1] <= 0) {
++        error = "managed token-embedding source has unsupported model/batch geometry";
++        return false;
++    }
++    const auto * receipt = model.siliang_file_source.find(weight->name);
++    const size_t row_bytes = ggml_row_size(weight->type, weight->ne[0]);
++    if (receipt == nullptr || !model.siliang_file_source.valid() || row_bytes == 0 ||
++        receipt->bytes != row_bytes * static_cast<uint64_t>(weight->ne[1])) {
++        error = "managed token-embedding source receipt is missing or inconsistent";
++        return false;
++    }
++
++    if (!file.is_open()) {
++        file.open(model.siliang_file_source.path, std::ios::binary);
++    }
++    if (!file) {
++        error = "managed token-embedding model file could not be opened";
++        return false;
++    }
++
++    const size_t width = static_cast<size_t>(weight->ne[0]);
++    if (ubatch.n_tokens > std::numeric_limits<size_t>::max() / width) {
++        error = "managed token-embedding output size overflow";
++        return false;
++    }
++    embeddings.resize(static_cast<size_t>(ubatch.n_tokens) * width);
++    std::vector<ggml_fp16_t> row(width);
++    for (uint32_t index = 0; index < ubatch.n_tokens; ++index) {
++        const llama_token token = ubatch.token[index];
++        if (token < 0 || static_cast<int64_t>(token) >= weight->ne[1]) {
++            error = "managed token-embedding token id is out of range";
++            return false;
++        }
++        const uint64_t offset = receipt->offset + static_cast<uint64_t>(token) * row_bytes;
++        if (offset > static_cast<uint64_t>(std::numeric_limits<std::streamoff>::max())) {
++            error = "managed token-embedding file offset is out of range";
++            return false;
++        }
++        file.clear();
++        file.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
++        file.read(reinterpret_cast<char *>(row.data()), static_cast<std::streamsize>(row_bytes));
++        if (!file || file.gcount() != static_cast<std::streamsize>(row_bytes)) {
++            error = "managed token-embedding row read failed";
++            return false;
++        }
++        ggml_fp16_to_fp32_row(row.data(), embeddings.data() + static_cast<size_t>(index) * width, weight->ne[0]);
++    }
++    return true;
++}
++
+ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, llm_graph_type gtype, llama_memory_context_i * mctx, ggml_status & ret) {
+     if (mctx && !mctx->apply()) {
+         LLAMA_LOG_ERROR("%s: failed to apply memory context\n", __func__);
+@@ -1325,12 +2065,26 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
+         return nullptr;
+     }
+
++    llama_ubatch effective_ubatch = ubatch;
++    std::vector<float> managed_token_embeddings;
++    std::string managed_token_error;
++    if (!siliang_materialize_managed_token_embeddings(
++            model, ubatch, siliang_token_embedding_file,
++            managed_token_embeddings, managed_token_error)) {
++        LLAMA_LOG_ERROR("%s: %s\n", __func__, managed_token_error.c_str());
++        ret = GGML_STATUS_FAILED;
++        return nullptr;
++    }
++    if (!managed_token_embeddings.empty()) {
++        effective_ubatch.embd = managed_token_embeddings.data();
++    }
++
+     auto * res = gf_res_prev.get();
+     auto * gf  = res->get_gf();
+
+     // the new graph parameters
+     // in order to correctly reuse a graph, it's full topology has to be uniquely determined by these parameters
+-    const auto gparams = graph_params(res, ubatch, mctx, gtype);
++    const auto gparams = graph_params(res, effective_ubatch, mctx, gtype);
+
+     if (!graph_reuse_disable && res->can_reuse(gparams)) {
+         //LLAMA_LOG_DEBUG("%s: reusing previous graph\n", __func__);
+@@ -1373,12 +2127,12 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
+         //const auto t_start_us = ggml_time_us();
+
+         // FIXME this call causes a crash if any model inputs were not used in the graph and were therefore not allocated
+-        res->set_inputs(&ubatch);
++        res->set_inputs(&effective_ubatch);
+
+         //LLAMA_LOG_INFO("graph set inputs time: %.3f ms\n", (ggml_time_us() - t_start_us)/1000.0);
+     }
+
+-    const auto status = graph_compute(res->get_gf(), ubatch.n_tokens > 1);
++    const auto status = graph_compute(res->get_gf(), effective_ubatch.n_tokens > 1);
+     if (status != GGML_STATUS_SUCCESS) {
+         LLAMA_LOG_ERROR("%s: failed to compute graph, compute status: %d\n", __func__, status);
+         ret = status;
+@@ -2472,9 +3226,28 @@ ggml_status llama_context::graph_compute(
          set_n_threads_fn.second(set_n_threads_fn.first, n_threads);
      }
 
@@ -5572,7 +5701,7 @@ index 19cca7df1e9deaafc1e8ee50d0c78ae5ffbc6cfb..ecdb8f92ecc2faeee71dee7b460efbf7
      }
 
      // fprintf(stderr, "splits: %d\n", ggml_backend_sched_get_n_splits(sched));
-@@ -3480,6 +4175,86 @@ void llama_context::opt_epoch(
+@@ -3480,6 +4253,86 @@ void llama_context::opt_epoch(
  // interface implementation
  //
 
@@ -5659,7 +5788,7 @@ index 19cca7df1e9deaafc1e8ee50d0c78ae5ffbc6cfb..ecdb8f92ecc2faeee71dee7b460efbf7
  llama_context_params llama_context_default_params() {
      llama_context_params result = {
          /*.n_ctx                       =*/ 512,
-@@ -3518,6 +4293,22 @@ llama_context_params llama_context_default_params() {
+@@ -3518,6 +4371,22 @@ llama_context_params llama_context_default_params() {
          /*.sampler                     =*/ nullptr,
          /*.n_sampler                   =*/ 0,
          /*.ctx_other                   =*/ nullptr,
@@ -5682,7 +5811,7 @@ index 19cca7df1e9deaafc1e8ee50d0c78ae5ffbc6cfb..ecdb8f92ecc2faeee71dee7b460efbf7
      };
 
      return result;
-@@ -3850,6 +4641,15 @@ int32_t llama_set_adapters_lora(
+@@ -3850,6 +4719,15 @@ int32_t llama_set_adapters_lora(
          GGML_ASSERT(n_adapters == 0 && "invalid llama_set_adapters_lora call");
      }
 
@@ -5699,10 +5828,18 @@ index 19cca7df1e9deaafc1e8ee50d0c78ae5ffbc6cfb..ecdb8f92ecc2faeee71dee7b460efbf7
 
      return 0;
 diff --git a/src/llama-context.h b/src/llama-context.h
-index bf91daa8b562aa66d15b08ca559b6baa09ab7855..7c566f561669941cec1196ee0fc88519c4b173ab 100644
+index bf91daa8b562aa66d15b08ca559b6baa09ab7855..553ebd9cb4f37da8a9179fe80fe01182a2b89411 100644
 --- a/src/llama-context.h
 +++ b/src/llama-context.h
-@@ -102,6 +102,36 @@ struct llama_context {
+@@ -11,6 +11,7 @@
+ #include "ggml-cpp.h"
+ #include "ggml-opt.h"
+
++#include <fstream>
+ #include <map>
+ #include <vector>
+
+@@ -102,6 +103,36 @@ struct llama_context {
      const llama_token * get_sampled_candidates_ith(int32_t idx);
      size_t get_sampled_candidates_count(int32_t idx);
 
@@ -5739,7 +5876,7 @@ index bf91daa8b562aa66d15b08ca559b6baa09ab7855..7c566f561669941cec1196ee0fc88519
      void attach_threadpool(
              ggml_threadpool_t threadpool,
              ggml_threadpool_t threadpool_batch);
-@@ -281,6 +311,8 @@ private:
+@@ -281,6 +312,8 @@ private:
 
      llama_cparams cparams;
 
@@ -5748,7 +5885,7 @@ index bf91daa8b562aa66d15b08ca559b6baa09ab7855..7c566f561669941cec1196ee0fc88519
      llama_adapter_cvec_ptr  cvec;
      llama_adapter_loras_ptr loras;
 
-@@ -345,6 +377,9 @@ private:
+@@ -345,6 +378,9 @@ private:
 
      bool sched_need_reserve = true;
 
@@ -5757,6 +5894,17 @@ index bf91daa8b562aa66d15b08ca559b6baa09ab7855..7c566f561669941cec1196ee0fc88519
 +
      ggml_backend_t backend_cpu = nullptr;
      std::vector<ggml_backend_ptr> backends;
+
+@@ -367,6 +403,10 @@ private:
+     llm_graph_result_ptr gf_res_prev;
+     llm_graph_result_ptr gf_res_reserve;
+
++    // Persistent reader for managed token-embedding rows. It owns no model
++    // residency; the GGUF remains the source of truth.
++    std::ifstream siliang_token_embedding_file;
++
+     // host buffer for the model output (logits and embeddings)
+     ggml_backend_buffer_ptr buf_output;
 
 diff --git a/src/llama-cparams.h b/src/llama-cparams.h
 index 5018170ed85e3b82abad65e6a3c71859067c9f71..2de4137861983ca96170eeb71b893ededb9dad29 100644
@@ -5843,10 +5991,18 @@ index 5018170ed85e3b82abad65e6a3c71859067c9f71..2de4137861983ca96170eeb71b893ede
      llama_context * ctx_other;
  };
 diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
-index 2be3b75fb9825ccc9aa08cda294f46d6422c61ea..4258d05f5ff0f958dafdb621aeecd7d2530e1f48 100644
+index 2be3b75fb9825ccc9aa08cda294f46d6422c61ea..fd29b369090feb303267cdc622c62dd8ec3d8f85 100644
 --- a/src/llama-graph.cpp
 +++ b/src/llama-graph.cpp
-@@ -229,6 +229,238 @@ bool llm_graph_input_out_ids::can_reuse(const llm_graph_params & params) {
+@@ -1,5 +1,7 @@
+ #include "llama-graph.h"
+
++#include "ggml-backend.h"
++
+ #include "llama-impl.h"
+ #include "llama-model.h"
+ #include "llama-batch.h"
+@@ -229,6 +231,238 @@ bool llm_graph_input_out_ids::can_reuse(const llm_graph_params & params) {
      return res;
  }
 
@@ -6085,7 +6241,7 @@ index 2be3b75fb9825ccc9aa08cda294f46d6422c61ea..4258d05f5ff0f958dafdb621aeecd7d2
  void llm_graph_input_mean::set_input(const llama_ubatch * ubatch) {
      if (cparams.embeddings   &&
         (cparams.pooling_type == LLAMA_POOLING_TYPE_MEAN ||
-@@ -2072,6 +2304,69 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+@@ -2072,6 +2306,69 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
          cb(weights, "ffn_moe_weights_scaled", il);
      }
 
@@ -6155,7 +6311,7 @@ index 2be3b75fb9825ccc9aa08cda294f46d6422c61ea..4258d05f5ff0f958dafdb621aeecd7d2
      //call early so that topk-moe can be used
      ggml_build_forward_expand(gf, weights);
 
-@@ -2089,7 +2384,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+@@ -2089,7 +2386,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
 
      if (gate_up_exps) {
          // merged gate_up path: one mul_mat_id, then split into gate and up views
@@ -6164,7 +6320,7 @@ index 2be3b75fb9825ccc9aa08cda294f46d6422c61ea..4258d05f5ff0f958dafdb621aeecd7d2
          cb(gate_up, "ffn_moe_gate_up", il);
 
          if (up_exps_s) {
-@@ -2097,7 +2392,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+@@ -2097,7 +2394,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
          }
 
          if (gate_up_exps_b) {
@@ -6173,7 +6329,7 @@ index 2be3b75fb9825ccc9aa08cda294f46d6422c61ea..4258d05f5ff0f958dafdb621aeecd7d2
              cb(gate_up, "ffn_moe_gate_up_biased", il);
          }
 
-@@ -2108,7 +2403,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+@@ -2108,7 +2405,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
          cb(up, "ffn_moe_up", il);
      } else {
          // separate gate and up path
@@ -6182,7 +6338,7 @@ index 2be3b75fb9825ccc9aa08cda294f46d6422c61ea..4258d05f5ff0f958dafdb621aeecd7d2
          cb(up, "ffn_moe_up", il);
 
          if (up_exps_s) {
-@@ -2116,12 +2411,12 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+@@ -2116,12 +2413,12 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
          }
 
          if (up_exps_b) {
@@ -6197,7 +6353,7 @@ index 2be3b75fb9825ccc9aa08cda294f46d6422c61ea..4258d05f5ff0f958dafdb621aeecd7d2
              cb(cur, "ffn_moe_gate", il);
          } else {
              cur = up;
-@@ -2132,7 +2427,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+@@ -2132,7 +2429,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
          }
 
          if (gate_exps_b) {
@@ -6206,7 +6362,7 @@ index 2be3b75fb9825ccc9aa08cda294f46d6422c61ea..4258d05f5ff0f958dafdb621aeecd7d2
              cb(cur, "ffn_moe_gate_biased", il);
          }
      }
-@@ -2210,7 +2505,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+@@ -2210,7 +2507,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
              GGML_ABORT("fatal error");
      }
 
@@ -6215,7 +6371,7 @@ index 2be3b75fb9825ccc9aa08cda294f46d6422c61ea..4258d05f5ff0f958dafdb621aeecd7d2
      cb(experts, "ffn_moe_down", il);
 
      if (down_exps_s) {
-@@ -2218,7 +2513,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+@@ -2218,7 +2515,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
      }
 
      if (down_exps_b) {
@@ -6224,7 +6380,7 @@ index 2be3b75fb9825ccc9aa08cda294f46d6422c61ea..4258d05f5ff0f958dafdb621aeecd7d2
          cb(experts, "ffn_moe_down_biased", il);
      }
 
-@@ -2259,6 +2554,17 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+@@ -2259,6 +2556,17 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
 
      cb(moe_out, "ffn_moe_out", il);
 
@@ -6242,6 +6398,18 @@ index 2be3b75fb9825ccc9aa08cda294f46d6422c61ea..4258d05f5ff0f958dafdb621aeecd7d2
      return moe_out;
  }
 
+@@ -2323,7 +2631,10 @@ ggml_tensor * llm_graph_context::build_inp_embd(ggml_tensor * tok_embd) const {
+     assert(ggml_are_same_shape (inps[0], inps[1]));
+     assert(ggml_are_same_stride(inps[0], inps[1]));
+
+-    ggml_tensor * cur = ggml_build_forward_select(gf, inps.data(), inps.size(), ubatch.token ? 0 : 1);
++    const bool managed_token_embd = tok_embd != nullptr && tok_embd->buffer != nullptr &&
++        ggml_backend_buffer_is_siliang_managed(tok_embd->buffer);
++    ggml_tensor * cur = ggml_build_forward_select(
++            gf, inps.data(), inps.size(), managed_token_embd || !ubatch.token ? 1 : 0);
+
+     if (n_embd_inp != n_embd) {
+         cur = ggml_view_2d(ctx0, cur, n_embd, n_tokens, cur->nb[1], 0);
 diff --git a/src/llama-graph.h b/src/llama-graph.h
 index 32d8d395aa4546ed7e90e7d26d24218fcd37547a..08c5d6968e6fde56d207c6607fdc6834e97287ca 100644
 --- a/src/llama-graph.h

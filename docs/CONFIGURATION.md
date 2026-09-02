@@ -80,6 +80,15 @@ double GPU bank. FRONT ownership is independent from routed-expert prefill:
 `--expert-cache-prefill` controls only the routed-expert K batch-union path; it
 does not enable or disable FRONT rolling.
 
+The DS4 token embedding table is also file-owned in this profile. The reference
+GGUF stores `token_embd.weight` as a 129,280 x 4,096 F16 table (1,010 MiB), but
+one token needs only one 8 KiB row. The model therefore keeps only a managed
+proxy for the table and materializes the requested rows into the existing F32
+ubatch embedding input through a persistent file reader. This removes the
+1,010 MiB `CUDA_Host` model buffer created by ordinary no-mmap loading. A
+matched greedy mmap/managed run produced byte-identical output; 32-token decode
+throughput differed by less than 1% in that receipt.
+
 Matched fresh-start smoke on the RTX 2070 workstation produced byte-identical
 greedy output for mmap and fully managed no-mmap. At model-ready state, mmap
 used about 12.51 GiB working set and 13.30 GiB private memory; managed no-mmap

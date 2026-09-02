@@ -1,5 +1,7 @@
 #include "llama-graph.h"
 
+#include "ggml-backend.h"
+
 #include "llama-impl.h"
 #include "llama-model.h"
 #include "llama-batch.h"
@@ -2629,7 +2631,10 @@ ggml_tensor * llm_graph_context::build_inp_embd(ggml_tensor * tok_embd) const {
     assert(ggml_are_same_shape (inps[0], inps[1]));
     assert(ggml_are_same_stride(inps[0], inps[1]));
 
-    ggml_tensor * cur = ggml_build_forward_select(gf, inps.data(), inps.size(), ubatch.token ? 0 : 1);
+    const bool managed_token_embd = tok_embd != nullptr && tok_embd->buffer != nullptr &&
+        ggml_backend_buffer_is_siliang_managed(tok_embd->buffer);
+    ggml_tensor * cur = ggml_build_forward_select(
+            gf, inps.data(), inps.size(), managed_token_embd || !ubatch.token ? 1 : 0);
 
     if (n_embd_inp != n_embd) {
         cur = ggml_view_2d(ctx0, cur, n_embd, n_tokens, cur->nb[1], 0);

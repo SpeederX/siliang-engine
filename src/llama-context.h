@@ -11,6 +11,7 @@
 #include "ggml-cpp.h"
 #include "ggml-opt.h"
 
+#include <fstream>
 #include <map>
 #include <vector>
 
@@ -401,6 +402,10 @@ private:
 
     llm_graph_result_ptr gf_res_prev;
     llm_graph_result_ptr gf_res_reserve;
+
+    // Persistent reader for managed token-embedding rows. It owns no model
+    // residency; the GGUF remains the source of truth.
+    std::ifstream siliang_token_embedding_file;
 
     // host buffer for the model output (logits and embeddings)
     ggml_backend_buffer_ptr buf_output;

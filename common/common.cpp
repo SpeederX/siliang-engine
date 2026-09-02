@@ -1351,6 +1351,14 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
         }
     }
     if (l1_enabled && params.expert_cache.roll == COMMON_EXPERT_CACHE_ROLL_DEEPSEEK4) {
+        if (managed_no_mmap_source) {
+            if (!common_append_tensor_buft_override(
+                    params, R"(^token_embd\.weight$)", ggml_backend_cpu_siliang_managed_buffer_type(),
+                    "managed token-embedding source")) {
+                return;
+            }
+            COM_INF("%s", "expert cache: token embedding model-file proxy prepared; rows will be materialized per ubatch\n");
+        }
         ggml_backend_buffer_type_t front_buft = managed_no_mmap_source ?
             ggml_backend_cpu_siliang_managed_buffer_type() : ggml_backend_cpu_buffer_type();
         if (!common_append_tensor_buft_override(

@@ -29,10 +29,10 @@ $expected = [ordered]@{
     upstreamTag = 'b10270'
     upstreamRootTree = '46f77bf060878e2b3b9d7c43b4d8a3a566ba3384'
     patchPath = 'patches/siliang-engine.patch'
-    patchSha256 = '5F976641F8B91BD1B77CA9D476DB186E69D228B4E96736C7F7D36B7B22E1948E'
-    patchGitBlob = '40568b228b193de8e91a2064caca7db3c925f537'
-    patchInsertions = 11119
-    patchDeletions = 29
+    patchSha256 = 'BC7DDC9D9A9261F4CC9AD6411499C65FD2C7A6F0B80B69E0A56C47B10C4D54BE'
+    patchGitBlob = '55548458f8ce89c38e4ee0f0d190fd294b5c9799'
+    patchInsertions = 11219
+    patchDeletions = 33
 }
 
 function New-ExpectedEngineFile {
@@ -58,7 +58,7 @@ function New-ExpectedEngineFile {
 
 $expectedFiles = @(
     New-ExpectedEngineFile 'common/arg.cpp' '86af0ba10a327283f2500f0bb8e48095df547017' '6cbfc21a81c449b46cfa3456f40030161765995b' '21881e865fd7f870b4f25c0cbeeb7b1e707df7dc'
-    New-ExpectedEngineFile 'common/common.cpp' 'd9ce5755161edc853dbcf629819ee75971ba413d' '2a7248fff647e177c3b7e37d634178d078566724' '3c25ea9519bca36bffdca6f3ce1230bcce112a38'
+    New-ExpectedEngineFile 'common/common.cpp' 'd9ce5755161edc853dbcf629819ee75971ba413d' '2bfd6329fcfdd5a8e97c9a51268bd9a1f3dda8e7' '2a7248fff647e177c3b7e37d634178d078566724'
     New-ExpectedEngineFile 'common/common.h' '3444aa157e9b73727ea2ca6107eb0dc9f9b36a74' '86bbf4a9c35e7abc35e0cd1521a6557d41602ca9'
     New-ExpectedEngineFile 'common/speculative.cpp' '70dc0ac3b1b74fdd5f08b470308786c3f12411e7' '3f7c5f87559b224c038b86f958557abbad2c13a4'
     New-ExpectedEngineFile 'ggml/include/ggml-backend.h' '2924fdbe9884df40abf505fd89d277f5281a835b' '1b45c1ad7cd9618936aaebc243b82e8b48a09b84' 'd04327dbc6ca76b1831ccd1fd8571a107e4982a9'
@@ -72,10 +72,10 @@ $expectedFiles = @(
     New-ExpectedEngineFile 'ggml/src/ggml-cuda/ggml-cuda.cu' '561ab7ac599f9e285d2a0296caee0ab0a14ea5c8' '3ed2efc408af1388904873b03d324c23fa69c6de' 'd3d2cb63b8ec6a9e9621d29a44af510b607423ca'
     New-ExpectedEngineFile 'include/llama.h' 'fb2ca38cee4f8ba84bb6178f1e345e066b0d07e5' 'cdf629e88ebbbff200a44261802e5077b67e7fbd'
     New-ExpectedEngineFile 'src/CMakeLists.txt' '24f05cc91673217726b919229e1626b7f74a7bcb' '4b620618f1304164881ac97692d397fa8152688f'
-    New-ExpectedEngineFile 'src/llama-context.cpp' '19cca7df1e9deaafc1e8ee50d0c78ae5ffbc6cfb' 'ecdb8f92ecc2faeee71dee7b460efbf7b194a822'
-    New-ExpectedEngineFile 'src/llama-context.h' 'bf91daa8b562aa66d15b08ca559b6baa09ab7855' '7c566f561669941cec1196ee0fc88519c4b173ab'
+    New-ExpectedEngineFile 'src/llama-context.cpp' '19cca7df1e9deaafc1e8ee50d0c78ae5ffbc6cfb' '84e4c6ee069fbaa05ea350bff700b8cf6632831c' 'ecdb8f92ecc2faeee71dee7b460efbf7b194a822'
+    New-ExpectedEngineFile 'src/llama-context.h' 'bf91daa8b562aa66d15b08ca559b6baa09ab7855' '553ebd9cb4f37da8a9179fe80fe01182a2b89411' '7c566f561669941cec1196ee0fc88519c4b173ab'
     New-ExpectedEngineFile 'src/llama-cparams.h' '5018170ed85e3b82abad65e6a3c71859067c9f71' '2de4137861983ca96170eeb71b893ededb9dad29'
-    New-ExpectedEngineFile 'src/llama-graph.cpp' '2be3b75fb9825ccc9aa08cda294f46d6422c61ea' '4258d05f5ff0f958dafdb621aeecd7d2530e1f48'
+    New-ExpectedEngineFile 'src/llama-graph.cpp' '2be3b75fb9825ccc9aa08cda294f46d6422c61ea' 'fd29b369090feb303267cdc622c62dd8ec3d8f85' '4258d05f5ff0f958dafdb621aeecd7d2530e1f48'
     New-ExpectedEngineFile 'src/llama-graph.h' '32d8d395aa4546ed7e90e7d26d24218fcd37547a' '08c5d6968e6fde56d207c6607fdc6834e97287ca'
     New-ExpectedEngineFile 'src/llama-model-loader.cpp' 'b31e92e2da7ef42eabbb47173bb1f2088c952f39' '1f22894f6e1e99b42f89a878915a9d12b7fd6cd6' '630aa17427d80a56559813d67e3d97d25d9a76b9'
     New-ExpectedEngineFile 'src/llama-model-loader.h' 'd6b31c2311186608f48e88d1a37c23adc7e1b0c7' 'f03513c4a7dde82fa69d38480592bf8a5dc48c35' 'fec9ae9ee9550f8a7cb930f9a0334aa3c5c157be'

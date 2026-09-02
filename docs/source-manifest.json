@@ -14,12 +14,12 @@
   "source": {
     "canonicalPatch": {
       "path": "patches/siliang-engine.patch",
-      "sha256": "5F976641F8B91BD1B77CA9D476DB186E69D228B4E96736C7F7D36B7B22E1948E",
-      "gitBlob": "40568b228b193de8e91a2064caca7db3c925f537"
+      "sha256": "BC7DDC9D9A9261F4CC9AD6411499C65FD2C7A6F0B80B69E0A56C47B10C4D54BE",
+      "gitBlob": "55548458f8ce89c38e4ee0f0d190fd294b5c9799"
     },
     "engineDelta": {
-      "insertions": 11119,
-      "deletions": 29,
+      "insertions": 11219,
+      "deletions": 33,
       "files": [
         {
           "path": "common/arg.cpp",
@@ -34,8 +34,8 @@
           "status": "modified",
           "mode": "100644",
           "baseBlob": "d9ce5755161edc853dbcf629819ee75971ba413d",
-          "finalBlob": "2a7248fff647e177c3b7e37d634178d078566724",
-          "previousBlob": "3c25ea9519bca36bffdca6f3ce1230bcce112a38"
+          "finalBlob": "2bfd6329fcfdd5a8e97c9a51268bd9a1f3dda8e7",
+          "previousBlob": "2a7248fff647e177c3b7e37d634178d078566724"
         },
         {
           "path": "common/common.h",
@@ -139,14 +139,16 @@
           "status": "modified",
           "mode": "100644",
           "baseBlob": "19cca7df1e9deaafc1e8ee50d0c78ae5ffbc6cfb",
-          "finalBlob": "ecdb8f92ecc2faeee71dee7b460efbf7b194a822"
+          "finalBlob": "84e4c6ee069fbaa05ea350bff700b8cf6632831c",
+          "previousBlob": "ecdb8f92ecc2faeee71dee7b460efbf7b194a822"
         },
         {
           "path": "src/llama-context.h",
           "status": "modified",
           "mode": "100644",
           "baseBlob": "bf91daa8b562aa66d15b08ca559b6baa09ab7855",
-          "finalBlob": "7c566f561669941cec1196ee0fc88519c4b173ab"
+          "finalBlob": "553ebd9cb4f37da8a9179fe80fe01182a2b89411",
+          "previousBlob": "7c566f561669941cec1196ee0fc88519c4b173ab"
         },
         {
           "path": "src/llama-cparams.h",
@@ -160,7 +162,8 @@
           "status": "modified",
           "mode": "100644",
           "baseBlob": "2be3b75fb9825ccc9aa08cda294f46d6422c61ea",
-          "finalBlob": "4258d05f5ff0f958dafdb621aeecd7d2530e1f48"
+          "finalBlob": "fd29b369090feb303267cdc622c62dd8ec3d8f85",
+          "previousBlob": "4258d05f5ff0f958dafdb621aeecd7d2530e1f48"
         },
         {
           "path": "src/llama-graph.h",

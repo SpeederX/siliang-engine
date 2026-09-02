@@ -26,11 +26,11 @@ canonical engine-only delta from the pinned upstream base.
 
 | Identity | Value |
 | --- | --- |
-| SHA-256 | `5F976641F8B91BD1B77CA9D476DB186E69D228B4E96736C7F7D36B7B22E1948E` |
-| Git blob | `40568b228b193de8e91a2064caca7db3c925f537` |
+| SHA-256 | `BC7DDC9D9A9261F4CC9AD6411499C65FD2C7A6F0B80B69E0A56C47B10C4D54BE` |
+| Git blob | `55548458f8ce89c38e4ee0f0d190fd294b5c9799` |
 
 The patch uses full Git object IDs and LF line endings. It contains exactly
-**11,119 insertions and 29 deletions** across 35 paths.
+**11,219 insertions and 33 deletions** across 35 paths.
 
 ## Engine delta
 
@@ -46,7 +46,7 @@ patch.
 | Path | Base Git blob | Siliang Git blob |
 | --- | --- | --- |
 | `common/arg.cpp` | `86af0ba10a327283f2500f0bb8e48095df547017` | `6cbfc21a81c449b46cfa3456f40030161765995b` |
-| `common/common.cpp` | `d9ce5755161edc853dbcf629819ee75971ba413d` | `2a7248fff647e177c3b7e37d634178d078566724` |
+| `common/common.cpp` | `d9ce5755161edc853dbcf629819ee75971ba413d` | `2bfd6329fcfdd5a8e97c9a51268bd9a1f3dda8e7` |
 | `common/common.h` | `3444aa157e9b73727ea2ca6107eb0dc9f9b36a74` | `86bbf4a9c35e7abc35e0cd1521a6557d41602ca9` |
 | `common/speculative.cpp` | `70dc0ac3b1b74fdd5f08b470308786c3f12411e7` | `3f7c5f87559b224c038b86f958557abbad2c13a4` |
 | `ggml/include/ggml-backend.h` | `2924fdbe9884df40abf505fd89d277f5281a835b` | `1b45c1ad7cd9618936aaebc243b82e8b48a09b84` |
@@ -60,10 +60,10 @@ patch.
 | `ggml/src/ggml-cuda/ggml-cuda.cu` | `561ab7ac599f9e285d2a0296caee0ab0a14ea5c8` | `3ed2efc408af1388904873b03d324c23fa69c6de` |
 | `include/llama.h` | `fb2ca38cee4f8ba84bb6178f1e345e066b0d07e5` | `cdf629e88ebbbff200a44261802e5077b67e7fbd` |
 | `src/CMakeLists.txt` | `24f05cc91673217726b919229e1626b7f74a7bcb` | `4b620618f1304164881ac97692d397fa8152688f` |
-| `src/llama-context.cpp` | `19cca7df1e9deaafc1e8ee50d0c78ae5ffbc6cfb` | `ecdb8f92ecc2faeee71dee7b460efbf7b194a822` |
-| `src/llama-context.h` | `bf91daa8b562aa66d15b08ca559b6baa09ab7855` | `7c566f561669941cec1196ee0fc88519c4b173ab` |
+| `src/llama-context.cpp` | `19cca7df1e9deaafc1e8ee50d0c78ae5ffbc6cfb` | `84e4c6ee069fbaa05ea350bff700b8cf6632831c` |
+| `src/llama-context.h` | `bf91daa8b562aa66d15b08ca559b6baa09ab7855` | `553ebd9cb4f37da8a9179fe80fe01182a2b89411` |
 | `src/llama-cparams.h` | `5018170ed85e3b82abad65e6a3c71859067c9f71` | `2de4137861983ca96170eeb71b893ededb9dad29` |
-| `src/llama-graph.cpp` | `2be3b75fb9825ccc9aa08cda294f46d6422c61ea` | `4258d05f5ff0f958dafdb621aeecd7d2530e1f48` |
+| `src/llama-graph.cpp` | `2be3b75fb9825ccc9aa08cda294f46d6422c61ea` | `fd29b369090feb303267cdc622c62dd8ec3d8f85` |
 | `src/llama-graph.h` | `32d8d395aa4546ed7e90e7d26d24218fcd37547a` | `08c5d6968e6fde56d207c6607fdc6834e97287ca` |
 | `src/llama-model-loader.cpp` | `b31e92e2da7ef42eabbb47173bb1f2088c952f39` | `1f22894f6e1e99b42f89a878915a9d12b7fd6cd6` |
 | `src/llama-model-loader.h` | `d6b31c2311186608f48e88d1a37c23adc7e1b0c7` | `f03513c4a7dde82fa69d38480592bf8a5dc48c35` |

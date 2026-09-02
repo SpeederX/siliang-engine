@@ -121,6 +121,30 @@ class ArenaOptInContractTests(unittest.TestCase):
         receipt_pos = LLAMA_SOURCE.index("model_ptr->siliang_file_source = ml.siliang_file_source")
         self.assertGreater(receipt_pos, load_pos)
 
+    def test_ds4_managed_token_embedding_uses_file_rows_without_resident_table(self) -> None:
+        self.assertIn("managed token-embedding source", COMMON_SOURCE)
+        self.assertIn(r'R"(^token_embd\.weight$)"', COMMON_SOURCE)
+        self.assertIn("rows will be materialized per ubatch", COMMON_SOURCE)
+
+        materialize = function_body(LLAMA_CONTEXT, "static bool siliang_materialize_managed_token_embeddings(")
+        self.assertIn("model.arch != LLM_ARCH_DEEPSEEK4", materialize)
+        self.assertIn("weight->type != GGML_TYPE_F16", materialize)
+        self.assertIn("model.siliang_file_source.find(weight->name)", materialize)
+        self.assertIn("ggml_row_size", materialize)
+        self.assertIn("file.seekg", materialize)
+        self.assertIn("ggml_fp16_to_fp32_row", materialize)
+        self.assertNotIn("weight->data", materialize)
+
+        process = function_body(LLAMA_CONTEXT, "llm_graph_result * llama_context::process_ubatch(")
+        self.assertIn("siliang_token_embedding_file", process)
+        self.assertIn("effective_ubatch.embd = managed_token_embeddings.data()", process)
+        self.assertIn("graph_params(res, effective_ubatch", process)
+
+        embd = function_body(LLAMA_GRAPH, "ggml_tensor * llm_graph_context::build_inp_embd(")
+        self.assertIn("managed_token_embd", embd)
+        self.assertIn("ggml_backend_buffer_is_siliang_managed", embd)
+        self.assertIn("managed_token_embd || !ubatch.token ? 1 : 0", embd)
+
     def test_prefill_sweep_telemetry_is_explicitly_route_stats_gated(self) -> None:
         sweep = function_body(MOE_RUNTIME, "bool note_prefill_bitmap(")
         self.assertIn("SILIANG_PREFILL_SWEEP", sweep)
