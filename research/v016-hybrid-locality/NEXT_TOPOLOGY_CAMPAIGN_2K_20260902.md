@@ -104,3 +104,53 @@ For the first topology campaign, preserve the historical technical continuity pr
 - **hybrid**: code + explanation + technical reasoning
 
 The 3x2K topology comparison should use the same fixed fixture per arm. The broader prose/code/hybrid variance suite can be run after the topology winner is identified, otherwise the experiment count explodes.
+
+
+## 2026-09-02 update — maintainer profiles and Arm B analytical projection
+
+The maintainer baseline is not one global number. Siliang should retain separate strategy profiles because hardware envelopes differ:
+
+1. **RAM / CPU-oriented** — routed experts primarily host-resident and CPU-computed; GPU may be absent or irrelevant.
+2. **Small-GPU hybrid** — RAM remains the main expert store, but transient GPU execution is used when measured finish-time economics justify it; persistent K may be zero/minimal.
+3. **Balanced RAM + GPU** — persistent K plus L2 and architecture-specific static logistics, represented on the maintainer RTX 2070 system by the K256/L2/FRONT family.
+
+These are different strategies, not rankings of the same configuration. Performance documentation must report which envelope a number belongs to.
+
+### Arm B: analytical all-static-CPU / max-K projection
+
+The retained DS4 static LUT projects the measured static families at:
+
+- CPU static compute: **413.56 ms/token**;
+- corresponding GPU-wall compute: **66.37 ms/token**;
+- gross CPU placement debt: **+347.19 ms/token**.
+
+The current v0.1.6 K256 profile accounts ~4685.05 MiB of static CUDA model allocation. Removing the ~155 MiB FRONT double banks as well gives ~4840 MiB that could theoretically be repurposed. At 6.75 MiB/expert-slot payload, this buys ~717 additional slots, putting the arithmetic K envelope around **K973** from K256. This is a capacity projection, not a WDDM qualification; workspace and allocator changes can move it.
+
+The 250-token natural route trace, simulated with the retained cumulative-frequency / SLFU-like admission rule, gives:
+
+| K | projected K hit |
+|---:|---:|
+| 256 | ~33.34% |
+| 660 | ~48.96% |
+| 788 | ~52.43% |
+| 950 | ~56.30% |
+| 973 | **~56.81%** |
+| 1060 | ~58.61% |
+
+K973 therefore captures ~60.6 more routed selections/token than K256. Using the retained compute-only value of ~0.41147 ms per CPU->GPU selected-expert shift, the larger K saves only **~24.9 ms/token** of routed compute relative to K256.
+
+Compute-only trade against all-static CPU is consequently approximately:
+
+`+347.2 ms static debt - 24.9 ms extra-K benefit = +322.3 ms/token`.
+
+Applied to the current ~390 ms/token hybrid reference, the no-overlap projection is ~712 ms/token (~1.40 tok/s). The shared expert is a sibling FFN branch and its ~62 ms CPU-vs-GPU debt can overlap routed work; granting nearly complete overlap gives an optimistic floor around ~650 ms/token (~1.54 tok/s). Therefore **Arm B is expected around 650-715 ms/token before source/workspace side effects**.
+
+The important result is not the exact K maximum. The route curve is already flattening: K788 -> K973 buys only ~4.4 percentage points of K hit, roughly **4.7 ms/token** compute-only. Chasing K1060 is unlikely to rescue the all-static-CPU topology.
+
+This makes Arm B a falsification/profiling cell rather than a mandatory 3x2K qualification arm unless real profiling contradicts the projection.
+
+### Static host placement semantics
+
+With `--no-op-offload`, GGML preferentially assigns an operation to the backend of its weight. A static weight placed in an ordinary CPU buffer therefore normally causes that operation to execute on CPU. Host storage is not equivalent to "GPU compute after an automatic cheap transfer". A CUDA-compatible host buffer / explicit offload path is a different topology and must be modeled separately.
+
+A future dynamic static scheduler should separate **weight residency** from **execution placement**, exactly as the routed hybrid now separates persistent K admission from current execution. For each static operation, pre-bake should estimate completion time on CPU versus copy-stream+GPU using the actual dependency window, rather than comparing isolated latencies. This is architecture-sensitive because the graph position, tensor families and overlap windows differ by model.
