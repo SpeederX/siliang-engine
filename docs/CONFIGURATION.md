@@ -206,10 +206,27 @@ closed.
 
 **Prefill sizing rule:** size K for the intended ubatch, not only for startup.
 On DS4 (top-k 6, 256 experts), K216 permits at most `-ub 36` (`-ub 32` is
-safe), while K256 permits `-ub 512` because `min(512 * 6, 256) = 256`. The
-larger ubatch avoids repeating staging/admission across many small sweeps. On
-the RTX 2070 reference machine, the current double-bank FRONT path reached
-24.90 prompt tok/s over 1,101 tokens with K256/`-ub 512`.
+safe). K256 reaches the full 256-expert universe, so larger ubatches remain
+geometrically valid: `min(512 * 6, 256) = min(1024 * 6, 256) = 256`. Above this
+point the practical ubatch limit is GPU workspace/VRAM rather than K capacity.
+On the RTX 2070 reference machine, a diverse 1,024-token prompt improved from
+18.46 tok/s with two `-ub 512` sweeps to 31.33 tok/s with one `-ub 1024` sweep;
+expert H2D fell from about 115.5 GB to 65.4 GB. Treat the larger ubatch as a
+qualified reference-machine result, not a universal preset.
+
+`llama-server` context checkpoints deliberately split the last four prompt
+tokens into a separate decode call so a checkpoint can be created. That is
+normally useful server behavior, but with bounded MoE prefill it causes a second
+43-layer expert sweep. On the reference DS4 profile, `--ctx-checkpoints 0`
+removed that N-4/4 split and improved fresh 32/64/128/256-token prompt throughput
+by roughly 18-25%. Disable checkpoints only when that server feature is not
+needed; this is a throughput/feature tradeoff, not an unconditional default.
+
+With `--expert-cache-route-stats`, every completed bounded-prefill sweep also
+emits one `SILIANG_PREFILL_SWEEP` record containing token count, aggregate
+unique-expert union statistics, K hits/misses/admissions/evictions, P waves, and
+expert H2D operations/bytes. The record is intended for sweep attribution and is
+silent when route statistics are disabled.
 
 Use this bounded diagnostic command on the current 8 GB test machine:
 
@@ -236,9 +253,12 @@ Use this bounded diagnostic command on the current 8 GB test machine:
 ```
 
 The command above is the low-K diagnostic profile. For DS4 prompt throughput,
-use K256/`-ub 512` when VRAM headroom permits it. To isolate bounded prefill,
-toggle `--expert-cache-prefill` / `--no-expert-cache-prefill` while keeping K,
-ubatch, and `-tb 12` unchanged.
+use K256 and choose the largest ubatch that the actual GPU workspace can sustain;
+`-ub 1024` is qualified on the RTX 2070 reference profile. For server throughput
+measurements where context checkpoints are not required, add
+`--ctx-checkpoints 0`. To isolate bounded prefill, toggle
+`--expert-cache-prefill` / `--no-expert-cache-prefill` while keeping K, ubatch,
+checkpoint policy, and `-tb 12` unchanged.
 
 ## Pi and the OpenAI-compatible server
 

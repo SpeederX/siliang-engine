@@ -121,6 +121,14 @@ class ArenaOptInContractTests(unittest.TestCase):
         receipt_pos = LLAMA_SOURCE.index("model_ptr->siliang_file_source = ml.siliang_file_source")
         self.assertGreater(receipt_pos, load_pos)
 
+    def test_prefill_sweep_telemetry_is_explicitly_route_stats_gated(self) -> None:
+        sweep = function_body(MOE_RUNTIME, "bool note_prefill_bitmap(")
+        self.assertIn("SILIANG_PREFILL_SWEEP", sweep)
+        self.assertIn("unique_sum", sweep)
+        self.assertIn("P_waves", sweep)
+        self.assertIn("H2D_bytes", sweep)
+        self.assertIn("if (params.route_stats)", sweep)
+
     def test_public_cpu_api_uses_typed_configuration(self) -> None:
         self.assertIn("struct ggml_siliangem_cache_config", CPU_HEADER)
         self.assertIn("uint32_t capacity_mib;", CPU_HEADER)

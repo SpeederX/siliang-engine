@@ -364,6 +364,14 @@ struct siliang_moe_runtime {
     uint64_t prefill_bitmap_epoch = 0;
     uint64_t prefill_bitmap_attempt_serial = 0;
     uint64_t prefill_sweep_attempt = 0;
+    uint64_t prefill_sweep_base_unique = 0;
+    uint64_t prefill_sweep_base_k_hits = 0;
+    uint64_t prefill_sweep_base_k_misses = 0;
+    uint64_t prefill_sweep_base_admissions = 0;
+    uint64_t prefill_sweep_base_evictions = 0;
+    uint64_t prefill_sweep_base_p_waves = 0;
+    uint64_t prefill_sweep_base_h2d_ops = 0;
+    uint64_t prefill_sweep_base_h2d_bytes = 0;
     uint64_t clock = 0;
 
     std::vector<cuda_event_t> layer_ready_events;
@@ -1823,12 +1831,16 @@ struct siliang_moe_runtime {
             return true;
         }
 
+        uint64_t sweep_unique_min = std::numeric_limits<uint64_t>::max();
+        uint64_t sweep_unique_max = 0;
         for (int32_t managed_layer : managed_layers) {
             const size_t index = static_cast<size_t>(managed_layer);
             const auto & current = prefill_sweep_bitmaps[index];
             const bool has_previous = prefill_bitmap_valid[index] != 0;
             uint64_t seeded = 0;
             uint64_t needed = siliang_moe_prefill::route_bitmap_count(current);
+            sweep_unique_min = std::min(sweep_unique_min, needed);
+            sweep_unique_max = std::max(sweep_unique_max, needed);
             uint64_t overlap = 0;
             if (has_previous) {
                 seeded = siliang_moe_prefill::route_bitmap_count(prefill_bitmaps[index]);
@@ -1862,6 +1874,28 @@ struct siliang_moe_runtime {
         }
         ++metrics.prefill_bitmap_sweeps;
         metrics.prefill_bitmap_sweep_tokens += prefill_sweep_tokens;
+        const uint64_t sweep_unique_sum = metrics.prefill_unique - prefill_sweep_base_unique;
+        const uint64_t sweep_k_hits = metrics.prefill_k_hits - prefill_sweep_base_k_hits;
+        const uint64_t sweep_k_misses = metrics.prefill_k_misses - prefill_sweep_base_k_misses;
+        const uint64_t sweep_admissions = metrics.prefill_k_admissions - prefill_sweep_base_admissions;
+        const uint64_t sweep_evictions = metrics.prefill_k_evictions - prefill_sweep_base_evictions;
+        const uint64_t sweep_p_waves = metrics.prefill_p_waves - prefill_sweep_base_p_waves;
+        const uint64_t sweep_h2d_ops = metrics.prefill_h2d_ops - prefill_sweep_base_h2d_ops;
+        const uint64_t sweep_h2d_bytes = metrics.prefill_h2d_bytes - prefill_sweep_base_h2d_bytes;
+        const double sweep_unique_avg = managed_layers.empty() ? 0.0 :
+            static_cast<double>(sweep_unique_sum) / static_cast<double>(managed_layers.size());
+        if (params.route_stats) {
+            LLAMA_LOG_INFO(
+                    "SILIANG_PREFILL_SWEEP tokens=%zu layers=%zu unique_sum=%" PRIu64
+                    " unique_avg=%.2f unique_min=%" PRIu64 " unique_max=%" PRIu64
+                    " K_hits=%" PRIu64 " K_misses=%" PRIu64
+                    " admissions=%" PRIu64 " evictions=%" PRIu64
+                    " P_waves=%" PRIu64 " H2D_ops=%" PRIu64 " H2D_bytes=%" PRIu64 "\n",
+                    prefill_sweep_tokens, managed_layers.size(), sweep_unique_sum, sweep_unique_avg,
+                    sweep_unique_min == std::numeric_limits<uint64_t>::max() ? 0 : sweep_unique_min, sweep_unique_max,
+                    sweep_k_hits, sweep_k_misses, sweep_admissions, sweep_evictions,
+                    sweep_p_waves, sweep_h2d_ops, sweep_h2d_bytes);
+        }
         LLAMA_LOG_DEBUG(
                 "siliang_moe_route_sweep: v=1 scope=context epoch=%" PRIu64
                 " attempt=%" PRIu64 " sweep=%" PRIu64
@@ -1929,6 +1963,16 @@ struct siliang_moe_runtime {
         // Capacity and route validation are complete before the phase transition
         // invalidates any persistent decode mapping.
         enter_phase(route_phase::prefill);
+        if (prefill_sweep_cursor == 0 && !managed_layers.empty() && layer == managed_layers.front()) {
+            prefill_sweep_base_unique = metrics.prefill_unique;
+            prefill_sweep_base_k_hits = metrics.prefill_k_hits;
+            prefill_sweep_base_k_misses = metrics.prefill_k_misses;
+            prefill_sweep_base_admissions = metrics.prefill_k_admissions;
+            prefill_sweep_base_evictions = metrics.prefill_k_evictions;
+            prefill_sweep_base_p_waves = metrics.prefill_p_waves;
+            prefill_sweep_base_h2d_ops = metrics.prefill_h2d_ops;
+            prefill_sweep_base_h2d_bytes = metrics.prefill_h2d_bytes;
+        }
 
         std::vector<int32_t> union_slots(route.experts.size(), -1);
         std::vector<int32_t> needed;

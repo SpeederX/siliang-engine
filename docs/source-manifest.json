@@ -14,11 +14,11 @@
   "source": {
     "canonicalPatch": {
       "path": "patches/siliang-engine.patch",
-      "sha256": "4FB0DC53C831DBFD9869ABC3B4823D5CE66E35CDA15FE097336ECD469BD6EF0F",
-      "gitBlob": "43e416ebf3d1f0d493b7d7572dae2954228e0037"
+      "sha256": "5F976641F8B91BD1B77CA9D476DB186E69D228B4E96736C7F7D36B7B22E1948E",
+      "gitBlob": "40568b228b193de8e91a2064caca7db3c925f537"
     },
     "engineDelta": {
-      "insertions": 11075,
+      "insertions": 11119,
       "deletions": 29,
       "files": [
         {
@@ -245,8 +245,8 @@
           "status": "added",
           "mode": "100644",
           "baseBlob": null,
-          "finalBlob": "ab97163e047107215dedbcfa9989d7a97e81b27e",
-          "previousBlob": "6cf14959d265c2f97b7ed3846d057bffcead8944"
+          "finalBlob": "33132c85bcc7630c6761fbe18995047dbe05a048",
+          "previousBlob": "ab97163e047107215dedbcfa9989d7a97e81b27e"
         },
         {
           "path": "src/siliang-moe-runtime.h",
