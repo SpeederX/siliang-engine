@@ -1,26 +1,35 @@
 name: Publish Siliang Release
 
 on:
-  push:
-    tags:
-      - 'v*'
+  workflow_run:
+    workflows: ["Siliang CI"]
+    types: [completed]
   workflow_dispatch:
     inputs:
       tag:
         description: "Existing tag whose successful Siliang CI artifacts should be published"
         required: true
-        default: "v0.1.5"
+        default: "v0.1.6"
         type: string
 
 concurrency:
-  group: siliang-release-${{ inputs.tag || github.ref_name }}
+  group: siliang-release-${{ inputs.tag || github.event.workflow_run.head_branch }}
   cancel-in-progress: false
 
 jobs:
   release:
     name: Publish verified CI artifacts
+    # A finished CI run publishes only when it was a successful push of a v* tag.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       startsWith(github.event.workflow_run.head_branch, 'v'))
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 30
+
+    env:
+      TAG: ${{ inputs.tag || github.event.workflow_run.head_branch }}
 
     permissions:
       actions: read
@@ -30,14 +39,14 @@ jobs:
       - name: Checkout release tag
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag || github.ref_name }}
+          ref: refs/tags/${{ env.TAG }}
           fetch-depth: 0
           persist-credentials: false
 
       - name: Verify exact release tag
         shell: pwsh
         run: |
-          $tag = '${{ inputs.tag || github.ref_name }}'
+          $tag = $env:TAG
           if ($tag -notmatch '^v[0-9A-Za-z][0-9A-Za-z._-]*$') {
               throw "Unsafe release tag: $tag"
           }
@@ -58,45 +67,47 @@ jobs:
 
           Write-Host "Verified exact release tag $tag at $headSha"
 
-      - name: Wait for matching Siliang CI tag run
+      - name: Resolve matching Siliang CI tag run
         id: ci
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ inputs.tag || github.ref_name }}
+          TRIGGER_RUN_ID: ${{ github.event.workflow_run.id }}
+          TRIGGER_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          TRIGGER_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
         shell: bash
         run: |
           set -euo pipefail
           release_sha="$(git rev-parse HEAD)"
-          echo "Waiting for successful Siliang CI tag run at $release_sha."
 
-          for attempt in $(seq 1 240); do
+          if [ "$GITHUB_EVENT_NAME" = "workflow_run" ]; then
+            # The completed CI run that triggered this workflow is the artifact source.
+            ci_run_id="$TRIGGER_RUN_ID"
+            ci_conclusion="$TRIGGER_CONCLUSION"
+            if [ "$TRIGGER_HEAD_SHA" != "$release_sha" ]; then
+              echo "Siliang CI run $ci_run_id built $TRIGGER_HEAD_SHA, but $TAG is $release_sha." >&2
+              exit 1
+            fi
+          else
             state="$(gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yaml/runs" -f event=push -f head_sha="$release_sha" -f per_page=20 | jq -r --arg tag "$TAG" '.workflow_runs[] | select(.head_branch == $tag) | [.id, .status, (.conclusion // "")] | @tsv' | head -n 1)"
-
             if [ -z "$state" ]; then
-              echo "Matching Siliang CI tag run is not visible yet (attempt $attempt)."
-              sleep 15
-              continue
+              echo "No Siliang CI tag run was found for $TAG at $release_sha." >&2
+              exit 1
             fi
-
             IFS=$'\t' read -r ci_run_id ci_status ci_conclusion <<< "$state"
-            echo "Siliang CI run $ci_run_id: status=$ci_status conclusion=${ci_conclusion:-pending}"
-
-            if [ "$ci_status" = "completed" ]; then
-              if [ "$ci_conclusion" != "success" ]; then
-                echo "Siliang CI for $TAG did not succeed; refusing to publish artifacts." >&2
-                exit 1
-              fi
-
-              echo "run_id=$ci_run_id" >> "$GITHUB_OUTPUT"
-              echo "release_sha=$release_sha" >> "$GITHUB_OUTPUT"
-              exit 0
+            if [ "$ci_status" != "completed" ]; then
+              echo "Siliang CI run $ci_run_id for $TAG is $ci_status; this workflow runs again when it completes." >&2
+              exit 1
             fi
+          fi
 
-            sleep 15
-          done
+          if [ "$ci_conclusion" != "success" ]; then
+            echo "Siliang CI for $TAG did not succeed; refusing to publish artifacts." >&2
+            exit 1
+          fi
 
-          echo "Timed out waiting for the matching Siliang CI tag run." >&2
-          exit 1
+          echo "Using Siliang CI run $ci_run_id for $TAG at $release_sha."
+          echo "run_id=$ci_run_id" >> "$GITHUB_OUTPUT"
+          echo "release_sha=$release_sha" >> "$GITHUB_OUTPUT"
 
       - name: Download verified artifacts from matching CI run
         uses: actions/download-artifact@v4
@@ -104,13 +115,11 @@ jobs:
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
           run-id: ${{ steps.ci.outputs.run_id }}
-          pattern: siliang-engine-${{ inputs.tag || github.ref_name }}-*
+          pattern: siliang-engine-${{ env.TAG }}-*
           path: release-assets
           merge-multiple: true
 
       - name: Verify release artifact inventory and checksums
-        env:
-          TAG: ${{ inputs.tag || github.ref_name }}
         shell: bash
         run: |
           set -euo pipefail
@@ -137,7 +146,6 @@ jobs:
       - name: Replace existing draft only
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ inputs.tag || github.ref_name }}
         shell: bash
         run: |
           set -euo pipefail
@@ -154,7 +162,6 @@ jobs:
       - name: Publish prerelease from verified CI artifacts
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ inputs.tag || github.ref_name }}
         shell: bash
         run: |
           set -euo pipefail

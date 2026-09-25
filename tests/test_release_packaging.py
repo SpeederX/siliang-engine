@@ -18,9 +18,9 @@ class ReleasePackagingContractTests(unittest.TestCase):
         publish_text = PUBLISH_WORKFLOW.read_text(encoding="utf-8")
         bs = chr(92)
 
-        self.assertIn('default: "v0.1.5"', publish_text)
-        self.assertIn("      - 'v*'", publish_text)
-        self.assertIn("inputs.tag || github.ref_name", publish_text)
+        self.assertIn('default: "v0.1.6"', publish_text)
+        self.assertIn("startsWith(github.event.workflow_run.head_branch, 'v')", publish_text)
+        self.assertIn("inputs.tag || github.event.workflow_run.head_branch", publish_text)
         self.assertIn('git rev-parse "$tag^{commit}"', publish_text)
         self.assertNotIn("git describe --tags --exact-match HEAD", publish_text)
         self.assertNotIn("./scripts/verify-snapshot.ps1", publish_text)
@@ -215,9 +215,25 @@ class ReleasePackagingContractTests(unittest.TestCase):
         self.assertIn('if [ "$ci_conclusion" != "success" ]; then', text)
         self.assertIn('echo "run_id=$ci_run_id" >> "$GITHUB_OUTPUT"', text)
         self.assertIn("run-id: ${{ steps.ci.outputs.run_id }}", text)
-        self.assertLess(text.index("Wait for matching Siliang CI tag run"), text.index("Download verified artifacts from matching CI run"))
+        self.assertLess(text.index("Resolve matching Siliang CI tag run"), text.index("Download verified artifacts from matching CI run"))
         self.assertLess(text.index("Download verified artifacts from matching CI run"), text.index("Publish prerelease from verified CI artifacts"))
         self.assertIn('gh release edit "$TAG" --draft=false --verify-tag', text)
+
+    def test_publish_workflow_starts_when_tag_ci_completes(self) -> None:
+        text = PUBLISH_WORKFLOW.read_text(encoding="utf-8")
+
+        # Tag CI takes hours; publishing is triggered by its completion instead of polling it.
+        self.assertIn('workflows: ["Siliang CI"]', text)
+        self.assertIn("types: [completed]", text)
+        self.assertNotIn("tags:", text)
+        self.assertNotIn("sleep ", text)
+        self.assertIn("github.event.workflow_run.conclusion == 'success'", text)
+        self.assertIn("github.event.workflow_run.event == 'push'", text)
+        self.assertIn("startsWith(github.event.workflow_run.head_branch, 'v')", text)
+        self.assertIn("ref: refs/tags/${{ env.TAG }}", text)
+        self.assertIn('ci_run_id="$TRIGGER_RUN_ID"', text)
+        self.assertIn('if [ "$TRIGGER_HEAD_SHA" != "$release_sha" ]; then', text)
+        self.assertIn("workflow_dispatch:", text)
 
     def test_cuda_package_requires_exact_runtime_set_and_loads_it_isolated(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")

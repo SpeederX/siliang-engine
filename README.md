@@ -248,12 +248,13 @@ builds the release packages on Windows. The downloadable artifacts are:
 - `siliang-engine-<tag>-windows-x64-cuda-13.2.zip`
 - `SHA256SUMS`
 
-Actions retains the verified packages for 30 days. A `v*` tag runs both the
-qualification CI and the release publisher. CI is the sole producer of Windows
-CPU/CUDA archives; the publisher waits for the matching successful tag run,
-verifies its checksums, and publishes those exact artifacts as a prerelease.
-The publisher remains manually dispatchable for retrying an existing tag without
-rebuilding the packages.
+Actions retains the verified packages for 30 days. A `v*` tag runs the
+qualification CI. CI is the sole producer of Windows CPU/CUDA archives; when a
+tag run completes successfully, it triggers the release publisher, which checks
+that the run built the tagged commit, verifies the checksums, and publishes those
+exact artifacts as a prerelease. The publisher remains manually dispatchable for
+an existing tag whose CI run has already succeeded, without rebuilding the
+packages.
 For v0.1.6, see the [release notes](docs/releases/v0.1.6.md); the broader
 performance qualification remains in [v0.1.3](docs/releases/v0.1.3.md).
 
