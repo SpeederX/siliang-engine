@@ -26,11 +26,11 @@ canonical engine-only delta from the pinned upstream base.
 
 | Identity | Value |
 | --- | --- |
-| SHA-256 | `4CA4C3881011682906F83AB83F618045186EB3F012A7507A9577AE5F3BA8B518` |
-| Git blob | `1aca5140a0862cb482dc57287d9840fbb022b2be` |
+| SHA-256 | `14743A838E5E4DADF3C80F5A79CC4D6E208AD10F62D165A63E8DF9641A1E2139` |
+| Git blob | `bb0686dcd9aaefe81cd82c4755e090fe067a850b` |
 
 The patch uses full Git object IDs and LF line endings. It contains exactly
-**11,230 insertions and 38 deletions** across 35 paths.
+**11,230 insertions and 37 deletions** across 35 paths.
 
 ## Engine delta
 
@@ -60,7 +60,7 @@ patch.
 | `ggml/src/ggml-cuda/ggml-cuda.cu` | `e76ff3128fddd7bf248e16b8469d27c2f441b8e1` | `011f69f075910448498ed2fbe0c6d2f7e5b346d0` |
 | `include/llama.h` | `1805ed0559f92a818dfe951b012608ee2be3115c` | `22c232bb3d86d746747514d04ff213400846c68f` |
 | `src/CMakeLists.txt` | `afdaddc79de81bc03dadee2707e67d2af4b814c0` | `4ff52fe171c6f3f525997cb3156d095792821b14` |
-| `src/llama-context.cpp` | `8675f6087336069c43dffff0435002bb4358c6f5` | `6c2f288db48faabb9c1d33664b68229036bd4440` |
+| `src/llama-context.cpp` | `8675f6087336069c43dffff0435002bb4358c6f5` | `e50f46ee19fdc07be7a38aadba7f9338c328e616` |
 | `src/llama-context.h` | `b403b099b76fefea6f3d8a4959bb12287b633876` | `5a147f5459407f34c7a37804ef8c2481ea0e9f71` |
 | `src/llama-cparams.h` | `b592de18c79470243ece446cb7db1ca00b0b803b` | `d9bfa8ca9c167e1fdbc56c09299924e607e8054f` |
 | `src/llama-graph.cpp` | `0b3bab612375b27b357971287857826dcc8b66e8` | `158cf8b74993536ea05ebd7a37b2c26fa73a51d1` |

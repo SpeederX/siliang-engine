@@ -14,12 +14,12 @@
   "source": {
     "canonicalPatch": {
       "path": "patches/siliang-engine.patch",
-      "sha256": "4CA4C3881011682906F83AB83F618045186EB3F012A7507A9577AE5F3BA8B518",
-      "gitBlob": "1aca5140a0862cb482dc57287d9840fbb022b2be"
+      "sha256": "14743A838E5E4DADF3C80F5A79CC4D6E208AD10F62D165A63E8DF9641A1E2139",
+      "gitBlob": "bb0686dcd9aaefe81cd82c4755e090fe067a850b"
     },
     "engineDelta": {
       "insertions": 11230,
-      "deletions": 38,
+      "deletions": 37,
       "files": [
         {
           "path": "common/arg.cpp",
@@ -131,7 +131,7 @@
           "status": "modified",
           "mode": "100644",
           "baseBlob": "8675f6087336069c43dffff0435002bb4358c6f5",
-          "finalBlob": "6c2f288db48faabb9c1d33664b68229036bd4440"
+          "finalBlob": "e50f46ee19fdc07be7a38aadba7f9338c328e616"
         },
         {
           "path": "src/llama-context.h",
