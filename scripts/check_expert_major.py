@@ -273,10 +273,12 @@ def inspect_expert_major(path: Path) -> dict[str, object]:
                 + ", ".join(residual_expert_tensors[:8])
             )
 
-        pad_target = math.lcm(
+        # Current converters pad per layer; older outputs padded every layer to one global target.
+        global_pad_target = math.lcm(
             512,
             *(GGML_TYPES[type_id][2] for type_id in part_types),
         )
+        layer_pad_targets = []
         for layer_position, layer in enumerate(layer_indices):
             first_part = layer_position * len(part_names)
             raw_expert_bytes = sum(part_bytes[first_part:first_part + len(part_names)])
@@ -286,15 +288,18 @@ def inspect_expert_major(path: Path) -> dict[str, object]:
                     f"layer {layer} part bytes exceed its expert stride: "
                     f"{raw_expert_bytes} > {stride}"
                 )
-            expected_stride = (
-                (raw_expert_bytes + pad_target - 1) // pad_target * pad_target
-            )
-            if stride != expected_stride:
+            row_types = part_types[first_part:first_part + len(part_names)]
+            layer_pad_target = math.lcm(512, *(GGML_TYPES[type_id][2] for type_id in row_types))
+            layer_pad_targets.append(layer_pad_target)
+            expected_strides = {
+                (raw_expert_bytes + target - 1) // target * target
+                for target in (layer_pad_target, global_pad_target)
+            }
+            if stride not in expected_strides:
                 raise ValueError(
                     f"layer {layer} expert stride is {stride}, expected canonical "
-                    f"bundled-converter stride {expected_stride}"
+                    f"bundled-converter stride {sorted(expected_strides)}"
                 )
-            row_types = part_types[first_part:first_part + len(part_names)]
             incompatible_type_sizes = sorted({
                 GGML_TYPES[type_id][2]
                 for type_id in row_types
@@ -348,7 +353,8 @@ def inspect_expert_major(path: Path) -> dict[str, object]:
             "expertBytes": expert_bytes,
             "partNames": part_names,
             "partTypeIds": sorted(set(part_types)),
-            "canonicalPadTarget": pad_target,
+            "canonicalPadTarget": global_pad_target,
+            "layerPadTargets": layer_pad_targets,
             "layerIndices": layer_indices,
             "layerCount": len(layer_indices),
             "partCount": len(part_names),

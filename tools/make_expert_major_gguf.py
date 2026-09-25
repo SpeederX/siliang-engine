@@ -35,7 +35,8 @@ LIMITATION: those logical views depend on mmap. The patched loader refuses an
 expert-major file when mmap is off; an ordinary contiguous copy of a strided
 view would consume the wrong expert bytes.
 
-STRIDE PADDING: expert_bytes is padded to lcm(part type sizes, 512) because
+STRIDE PADDING: each layer's expert_bytes is padded to lcm(that layer's part
+type sizes, 512) because
 ggml-cuda computes s02 = nb[2]/type_size by integer division (mmvq.cu), so an
 unpadded stride silently misaddresses every expert after the first; 512 is the
 volume logical sector size that FILE_FLAG_NO_BUFFERING requires.
@@ -227,7 +228,9 @@ def main():
     #    address to be multiples of the VOLUME LOGICAL SECTOR SIZE. The public
     #    format contract uses 512 bytes; this is not the NTFS cluster size.
     #
-    # So: pad to lcm(all part type sizes, 512).
+    # So: pad each layer to lcm(its part type sizes, 512). The constraint is per
+    # tensor, and every layer has its own stride; a type used by one layer must
+    # not inflate the stride of every other layer.
     #
     # Why 512 and not a larger filesystem allocation unit: the direct-I/O
     # contract requires logical-sector alignment. Extra padding increases both
@@ -235,15 +238,17 @@ def main():
     raw_expert_bytes = [sum(geom[L][p][0] for p in parts) for L in layers]
     part_bytes = [geom[L][p][0] for L in layers for p in parts]
 
-    type_sizes = sorted({GGML_TYPES[geom[L][p][3]][2] for L in layers for p in parts})
-    stride_lcm = 1
-    for ts in type_sizes:
-        stride_lcm = stride_lcm * ts // gcd(stride_lcm, ts)
     SECTOR = 512
-    pad_target = stride_lcm * SECTOR // gcd(stride_lcm, SECTOR)
+    layer_type_sizes = [sorted({GGML_TYPES[geom[L][p][3]][2] for p in parts}) for L in layers]
+    pad_targets = []
+    for sizes in layer_type_sizes:
+        target = SECTOR
+        for ts in sizes:
+            target = target * ts // gcd(target, ts)
+        pad_targets.append(target)
 
-    expert_bytes = [((eb + pad_target - 1) // pad_target) * pad_target
-                    for eb in raw_expert_bytes]
+    expert_bytes = [((eb + pt - 1) // pt) * pt
+                    for eb, pt in zip(raw_expert_bytes, pad_targets)]
     packed_total = sum(eb * n_experts for eb in expert_bytes)
     raw_total = sum(eb * n_experts for eb in raw_expert_bytes)
 
@@ -269,8 +274,10 @@ def main():
     # target model, storage device, and arena configuration.
     add = packed_total - raw_total
     pct = 100.0 * add / raw_total if raw_total else 0.0
-    print(f"\nstride padding: type sizes {type_sizes} -> lcm {stride_lcm}, "
-          f"x sector {SECTOR} -> pad to multiples of {pad_target:,}")
+    for sizes, target in sorted({(tuple(s), t) for s, t in zip(layer_type_sizes, pad_targets)}):
+        count = sum(1 for s, t in zip(layer_type_sizes, pad_targets) if tuple(s) == sizes and t == target)
+        print(f"\nstride padding: {count} layer(s) with type sizes {list(sizes)}, "
+              f"x sector {SECTOR} -> pad to multiples of {target:,}")
     if add == 0:
         print("  cost        : NONE - the natural stride already satisfies both "
               "constraints")

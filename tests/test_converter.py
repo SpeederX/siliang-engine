@@ -22,7 +22,7 @@ sys.path.insert(0, str(GGUF_PY_DIRECTORY))
 sys.path.insert(0, str(TOOLS_DIRECTORY))
 
 import numpy as np  # noqa: E402
-from gguf import GGUFReader, GGUFValueType, GGUFWriter  # noqa: E402
+from gguf import GGMLQuantizationType, GGUFReader, GGUFValueType, GGUFWriter  # noqa: E402
 from gguf_reader import GGML_TYPES, GGUF  # noqa: E402
 
 
@@ -51,6 +51,7 @@ def write_synthetic_moe(
     alignment: int | None = None,
     layers: tuple[int, ...] = (0, 1),
     incomplete_layer: int | None = None,
+    q8_0_layers: tuple[int, ...] = (),
 ) -> None:
     """Write two contiguous, zero-based MoE layers with two experts each."""
     writer = GGUFWriter(path, architecture if architecture else "deepseek4")
@@ -71,6 +72,12 @@ def write_synthetic_moe(
             if layer == incomplete_layer and part == "down":
                 continue
             start = 1000 * layer + 100 * part_index
+            if layer in q8_0_layers:
+                # two experts x two rows of one 34-byte Q8_0 block (32 elements)
+                raw = ((np.arange(2 * 2 * 34) + start) % 251).astype(np.uint8).reshape(2, 2, 34)
+                writer.add_tensor(f"blk.{layer}.ffn_{part}_exps.weight", raw,
+                                  raw_dtype=GGMLQuantizationType.Q8_0)
+                continue
             values = np.arange(start, start + 16, dtype=np.float32).reshape(2, 2, 4)
             writer.add_tensor(f"blk.{layer}.ffn_{part}_exps.weight", values)
 
@@ -335,6 +342,54 @@ class ConverterTests(unittest.TestCase):
             write_synthetic_moe(source, layers=(0, 2))
             create = self.run_converter("--src", str(source), "--dst", str(destination))
             self.assertNotEqual(create.returncode, 0, create.stdout)
+
+    def test_mixed_layer_types_pad_each_layer_to_its_own_types(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary = Path(temporary_directory)
+            source = temporary / "source.gguf"
+            destination = temporary / "expert-major.gguf"
+            write_synthetic_moe(source, q8_0_layers=(1,))
+
+            create = self.run_converter("--src", str(source), "--dst", str(destination))
+            self.assertEqual(create.returncode, 0, create.stderr)
+            verify = self.run_converter(
+                "--src", str(source), "--dst", str(destination), "--verify", "--samples", "8"
+            )
+            self.assertEqual(verify.returncode, 0, verify.stderr)
+            self.assertIn("8/8", verify.stdout)
+            probe = self.run_expert_major_probe(destination)
+            self.assertEqual(probe.returncode, 0, probe.stderr)
+            self.assertIn('"status": "expert-major-metadata-ok"', probe.stdout)
+
+            reader = GGUFReader(destination)
+            strides = [int(value) for value in reader.fields["siliangem.expert_bytes"].contents()]
+            # F32 layer: 96 raw bytes -> lcm(512, 4); Q8_0 layer: 204 raw bytes -> lcm(512, 34).
+            # A global target would pad the F32 layer to 8704 as well.
+            self.assertEqual(strides, [512, 8704])
+
+            source_local = GGUF(source)
+            packed_by_layer = {
+                int(tensor.name.split(".")[1]): tensor.data.view("uint8").reshape(-1)
+                for tensor in reader.tensors
+                if ".ffn_exps_packed.weight" in tensor.name
+            }
+            with source.open("rb") as source_file:
+                for layer_position, layer in enumerate((0, 1)):
+                    for expert in range(2):
+                        offset = expert * strides[layer_position]
+                        for part in ("gate", "up", "down"):
+                            tensor = source_local.tensors[f"blk.{layer}.ffn_{part}_exps.weight"]
+                            expert_bytes = tensor.nbytes // 2
+                            source_file.seek(tensor.abs_offset + expert * expert_bytes)
+                            self.assertEqual(
+                                source_file.read(expert_bytes),
+                                packed_by_layer[layer][offset:offset + expert_bytes].tobytes(),
+                                f"changed bytes in layer {layer} {part}, expert {expert}",
+                            )
+                            offset += expert_bytes
+            source_local.f.close()
+            packed_by_layer.clear()
+            close_gguf_reader(reader)
 
     def test_dry_run_create_then_separate_verify_preserves_every_byte(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
