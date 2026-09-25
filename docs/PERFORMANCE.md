@@ -20,6 +20,7 @@ The measurements do not have equal evidence depth:
 | DeepSeek V4 Flash 0731, stock GGUF mmap versus expert-major GGUF arena | Every raw timing repetition, schedule, artifact hashes, runtime hash, command, request, and result summary | Historical precursor; superseded for the direct layout claim |
 | DeepSeek V4 pre-0731 | Every raw timing repetition for three matched arms; partial timing configuration and artifact identity | Historical matched run |
 | gpt-oss-120B | Every raw timing repetition for two matched arms; partial timing configuration and artifact identity | Historical matched run |
+| DeepSeek V4 Flash 0731 bounded prefill, `-ub 512/1024/2048` | Every raw repetition, fixed interleaved schedule, runtime hash, command, prompt hash, output identity, and host-side sweep timing | Current prefill ubatch A/B |
 | DeepSeek V4 Flash 0731 prompt processing, pre-prefill-port runtime | Two completed interactive requests and cumulative runtime telemetry; prompts differed and no matched arm was frozen | Observational prefill controls only |
 
 ## Workstation
@@ -75,6 +76,89 @@ With the fence, three fresh 64-token runs produced one identical token hash at
 The historical DS4 and GPT-OSS results below remain valid evidence for their
 original runtime revisions and protocols. They are not silently replaced by
 this release-candidate matrix.
+
+## DeepSeek4 bounded-prefill ubatch A/B (2026-09-25)
+
+This A/B isolates `-ub` for bounded routed-MoE prefill. Everything else is fixed:
+binary, model, prompt, K/R/P, L2, threads, and `-b 2048`.
+
+### Identity and method
+
+- Model: `DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731`,
+  expert-major GGUF, 86,923,096,064 bytes (retained SHA-256
+  `83d09412bbfbbcc0fa9f77afeee763d5f72da1ad055be50675111f585ab8b99a`), on the
+  reference NVMe drive.
+- Runtime: `bef55940c` plus the diagnostic host-timing commit on
+  `research/prefill-census-20260925`. `llama-server.exe` SHA-256
+  `38a65ee1f83cb660fd55aa79552bc044de8b1915eabac5b423f40509299fbdf5`. The
+  instrumentation only reads a steady clock around existing calls.
+- Request: one chat completion, temperature 0, seed 12345, `max_tokens` 32,
+  `cache_prompt` false. The prompt asks for a code review of six sample CUDA
+  source files and has 7,369 tokens (prompt text SHA-256
+  `e5b902610b32af005a6122bf1bc44bd35ee9c3eb1786b282d7d226dbf15fa3d4`).
+- Command, with only `-ub` changed per arm:
+
+```text
+llama-server -m <model> -ngl 99 -ncmoe 43 -nkvo --no-op-offload -c 12288 -b 2048 -ub <512|1024|2048>
+  -t 2 -tb 12 --parallel 1 --expert-cache --expert-cache-l2-mib 2048 --expert-cache-l2-policy lfu
+  --expert-cache-l1-k 256 --expert-cache-exchange-r 12 --expert-cache-elevator-p 12
+  --expert-cache-l1-policy slfu --admit-k-cold on --demote-k-hot on --expert-cache-roll deepseek4
+  --expert-cache-prefill --no-warmup --reasoning off --reasoning-format deepseek -lv 4
+```
+
+- One fresh process per repetition. The schedule was fixed before measurement:
+  `512, 1024, 2048, 2048, 512, 1024, 1024, 2048, 512`. The first repetition ran
+  in a separate controller process a few minutes before the other eight; the
+  schedule order was kept.
+- Every repetition armed bounded prefill, completed 32 tokens, and produced the
+  same output SHA-256 `b332f2378690...`. No fallback, pressure, or failure line
+  was logged. An unrelated idle background process was present.
+
+### Raw repetitions
+
+| # | ubatch | Prompt ms | Prompt tok/s | Sweeps | GPU at ready (MiB) |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 512 | 414,181 | 17.792 | 16 | 7,326 |
+| 2 | 1024 | 260,521 | 28.286 | 9 | 7,611 |
+| 3 | 2048 | 311,918 | 23.625 | 5 | 7,778 |
+| 4 | 2048 | 309,146 | 23.837 | 5 | 7,754 |
+| 5 | 512 | 413,617 | 17.816 | 16 | 7,304 |
+| 6 | 1024 | 252,053 | 29.236 | 9 | 7,557 |
+| 7 | 1024 | 257,203 | 28.651 | 9 | 7,557 |
+| 8 | 2048 | 305,168 | 24.147 | 5 | 7,767 |
+| 9 | 512 | 417,267 | 17.660 | 16 | 7,307 |
+
+| ubatch | Median prompt tok/s | Range |
+| ---: | ---: | ---: |
+| 512 | **17.792** | 17.660-17.816 |
+| 1024 | **28.651** | 28.286-29.236 |
+| 2048 | **23.837** | 23.625-24.147 |
+
+`-ub 1024` is 61.0% faster than `-ub 512` at the median. `-ub 2048` is 16.8%
+slower than `-ub 1024`. The sweep count includes the server's context-checkpoint
+tail splits.
+
+### Host-time attribution
+
+Median share of prompt wall time per arm, from the per-sweep timing lines:
+
+| ubatch | NVMe read wait | L2-to-P memcpy | Between routed layers | Read submission |
+| ---: | ---: | ---: | ---: | ---: |
+| 512 | 55.7% | 25.7% | 12.2% | 4.6% |
+| 1024 | 52.8% | 25.5% | 15.5% | 4.4% |
+| 2048 | 24.6% | 11.9% | 59.7% | 2.1% |
+
+Bounded prefill had zero L2 hits in every sweep, so the L2 acts only as a
+transit buffer during prompt processing. A 512-token sweep needs about 180 to
+200 unique experts per layer. The time between routed layers covers GPU expert
+compute, the next layer's attention and router, and graph splits. For
+`-ub 2048` it rose from about 40 s to about 184 s for the same prompt. VRAM was
+at 7.75-7.9 GB of 8 GB. Spill of the larger compute buffer into shared system
+memory is the leading hypothesis, but it was not measured.
+
+Adjacent-sweep route bitmaps for the same layer had 89.0% coverage and 78.0%
+precision at `-ub 1024` (86.4%/80.9% at 512, 94.9%/72.5% at 2048). This is
+telemetry only; no prefetch is enabled.
 
 ## DeepSeek4 prompt-processing observation (2026-08-27)
 

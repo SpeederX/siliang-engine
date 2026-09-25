@@ -223,6 +223,12 @@ On the RTX 2070 reference machine, a diverse 1,024-token prompt improved from
 expert H2D fell from about 115.5 GB to 65.4 GB. Treat the larger ubatch as a
 qualified reference-machine result, not a universal preset.
 
+Larger is not automatically faster. A three-start interleaved A/B on a
+7,369-token code prompt measured 17.79, 28.65, and 23.84 prompt tok/s median
+for `-ub 512`, `-ub 1024`, and `-ub 2048`. `-ub 2048` fit in the 8 GB GPU,
+but host time between routed layers grew about 4.5x per token. Details are in
+[`PERFORMANCE.md`](PERFORMANCE.md#deepseek4-bounded-prefill-ubatch-ab-2026-09-25).
+
 `llama-server` context checkpoints deliberately split the last four prompt
 tokens into a separate decode call so a checkpoint can be created. That is
 normally useful server behavior, but with bounded MoE prefill it causes a second
@@ -262,8 +268,8 @@ Use this bounded diagnostic command on the current 8 GB test machine:
 ```
 
 The command above is the low-K diagnostic profile. For DS4 prompt throughput,
-use K256 and choose the largest ubatch that the actual GPU workspace can sustain;
-`-ub 1024` is qualified on the RTX 2070 reference profile. For server throughput
+use K256 with `-ub 1024`, the qualified RTX 2070 reference setting. Measure
+before using a larger ubatch; `-ub 2048` was slower on that machine. For server throughput
 measurements where context checkpoints are not required, add
 `--ctx-checkpoints 0`. To isolate bounded prefill, toggle
 `--expert-cache-prefill` / `--no-expert-cache-prefill` while keeping K, ubatch,
