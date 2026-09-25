@@ -846,7 +846,7 @@ bool siliang_ds4_front_slab::prepare(const llama_model & model) {
     if (impl_->prepared.load(std::memory_order_acquire) ||
         model.arch != LLM_ARCH_DEEPSEEK4 || model.hparams.n_layer() != k_ds4_layer_count ||
         model.hparams.n_layer_nextn != 0 || model.hparams.n_expert != 256 ||
-        model.hparams.n_expert_used != 6 || model.layers.size() != k_ds4_layer_count) {
+        model.hparams.n_expert_used_max() != 6 || model.layers.size() != k_ds4_layer_count) {
         return impl_->fail(FAILURE_INVALID_MODEL);
     }
     impl_->model = &model;

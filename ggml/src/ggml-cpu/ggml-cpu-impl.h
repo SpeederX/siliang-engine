@@ -120,7 +120,7 @@ int ggml_siliangem_cache_state_occupancy(
 #if defined(__ARM_NEON)
 
 // ref: https://github.com/ggml-org/llama.cpp/pull/5404
-#ifdef _MSC_VER
+#if defined(_MSC_VER) && !defined(__clang__)
 #define ggml_vld1q_u32(w,x,y,z) { ((w) + ((uint64_t)(x) << 32)), ((y) + ((uint64_t)(z) << 32)) }
 #else
 #define ggml_vld1q_u32(w,x,y,z) { (w), (x), (y), (z) }
