@@ -138,7 +138,10 @@ class ArenaOptInContractTests(unittest.TestCase):
         process = function_body(LLAMA_CONTEXT, "llm_graph_result * llama_context::process_ubatch(")
         self.assertIn("siliang_token_embedding_file", process)
         self.assertIn("effective_ubatch.embd = managed_token_embeddings.data()", process)
-        self.assertIn("graph_params(res, effective_ubatch", process)
+        # DeepSeek4 treats ubatch.embd as media input (no hash routing), so the graph must see the token batch.
+        self.assertIn("graph_params(res, ubatch, mctx, gtype)", process)
+        self.assertNotIn("graph_params(res, effective_ubatch", process)
+        self.assertIn("res->set_inputs(&effective_ubatch)", process)
 
         embd = function_body(LLAMA_GRAPH, "ggml_tensor * llm_graph_context::build_inp_embd(")
         self.assertIn("managed_token_embd", embd)
