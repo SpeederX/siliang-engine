@@ -12,7 +12,7 @@ large models can make better use of limited workstation memory.
 Its core workflow combines model-owned expert sources with a typed L2/L1 memory
 hierarchy. A bounded system-RAM L2 can serve out-of-core experts, while a CUDA
 L1 keeps K persistent experts plus R exchange slots and a bounded pinned P
-  elevator. The v0.1.6 DeepSeek4 path can also roll its architecture-specific
+  elevator. The v0.1.7 DeepSeek4 path can also roll its architecture-specific
   FRONT set. Separately, the generic routed-MoE arena can, as an explicit
   experiment, reuse K for bounded prompt microbatches when the topology and
   layer-local capacity checks pass. The GPU retains router weights; only selected expert IDs enter
@@ -70,7 +70,7 @@ settings, calculations, and evidence limitations are in
 [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md).
 
 These rows describe earlier runtime revisions and remain **historical evidence**.
-They are not v0.1.6 throughput claims. v0.1.6 keeps the broader model qualification
+They are not v0.1.7 throughput claims. v0.1.7 keeps the broader model qualification
 for Gemma4, Qwen3, Qwen3.6, Ornith, GPT-OSS, and DeepSeek4 at the v0.1.3
 evidence recorded in
 [`docs/releases/v0.1.3.md`](docs/releases/v0.1.3.md) and
@@ -255,7 +255,7 @@ that the run built the tagged commit, verifies the checksums, and publishes thos
 exact artifacts as a prerelease. The publisher remains manually dispatchable for
 an existing tag whose CI run has already succeeded, without rebuilding the
 packages.
-For v0.1.6, see the [release notes](docs/releases/v0.1.6.md); the broader
+For v0.1.7, see the [release notes](docs/releases/v0.1.7.md); the broader
 performance qualification remains in [v0.1.3](docs/releases/v0.1.3.md).
 
 ## License

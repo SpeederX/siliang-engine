@@ -9,7 +9,7 @@ on:
       tag:
         description: "Existing tag whose successful Siliang CI artifacts should be published"
         required: true
-        default: "v0.1.6"
+        default: "v0.1.7"
         type: string
 
 concurrency:

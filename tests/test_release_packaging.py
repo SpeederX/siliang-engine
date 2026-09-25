@@ -18,7 +18,7 @@ class ReleasePackagingContractTests(unittest.TestCase):
         publish_text = PUBLISH_WORKFLOW.read_text(encoding="utf-8")
         bs = chr(92)
 
-        self.assertIn('default: "v0.1.6"', publish_text)
+        self.assertIn('default: "v0.1.7"', publish_text)
         self.assertIn("startsWith(github.event.workflow_run.head_branch, 'v')", publish_text)
         self.assertIn("inputs.tag || github.event.workflow_run.head_branch", publish_text)
         self.assertIn('git rev-parse "$tag^{commit}"', publish_text)
