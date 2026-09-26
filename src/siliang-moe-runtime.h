@@ -13,7 +13,7 @@
 namespace siliang_moe_prefill {
 
 constexpr size_t route_bitmap_word_bits = 64;
-constexpr size_t route_bitmap_word_count = 4;
+constexpr size_t route_bitmap_word_count = 8;
 constexpr size_t route_bitmap_expert_capacity = route_bitmap_word_bits * route_bitmap_word_count;
 static_assert(route_bitmap_expert_capacity == LLAMA_SILIANG_MOE_PREFILL_MAX_EXPERTS);
 using route_bitmap = std::array<uint64_t, route_bitmap_word_count>;

@@ -9,7 +9,7 @@
 
 #define LLAMA_MAX_SEQ 256
 
-constexpr uint32_t LLAMA_SILIANG_MOE_PREFILL_MAX_EXPERTS = 256;
+constexpr uint32_t LLAMA_SILIANG_MOE_PREFILL_MAX_EXPERTS = 512;
 
 struct llama_siliang_moe_arena_state;
 

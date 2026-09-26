@@ -23,7 +23,7 @@ path without hidden session state.
 | `--admit-k-cold on|off` | SLFU only. `on` permits first-use cold experts to enter K; `off` keeps first-use cold experts in L2/R and only considers them for K on a later L2 hit. Default: `on`. |
 | `--demote-k-hot on|off` | SLFU only. `on` defers K replacement until routed compute finishes, then swaps the L2 candidate into K and demotes the displaced K victim into the candidate's released L2 slot. The demotion path avoids creating a second L2 copy for an already-resident victim. Default: `off`. |
 | `--expert-cache-roll MODE` | Static rolling mode: `off` or `deepseek4`. `deepseek4` controls only the architecture-specific FRONT slab; it is independent of the generic routed-expert K/R/P arena. |
-| `--expert-cache-prefill` / `--no-expert-cache-prefill` | Enable or disable experimental routed-MoE batch-union prompt processing in K. The current bitmap supports up to 256 experts per layer and the worst-case union must fit every layer-local K slice. Disabled by default. |
+| `--expert-cache-prefill` / `--no-expert-cache-prefill` | Enable or disable experimental routed-MoE batch-union prompt processing in K. The current bitmap supports up to 512 experts per layer and the worst-case union must fit every layer-local K slice. Disabled by default. |
 | `--expert-cache-memory-report` / `--no-expert-cache-memory-report` | Enable or suppress periodic host-memory reporting. |
 | `--expert-cache-route-stats` / `--no-expert-cache-route-stats` | Emit aggregate decode-route residency/execution statistics at shutdown, including L1/L2/uncached and K/R/CPU execution composition histograms. Requires L1 K/R/P. The explicit telemetry is written to stderr even at normal CLI verbosity. Disabled by default. |
 | `--expert-cache-deferred-wait` / `--no-expert-cache-deferred-wait` | Enable or disable deferred L2 I/O waits. |
@@ -56,7 +56,7 @@ It does not require one multi-gigabyte `cudaMallocHost` allocation. The small
 P elevator remains a separate pinned-host allocation.
 
 `--expert-cache-prefill` is topology-gated rather than architecture-name-gated.
-Startup requires a routed MoE with at most 256 experts per layer and
+Startup requires a routed MoE with at most 512 experts per layer and
 `min(n_ubatch * top_k, expert_count)` must fit the K slice available to every
 routed layer after schema-bank partitioning. Unsupported capacities fail closed.
 This does not make prefill a performance-qualified preset for every supported
@@ -179,13 +179,13 @@ union, manage K/L2, and translate logical experts to physical slots. Removing
 the weight tensor from that callback does not change top-k selection,
 normalization, or the GPU weighted sum of expert outputs.
 
-Each fully mapped routed-MoE sweep also produces one 256-bit expert bitmap per routed
+Each fully mapped routed-MoE sweep also produces one 512-bit expert bitmap per routed
 layer. The info summary reports `prefill_bitmap` completed sweeps, sweep tokens,
 adjacent-sweep comparisons per layer, seeded experts, needed experts, overlap,
 new experts, unused seed experts, coverage, precision, resets, and incomplete
 sweep sequences. The legacy `prefill_tokens` field is summed once per mapped
 layer; `sweep_tokens` is summed once per completed routed-layer sweep. Debug
-logging emits the four raw 64-bit words for every mapped layer and sweep. The
+logging emits the eight raw 64-bit words for every mapped layer and sweep (record `v=2`). The
 common startup graph-reservation and optional warmup traces, together with
 their prefill counters, are discarded before serving begins. `llama-server`
 establishes the boundary again after its capability and slot probes. Raw reset,
@@ -210,7 +210,7 @@ homogeneous schema the full K budget is shared; for heterogeneous schema banks,
 K is partitioned across routed layers before this check. DS4 K216/top-k 6 still
 permits at most `-ub 36`; `-ub 32` leaves a 24-slot margin. The same rule applies
 to Gemma/Qwen/Ornith without an architecture-name allowlist. The current bitmap
-caps this path at 256 experts per layer. Unsupported geometry or capacity fails
+caps this path at 512 experts per layer. Unsupported geometry or capacity fails
 closed.
 
 **Prefill sizing rule:** size K for the intended ubatch, not only for startup.

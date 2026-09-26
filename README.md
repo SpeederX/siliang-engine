@@ -140,7 +140,7 @@ is consistent with the [PCI-SIG bandwidth table](https://pcisig.com/how-does-pci
   per-schema R exchange banks, and bounded global P staging.
 - An architecture-guarded DeepSeek4 FRONT rolling path for serial decode.
 - A separate topology-gated routed-MoE bounded-prefill experiment, currently
-  limited to at most 256 experts per layer and layer-local K capacity.
+  limited to at most 512 experts per layer and layer-local K capacity.
 - The expert-major GGUF preparation workflow for the core and recommended
   Siliang path, plus validated arena support for compatible monolithic stock
   GGUFs.

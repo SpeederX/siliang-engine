@@ -2920,7 +2920,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
     add_opt(common_arg(
         {"--expert-cache-prefill"},
         {"--no-expert-cache-prefill"},
-        "enable bounded routed-MoE batch-union prefill in the CUDA K arena; supports up to 256 experts "
+        "enable bounded routed-MoE batch-union prefill in the CUDA K arena; supports up to 512 experts "
         "per layer and the --ubatch-size route union must fit every layer-local K slice "
         "(experimental, default: disabled)",
         [](common_params & params, bool value) {

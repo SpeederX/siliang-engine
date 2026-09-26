@@ -167,7 +167,7 @@ llama_context::llama_context(
             if (hparams.n_expert == 0 ||
                 hparams.n_expert > LLAMA_SILIANG_MOE_PREFILL_MAX_EXPERTS) {
                 throw std::runtime_error(
-                        "Siliang expert-cache prefill currently supports routed MoE models with at most 256 experts per layer");
+                        "Siliang expert-cache prefill currently supports routed MoE models with at most 512 experts per layer");
             }
             if (configured_ubatch == 0 || maximum_route_union > expert_cache.l1_k) {
                 throw std::runtime_error(

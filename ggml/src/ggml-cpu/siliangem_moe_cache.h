@@ -49,7 +49,7 @@
  * much larger. Active sets larger than this storage bound are handled by the
  * explicit capacity check in siliangem_prepare_async(), which declines rather than
  * overruns. */
-#define SILIANGEM_MAX_BATCH    256
+#define SILIANGEM_MAX_BATCH    512
 #define SILIANGEM_EMPTY        0xFFFFFFFFu
 
 /* Routed experts per token, with headroom so a larger top-k does not silently
@@ -1661,7 +1661,16 @@ static int siliangem_prepare(const char *name, const int64_t *counts, int n_as) 
         const uint32_t key = ((uint32_t) layer << 16) | (uint32_t) a;
         missing += siliangem_lookup(key) == SILIANGEM_EMPTY;
     }
-    if (active > SILIANGEM_MAX_BATCH) return 0;
+    if (active > SILIANGEM_MAX_BATCH) {
+        static int warned = 0;
+        if (!warned) {
+            warned = 1;
+            fprintf(stderr, "siliangem: WARNING %u active experts exceed the request bound %d; "
+                            "this batch bypasses L2 and reads model-resident expert bytes\n",
+                    active, SILIANGEM_MAX_BATCH);
+        }
+        return 0;
+    }
     if (g_siliangem.placement_policy != SILIANGEM_POLICY_SLFU && active > g_siliangem.nslots) return 0;
     if (g_siliangem.placement_policy == SILIANGEM_POLICY_SLFU && !siliangem_transient_ensure(missing)) return 0;
 

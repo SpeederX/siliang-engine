@@ -668,7 +668,7 @@ struct siliang_moe_runtime {
             (model_info.expert_count > static_cast<int32_t>(LLAMA_SILIANG_MOE_PREFILL_MAX_EXPERTS) ||
              prefill_ubatch_cap == 0 || prefill_route_capacity > params.l1_k)) {
             return fail(SILIANG_RUNTIME_FAILURE_PREFILL,
-                    "bounded prefill requires at most 256 experts per routed layer and "
+                    "bounded prefill requires at most 512 experts per routed layer and "
                     "min(n_ubatch * top-k, expert-count) <= K");
         }
         const uint64_t double_route_width = 2ULL * route_width;
@@ -1859,15 +1859,17 @@ struct siliang_moe_runtime {
                 metrics.prefill_bitmap_unused += seeded - overlap;
             }
             LLAMA_LOG_DEBUG(
-                    "siliang_moe_route_bitmap: v=1 scope=context epoch=%" PRIu64
+                    "siliang_moe_route_bitmap: v=2 scope=context epoch=%" PRIu64
                     " attempt=%" PRIu64 " sweep=%" PRIu64
                     " layer=%d tokens=%zu unique=%" PRIu64
                     " w0=%016" PRIx64 " w1=%016" PRIx64 " w2=%016" PRIx64 " w3=%016" PRIx64
+                    " w4=%016" PRIx64 " w5=%016" PRIx64 " w6=%016" PRIx64 " w7=%016" PRIx64
                     " has_prev=%d overlap=%" PRIu64 " new=%" PRIu64 " unused=%" PRIu64 " mapped=1\n",
                     prefill_bitmap_epoch, prefill_sweep_attempt,
                     metrics.prefill_bitmap_sweeps + 1,
                     managed_layer, prefill_sweep_tokens, needed,
-                    current[0], current[1], current[2], current[3], has_previous ? 1 : 0,
+                    current[0], current[1], current[2], current[3], current[4], current[5], current[6], current[7],
+                    has_previous ? 1 : 0,
                     overlap, needed - overlap, seeded - overlap);
             prefill_bitmaps[index] = current;
             prefill_bitmap_valid[index] = 1;
