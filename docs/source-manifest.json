@@ -14,11 +14,11 @@
   "source": {
     "canonicalPatch": {
       "path": "patches/siliang-engine.patch",
-      "sha256": "14743A838E5E4DADF3C80F5A79CC4D6E208AD10F62D165A63E8DF9641A1E2139",
-      "gitBlob": "bb0686dcd9aaefe81cd82c4755e090fe067a850b"
+      "sha256": "089C75CCB662F33B2B0DE4C4B2EB8100C525BEBC6B07C9AEE6B96C273F818748",
+      "gitBlob": "72899b15202e122ac31d7feb05a6dea950c0c58b"
     },
     "engineDelta": {
-      "insertions": 11230,
+      "insertions": 11241,
       "deletions": 37,
       "files": [
         {
@@ -26,7 +26,7 @@
           "status": "modified",
           "mode": "100644",
           "baseBlob": "63e342776d549b6abaf9c4aef5543a729e6dfd97",
-          "finalBlob": "1f685113f8228efa57445c8e16531dc55dd256ca"
+          "finalBlob": "88257aecdd6e4b6606e8750d67aaaea0d64c5bba"
         },
         {
           "path": "common/common.cpp",
@@ -103,7 +103,7 @@
           "status": "added",
           "mode": "100644",
           "baseBlob": null,
-          "finalBlob": "fe88c90c6583eeb1a67f018e04f53c57123bc8ea"
+          "finalBlob": "ac2847ed50393af5b29366492386249a61f378a2"
         },
         {
           "path": "ggml/src/ggml-cuda/ggml-cuda.cu",
@@ -131,7 +131,7 @@
           "status": "modified",
           "mode": "100644",
           "baseBlob": "8675f6087336069c43dffff0435002bb4358c6f5",
-          "finalBlob": "e50f46ee19fdc07be7a38aadba7f9338c328e616"
+          "finalBlob": "da980e7990e8f69496983dc3086ec4af2bf33bf1"
         },
         {
           "path": "src/llama-context.h",
@@ -145,7 +145,7 @@
           "status": "modified",
           "mode": "100644",
           "baseBlob": "b592de18c79470243ece446cb7db1ca00b0b803b",
-          "finalBlob": "d9bfa8ca9c167e1fdbc56c09299924e607e8054f"
+          "finalBlob": "5a1a83b306b2a0b88f872d158155a66a2924f2e8"
         },
         {
           "path": "src/llama-graph.cpp",
@@ -229,14 +229,14 @@
           "status": "added",
           "mode": "100644",
           "baseBlob": null,
-          "finalBlob": "33132c85bcc7630c6761fbe18995047dbe05a048"
+          "finalBlob": "9839e977f8d1a4f6bcd2ec26154576f17890cb1e"
         },
         {
           "path": "src/siliang-moe-runtime.h",
           "status": "added",
           "mode": "100644",
           "baseBlob": null,
-          "finalBlob": "5bf98bd7fdaa26a64c66f8c4231ea133d6136cf6"
+          "finalBlob": "351dbbdfde9540f9b553accb30ec949dd6da5616"
         },
         {
           "path": "tests/CMakeLists.txt",

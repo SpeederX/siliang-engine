@@ -26,11 +26,11 @@ canonical engine-only delta from the pinned upstream base.
 
 | Identity | Value |
 | --- | --- |
-| SHA-256 | `14743A838E5E4DADF3C80F5A79CC4D6E208AD10F62D165A63E8DF9641A1E2139` |
-| Git blob | `bb0686dcd9aaefe81cd82c4755e090fe067a850b` |
+| SHA-256 | `089C75CCB662F33B2B0DE4C4B2EB8100C525BEBC6B07C9AEE6B96C273F818748` |
+| Git blob | `72899b15202e122ac31d7feb05a6dea950c0c58b` |
 
 The patch uses full Git object IDs and LF line endings. It contains exactly
-**11,230 insertions and 37 deletions** across 35 paths.
+**11,241 insertions and 37 deletions** across 35 paths.
 
 ## Engine delta
 
@@ -45,7 +45,7 @@ patch.
 
 | Path | Base Git blob | Siliang Git blob |
 | --- | --- | --- |
-| `common/arg.cpp` | `63e342776d549b6abaf9c4aef5543a729e6dfd97` | `1f685113f8228efa57445c8e16531dc55dd256ca` |
+| `common/arg.cpp` | `63e342776d549b6abaf9c4aef5543a729e6dfd97` | `88257aecdd6e4b6606e8750d67aaaea0d64c5bba` |
 | `common/common.cpp` | `364688ef466dab454e278e4e7c8f85864e39f432` | `7e5ff09b17a5e7f0016d9b91c6edba556e751583` |
 | `common/common.h` | `9194d3dcb650a37c10dade1f10b7f1430936db9c` | `9102beb9fe390a49365d2e9016d1d0649fbf44ea` |
 | `common/speculative.cpp` | `6fdfa4dc33f0514462f8e8d40cdf093a0029a73e` | `2eb9ce9c722052ef40fdc986e4687ac1354473aa` |
@@ -56,13 +56,13 @@ patch.
 | `ggml/src/ggml-cpu/ggml-cpu-impl.h` | `5dd9ec8e628acad32537e87eccfdeb01c1c1dc46` | `699e60a2680883f6872dad7cf26ac72c3eb587e1` |
 | `ggml/src/ggml-cpu/ggml-cpu.c` | `8bb0ff7bc3366be957dd20aba3fbe0f50dd249d7` | `0be59cf484cc81ba3da5c5b0d6c066d1a593487f` |
 | `ggml/src/ggml-cpu/ggml-cpu.cpp` | `1df0f2bb926894eba96beef691ff2bf520ab70b3` | `1dc3a427112d12dd268388fbfc519dd56ccba6d1` |
-| `ggml/src/ggml-cpu/siliangem_moe_cache.h` | absent | `fe88c90c6583eeb1a67f018e04f53c57123bc8ea` |
+| `ggml/src/ggml-cpu/siliangem_moe_cache.h` | absent | `ac2847ed50393af5b29366492386249a61f378a2` |
 | `ggml/src/ggml-cuda/ggml-cuda.cu` | `e76ff3128fddd7bf248e16b8469d27c2f441b8e1` | `011f69f075910448498ed2fbe0c6d2f7e5b346d0` |
 | `include/llama.h` | `1805ed0559f92a818dfe951b012608ee2be3115c` | `22c232bb3d86d746747514d04ff213400846c68f` |
 | `src/CMakeLists.txt` | `afdaddc79de81bc03dadee2707e67d2af4b814c0` | `4ff52fe171c6f3f525997cb3156d095792821b14` |
-| `src/llama-context.cpp` | `8675f6087336069c43dffff0435002bb4358c6f5` | `e50f46ee19fdc07be7a38aadba7f9338c328e616` |
+| `src/llama-context.cpp` | `8675f6087336069c43dffff0435002bb4358c6f5` | `da980e7990e8f69496983dc3086ec4af2bf33bf1` |
 | `src/llama-context.h` | `b403b099b76fefea6f3d8a4959bb12287b633876` | `5a147f5459407f34c7a37804ef8c2481ea0e9f71` |
-| `src/llama-cparams.h` | `b592de18c79470243ece446cb7db1ca00b0b803b` | `d9bfa8ca9c167e1fdbc56c09299924e607e8054f` |
+| `src/llama-cparams.h` | `b592de18c79470243ece446cb7db1ca00b0b803b` | `5a1a83b306b2a0b88f872d158155a66a2924f2e8` |
 | `src/llama-graph.cpp` | `0b3bab612375b27b357971287857826dcc8b66e8` | `158cf8b74993536ea05ebd7a37b2c26fa73a51d1` |
 | `src/llama-graph.h` | `3daa425bc07bdb2ee9b618124bfa7dfcebc6094f` | `e03a1b59a38ed55d5556a3e457b93d21e9a3b531` |
 | `src/llama-model-loader.cpp` | `43c396f15af3475e405da8dd73e6a8010ce3d7a5` | `9707a9ada9b7b21cf2fa402554a0df394ab29ad6` |
@@ -74,8 +74,8 @@ patch.
 | `src/siliang-ds4-front-slab.cpp` | absent | `05636ef8d52cbde133dff107f53bd8c35e05c6da` |
 | `src/siliang-ds4-front-slab.h` | absent | `a3c1052be580ed7ceecbd3d64d01350e439a5a74` |
 | `src/siliang-expert-source.h` | absent | `72b1d213be6b1d40f687f040e8913e648aeaefd3` |
-| `src/siliang-moe-runtime.cpp` | absent | `33132c85bcc7630c6761fbe18995047dbe05a048` |
-| `src/siliang-moe-runtime.h` | absent | `5bf98bd7fdaa26a64c66f8c4231ea133d6136cf6` |
+| `src/siliang-moe-runtime.cpp` | absent | `9839e977f8d1a4f6bcd2ec26154576f17890cb1e` |
+| `src/siliang-moe-runtime.h` | absent | `351dbbdfde9540f9b553accb30ec949dd6da5616` |
 | `tests/CMakeLists.txt` | `9b3a4fcc4bbf6afc77cc8554fa14412722b887b4` | `8244dcbb99f2fb414f49a9a4aaf2e6f29bc5906f` |
 | `tests/test-arg-parser.cpp` | `e0907631abd8a89e5b6dbadf10d28b65ed483b9a` | `ea164bfe12351845c9bad0e1e3953daafc834017` |
 | `tests/test-siliang-prefill.cpp` | absent | `7d740fe1e709cf8a7985ff418124a732c3f281c8` |

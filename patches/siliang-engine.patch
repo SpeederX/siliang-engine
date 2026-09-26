@@ -1,5 +1,5 @@
 diff --git a/common/arg.cpp b/common/arg.cpp
-index 63e342776d549b6abaf9c4aef5543a729e6dfd97..1f685113f8228efa57445c8e16531dc55dd256ca 100644
+index 63e342776d549b6abaf9c4aef5543a729e6dfd97..88257aecdd6e4b6606e8750d67aaaea0d64c5bba 100644
 --- a/common/arg.cpp
 +++ b/common/arg.cpp
 @@ -30,6 +30,7 @@
@@ -245,7 +245,7 @@ index 63e342776d549b6abaf9c4aef5543a729e6dfd97..1f685113f8228efa57445c8e16531dc5
 +    add_opt(common_arg(
 +        {"--expert-cache-prefill"},
 +        {"--no-expert-cache-prefill"},
-+        "enable bounded routed-MoE batch-union prefill in the CUDA K arena; supports up to 256 experts "
++        "enable bounded routed-MoE batch-union prefill in the CUDA K arena; supports up to 512 experts "
 +        "per layer and the --ubatch-size route union must fit every layer-local K slice "
 +        "(experimental, default: disabled)",
 +        [](common_params & params, bool value) {
@@ -2108,10 +2108,10 @@ index 1df0f2bb926894eba96beef691ff2bf520ab70b3..1dc3a427112d12dd268388fbfc519dd5
      if (strcmp(name, "ggml_threadpool_new") == 0) {
 diff --git a/ggml/src/ggml-cpu/siliangem_moe_cache.h b/ggml/src/ggml-cpu/siliangem_moe_cache.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..fe88c90c6583eeb1a67f018e04f53c57123bc8ea
+index 0000000000000000000000000000000000000000..ac2847ed50393af5b29366492386249a61f378a2
 --- /dev/null
 +++ b/ggml/src/ggml-cpu/siliangem_moe_cache.h
-@@ -0,0 +1,1996 @@
+@@ -0,0 +1,2005 @@
 +// Siliang Engine: managed out-of-core MoE expert cache.
 +//
 +// Replaces where routed-expert bytes come from, and nothing else. llama.cpp's
@@ -2163,7 +2163,7 @@ index 0000000000000000000000000000000000000000..fe88c90c6583eeb1a67f018e04f53c57
 + * much larger. Active sets larger than this storage bound are handled by the
 + * explicit capacity check in siliangem_prepare_async(), which declines rather than
 + * overruns. */
-+#define SILIANGEM_MAX_BATCH    256
++#define SILIANGEM_MAX_BATCH    512
 +#define SILIANGEM_EMPTY        0xFFFFFFFFu
 +
 +/* Routed experts per token, with headroom so a larger top-k does not silently
@@ -3775,7 +3775,16 @@ index 0000000000000000000000000000000000000000..fe88c90c6583eeb1a67f018e04f53c57
 +        const uint32_t key = ((uint32_t) layer << 16) | (uint32_t) a;
 +        missing += siliangem_lookup(key) == SILIANGEM_EMPTY;
 +    }
-+    if (active > SILIANGEM_MAX_BATCH) return 0;
++    if (active > SILIANGEM_MAX_BATCH) {
++        static int warned = 0;
++        if (!warned) {
++            warned = 1;
++            fprintf(stderr, "siliangem: WARNING %u active experts exceed the request bound %d; "
++                            "this batch bypasses L2 and reads model-resident expert bytes\n",
++                    active, SILIANGEM_MAX_BATCH);
++        }
++        return 0;
++    }
 +    if (g_siliangem.placement_policy != SILIANGEM_POLICY_SLFU && active > g_siliangem.nslots) return 0;
 +    if (g_siliangem.placement_policy == SILIANGEM_POLICY_SLFU && !siliangem_transient_ensure(missing)) return 0;
 +
@@ -4843,7 +4852,7 @@ index afdaddc79de81bc03dadee2707e67d2af4b814c0..4ff52fe171c6f3f525997cb3156d0957
      unicode.cpp
  )
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index 8675f6087336069c43dffff0435002bb4358c6f5..e50f46ee19fdc07be7a38aadba7f9338c328e616 100644
+index 8675f6087336069c43dffff0435002bb4358c6f5..da980e7990e8f69496983dc3086ec4af2bf33bf1 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
 @@ -1,6 +1,8 @@
@@ -4934,7 +4943,7 @@ index 8675f6087336069c43dffff0435002bb4358c6f5..e50f46ee19fdc07be7a38aadba7f9338
 +            if (hparams.n_expert == 0 ||
 +                hparams.n_expert > LLAMA_SILIANG_MOE_PREFILL_MAX_EXPERTS) {
 +                throw std::runtime_error(
-+                        "Siliang expert-cache prefill currently supports routed MoE models with at most 256 experts per layer");
++                        "Siliang expert-cache prefill currently supports routed MoE models with at most 512 experts per layer");
 +            }
 +            if (configured_ubatch == 0 || maximum_route_union > expert_cache.l1_k) {
 +                throw std::runtime_error(
@@ -5925,7 +5934,7 @@ index b403b099b76fefea6f3d8a4959bb12287b633876..5a147f5459407f34c7a37804ef8c2481
  
      // host buffer for the model output (logits and embeddings)
 diff --git a/src/llama-cparams.h b/src/llama-cparams.h
-index b592de18c79470243ece446cb7db1ca00b0b803b..d9bfa8ca9c167e1fdbc56c09299924e607e8054f 100644
+index b592de18c79470243ece446cb7db1ca00b0b803b..5a1a83b306b2a0b88f872d158155a66a2924f2e8 100644
 --- a/src/llama-cparams.h
 +++ b/src/llama-cparams.h
 @@ -2,11 +2,63 @@
@@ -5939,7 +5948,7 @@ index b592de18c79470243ece446cb7db1ca00b0b803b..d9bfa8ca9c167e1fdbc56c09299924e6
  
  #define LLAMA_MAX_SEQ 256
  
-+constexpr uint32_t LLAMA_SILIANG_MOE_PREFILL_MAX_EXPERTS = 256;
++constexpr uint32_t LLAMA_SILIANG_MOE_PREFILL_MAX_EXPERTS = 512;
 +
 +struct llama_siliang_moe_arena_state;
 +
@@ -8426,10 +8435,10 @@ index 0000000000000000000000000000000000000000..72b1d213be6b1d40f687f040e8913e64
 +};
 diff --git a/src/siliang-moe-runtime.cpp b/src/siliang-moe-runtime.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..33132c85bcc7630c6761fbe18995047dbe05a048
+index 0000000000000000000000000000000000000000..9839e977f8d1a4f6bcd2ec26154576f17890cb1e
 --- /dev/null
 +++ b/src/siliang-moe-runtime.cpp
-@@ -0,0 +1,2883 @@
+@@ -0,0 +1,2885 @@
 +#include "siliang-moe-runtime.h"
 +
 +#include "llama-impl.h"
@@ -9100,7 +9109,7 @@ index 0000000000000000000000000000000000000000..33132c85bcc7630c6761fbe18995047d
 +            (model_info.expert_count > static_cast<int32_t>(LLAMA_SILIANG_MOE_PREFILL_MAX_EXPERTS) ||
 +             prefill_ubatch_cap == 0 || prefill_route_capacity > params.l1_k)) {
 +            return fail(SILIANG_RUNTIME_FAILURE_PREFILL,
-+                    "bounded prefill requires at most 256 experts per routed layer and "
++                    "bounded prefill requires at most 512 experts per routed layer and "
 +                    "min(n_ubatch * top-k, expert-count) <= K");
 +        }
 +        const uint64_t double_route_width = 2ULL * route_width;
@@ -10291,15 +10300,17 @@ index 0000000000000000000000000000000000000000..33132c85bcc7630c6761fbe18995047d
 +                metrics.prefill_bitmap_unused += seeded - overlap;
 +            }
 +            LLAMA_LOG_DEBUG(
-+                    "siliang_moe_route_bitmap: v=1 scope=context epoch=%" PRIu64
++                    "siliang_moe_route_bitmap: v=2 scope=context epoch=%" PRIu64
 +                    " attempt=%" PRIu64 " sweep=%" PRIu64
 +                    " layer=%d tokens=%zu unique=%" PRIu64
 +                    " w0=%016" PRIx64 " w1=%016" PRIx64 " w2=%016" PRIx64 " w3=%016" PRIx64
++                    " w4=%016" PRIx64 " w5=%016" PRIx64 " w6=%016" PRIx64 " w7=%016" PRIx64
 +                    " has_prev=%d overlap=%" PRIu64 " new=%" PRIu64 " unused=%" PRIu64 " mapped=1\n",
 +                    prefill_bitmap_epoch, prefill_sweep_attempt,
 +                    metrics.prefill_bitmap_sweeps + 1,
 +                    managed_layer, prefill_sweep_tokens, needed,
-+                    current[0], current[1], current[2], current[3], has_previous ? 1 : 0,
++                    current[0], current[1], current[2], current[3], current[4], current[5], current[6], current[7],
++                    has_previous ? 1 : 0,
 +                    overlap, needed - overlap, seeded - overlap);
 +            prefill_bitmaps[index] = current;
 +            prefill_bitmap_valid[index] = 1;
@@ -11315,7 +11326,7 @@ index 0000000000000000000000000000000000000000..33132c85bcc7630c6761fbe18995047d
 +}
 diff --git a/src/siliang-moe-runtime.h b/src/siliang-moe-runtime.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..5bf98bd7fdaa26a64c66f8c4231ea133d6136cf6
+index 0000000000000000000000000000000000000000..351dbbdfde9540f9b553accb30ec949dd6da5616
 --- /dev/null
 +++ b/src/siliang-moe-runtime.h
 @@ -0,0 +1,345 @@
@@ -11334,7 +11345,7 @@ index 0000000000000000000000000000000000000000..5bf98bd7fdaa26a64c66f8c4231ea133
 +namespace siliang_moe_prefill {
 +
 +constexpr size_t route_bitmap_word_bits = 64;
-+constexpr size_t route_bitmap_word_count = 4;
++constexpr size_t route_bitmap_word_count = 8;
 +constexpr size_t route_bitmap_expert_capacity = route_bitmap_word_bits * route_bitmap_word_count;
 +static_assert(route_bitmap_expert_capacity == LLAMA_SILIANG_MOE_PREFILL_MAX_EXPERTS);
 +using route_bitmap = std::array<uint64_t, route_bitmap_word_count>;
