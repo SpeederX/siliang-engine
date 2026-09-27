@@ -319,6 +319,14 @@ int ggml_backend_cpu_siliangem_wait_experts(ggml_backend_t backend_cpu) {
     return ggml_siliangem_cache_state_wait_experts(ctx->siliangem_cache);
 }
 
+int ggml_backend_cpu_siliangem_wait_expert(ggml_backend_t backend_cpu, uint32_t layer, uint32_t expert) {
+    if (!ggml_backend_is_cpu(backend_cpu)) {
+        return 0;
+    }
+    auto * ctx = (ggml_backend_cpu_context *) backend_cpu->context;
+    return ggml_siliangem_cache_state_wait_expert(ctx->siliangem_cache, layer, expert);
+}
+
 int ggml_backend_cpu_siliangem_copy_cached_part(
         ggml_backend_t backend_cpu, uint32_t layer, uint32_t expert, uint32_t part,
         void * destination, size_t destination_size) {
@@ -337,6 +345,43 @@ int ggml_backend_cpu_siliangem_expert_location(
     }
     auto * ctx = (ggml_backend_cpu_context *) backend_cpu->context;
     return ggml_siliangem_cache_state_expert_location(ctx->siliangem_cache, layer, expert);
+}
+
+int ggml_backend_cpu_siliangem_arena_span(
+        ggml_backend_t backend_cpu, void ** base, size_t * slot_bytes, uint32_t * slot_count) {
+    if (!ggml_backend_is_cpu(backend_cpu)) {
+        return 0;
+    }
+    auto * ctx = (ggml_backend_cpu_context *) backend_cpu->context;
+    return ggml_siliangem_cache_state_arena_span(ctx->siliangem_cache, base, slot_bytes, slot_count);
+}
+
+int ggml_backend_cpu_siliangem_expert_slot(
+        ggml_backend_t backend_cpu, uint32_t layer, uint32_t expert, uint32_t * slot) {
+    if (!ggml_backend_is_cpu(backend_cpu)) {
+        return 0;
+    }
+    auto * ctx = (ggml_backend_cpu_context *) backend_cpu->context;
+    return ggml_siliangem_cache_state_expert_slot(ctx->siliangem_cache, layer, expert, slot);
+}
+
+int ggml_backend_cpu_siliangem_lease_cached_part(
+        ggml_backend_t backend_cpu, uint32_t layer, uint32_t expert, uint32_t part,
+        const void ** source, size_t * source_size, uint32_t * slot) {
+    if (!ggml_backend_is_cpu(backend_cpu)) {
+        return 0;
+    }
+    auto * ctx = (ggml_backend_cpu_context *) backend_cpu->context;
+    return ggml_siliangem_cache_state_lease_cached_part(
+            ctx->siliangem_cache, layer, expert, part, source, source_size, slot);
+}
+
+int ggml_backend_cpu_siliangem_unlease_slot(ggml_backend_t backend_cpu, uint32_t slot) {
+    if (!ggml_backend_is_cpu(backend_cpu)) {
+        return 0;
+    }
+    auto * ctx = (ggml_backend_cpu_context *) backend_cpu->context;
+    return ggml_siliangem_cache_state_unlease_slot(ctx->siliangem_cache, slot);
 }
 
 int ggml_backend_cpu_siliangem_release_cached_expert(
@@ -819,11 +864,26 @@ static void * ggml_backend_cpu_get_proc_address(ggml_backend_reg_t reg, const ch
     if (strcmp(name, "ggml_backend_cpu_siliangem_wait_experts") == 0) {
         return (void *)ggml_backend_cpu_siliangem_wait_experts;
     }
+    if (strcmp(name, "ggml_backend_cpu_siliangem_wait_expert") == 0) {
+        return (void *)ggml_backend_cpu_siliangem_wait_expert;
+    }
     if (strcmp(name, "ggml_backend_cpu_siliangem_copy_cached_part") == 0) {
         return (void *)ggml_backend_cpu_siliangem_copy_cached_part;
     }
     if (strcmp(name, "ggml_backend_cpu_siliangem_expert_location") == 0) {
         return (void *)ggml_backend_cpu_siliangem_expert_location;
+    }
+    if (strcmp(name, "ggml_backend_cpu_siliangem_arena_span") == 0) {
+        return (void *)ggml_backend_cpu_siliangem_arena_span;
+    }
+    if (strcmp(name, "ggml_backend_cpu_siliangem_expert_slot") == 0) {
+        return (void *)ggml_backend_cpu_siliangem_expert_slot;
+    }
+    if (strcmp(name, "ggml_backend_cpu_siliangem_lease_cached_part") == 0) {
+        return (void *)ggml_backend_cpu_siliangem_lease_cached_part;
+    }
+    if (strcmp(name, "ggml_backend_cpu_siliangem_unlease_slot") == 0) {
+        return (void *)ggml_backend_cpu_siliangem_unlease_slot;
     }
     if (strcmp(name, "ggml_backend_cpu_siliangem_release_cached_expert") == 0) {
         return (void *)ggml_backend_cpu_siliangem_release_cached_expert;

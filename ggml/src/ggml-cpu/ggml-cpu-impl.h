@@ -56,11 +56,22 @@ int ggml_siliangem_cache_state_prepare_experts_async(
         int32_t * order, uint32_t order_capacity,
         uint32_t * n_hits, uint32_t * n_misses, uint32_t * n_active);
 int ggml_siliangem_cache_state_wait_experts(struct ggml_siliangem_cache_state * state);
+// wait only until the pending read of one expert has landed (reads complete in issue order)
+int ggml_siliangem_cache_state_wait_expert(struct ggml_siliangem_cache_state * state, uint32_t layer, uint32_t expert);
 int ggml_siliangem_cache_state_copy_cached_part(
         struct ggml_siliangem_cache_state * state, uint32_t layer, uint32_t expert, uint32_t part,
         void * destination, size_t destination_size);
 int ggml_siliangem_cache_state_expert_location(
         struct ggml_siliangem_cache_state * state, uint32_t layer, uint32_t expert);
+int ggml_siliangem_cache_state_arena_span(
+        struct ggml_siliangem_cache_state * state,
+        void ** base, size_t * slot_bytes, uint32_t * slot_count);
+int ggml_siliangem_cache_state_expert_slot(
+        struct ggml_siliangem_cache_state * state, uint32_t layer, uint32_t expert, uint32_t * slot);
+int ggml_siliangem_cache_state_lease_cached_part(
+        struct ggml_siliangem_cache_state * state, uint32_t layer, uint32_t expert, uint32_t part,
+        const void ** source, size_t * source_size, uint32_t * slot);
+int ggml_siliangem_cache_state_unlease_slot(struct ggml_siliangem_cache_state * state, uint32_t slot);
 int ggml_siliangem_cache_state_release_cached_expert(
         struct ggml_siliangem_cache_state * state, uint32_t layer, uint32_t expert,
         uint32_t * released_slot);

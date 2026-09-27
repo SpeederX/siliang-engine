@@ -182,11 +182,24 @@ extern "C" {
             int32_t * order, uint32_t order_capacity,
             uint32_t * n_hits, uint32_t * n_misses, uint32_t * n_active);
     GGML_BACKEND_API int ggml_backend_cpu_siliangem_wait_experts(ggml_backend_t backend_cpu);
+    // Waits only until the pending read of one expert has landed; later reads stay in flight.
+    GGML_BACKEND_API int ggml_backend_cpu_siliangem_wait_expert(ggml_backend_t backend_cpu, uint32_t layer, uint32_t expert);
     GGML_BACKEND_API int ggml_backend_cpu_siliangem_copy_cached_part(
             ggml_backend_t backend_cpu, uint32_t layer, uint32_t expert, uint32_t part,
             void * destination, size_t destination_size);
     GGML_BACKEND_API int ggml_backend_cpu_siliangem_expert_location(
             ggml_backend_t backend_cpu, uint32_t layer, uint32_t expert);
+    // Direct asynchronous readers of L2 (for example CUDA copies from a registered
+    // arena). The arena span is fixed for the life of the cache. A leased slot is
+    // never evicted or rewritten until every lease on it is returned.
+    GGML_BACKEND_API int ggml_backend_cpu_siliangem_arena_span(
+            ggml_backend_t backend_cpu, void ** base, size_t * slot_bytes, uint32_t * slot_count);
+    GGML_BACKEND_API int ggml_backend_cpu_siliangem_expert_slot(
+            ggml_backend_t backend_cpu, uint32_t layer, uint32_t expert, uint32_t * slot);
+    GGML_BACKEND_API int ggml_backend_cpu_siliangem_lease_cached_part(
+            ggml_backend_t backend_cpu, uint32_t layer, uint32_t expert, uint32_t part,
+            const void ** source, size_t * source_size, uint32_t * slot);
+    GGML_BACKEND_API int ggml_backend_cpu_siliangem_unlease_slot(ggml_backend_t backend_cpu, uint32_t slot);
     GGML_BACKEND_API int ggml_backend_cpu_siliangem_release_cached_expert(
             ggml_backend_t backend_cpu, uint32_t layer, uint32_t expert,
             uint32_t * released_slot);

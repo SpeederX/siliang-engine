@@ -81,6 +81,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cfloat>
+#include <functional>
 #include <initializer_list>
 #include <limits>
 #include <map>
@@ -724,12 +725,36 @@ struct ggml_backend_cuda_buffer_context {
     void * dev_ptr = nullptr;
     std::string name;
 
+#if defined(GGML_USE_VMM)
+    // Siliang VMM buffers: dev_ptr is a reserved address range assembled from mappings.
+    // Owned handles are released on free; memory a mapping borrowed from another buffer
+    // stays alive until its last mapping is gone.
+    size_t vmm_reserved = 0;
+    std::vector<std::pair<CUdeviceptr, size_t>> vmm_mappings;
+    std::function<void()> vmm_on_free;
+#endif // defined(GGML_USE_VMM)
+
     ggml_backend_cuda_buffer_context(int device, void * dev_ptr) :
         device(device), dev_ptr(dev_ptr),
         name(GGML_CUDA_NAME + std::to_string(device)) {
     }
 
     ~ggml_backend_cuda_buffer_context() {
+#if defined(GGML_USE_VMM)
+        if (vmm_reserved != 0) {
+            ggml_cuda_set_device(device);
+            // kernels may still read this range: nothing queued on the device may outlive the unmap
+            (void) cudaDeviceSynchronize();
+            for (const auto & mapping : vmm_mappings) {
+                (void) cuMemUnmap(mapping.first, mapping.second);
+            }
+            (void) cuMemAddressFree(reinterpret_cast<CUdeviceptr>(dev_ptr), vmm_reserved);
+            if (vmm_on_free) {
+                vmm_on_free();
+            }
+            return;
+        }
+#endif // defined(GGML_USE_VMM)
         CUDA_CHECK(cudaFree(dev_ptr));
     }
 };
@@ -896,6 +921,22 @@ enum ggml_backend_cuda_siliang_status ggml_backend_cuda_siliang_event_synchroniz
     return cudaEventSynchronize(value->event) == cudaSuccess
         ? GGML_BACKEND_CUDA_SILIANG_STATUS_SUCCESS
         : GGML_BACKEND_CUDA_SILIANG_STATUS_CUDA_ERROR;
+}
+
+enum ggml_backend_cuda_siliang_status ggml_backend_cuda_siliang_event_query(
+        ggml_backend_cuda_siliang_event_t event) {
+    auto * value = static_cast<ggml_backend_cuda_siliang_event *>(event);
+    if (value == nullptr) {
+        return GGML_BACKEND_CUDA_SILIANG_STATUS_INVALID_ARGUMENT;
+    }
+
+    ggml_cuda_set_device(value->device);
+    const cudaError_t error = cudaEventQuery(value->event);
+    if (error == cudaErrorNotReady) {
+        (void) cudaGetLastError();
+        return GGML_BACKEND_CUDA_SILIANG_STATUS_NOT_READY;
+    }
+    return error == cudaSuccess ? GGML_BACKEND_CUDA_SILIANG_STATUS_SUCCESS : GGML_BACKEND_CUDA_SILIANG_STATUS_CUDA_ERROR;
 }
 
 enum ggml_backend_cuda_siliang_status ggml_backend_cuda_siliang_event_record(
@@ -1390,6 +1431,314 @@ ggml_backend_buffer_type_t ggml_backend_cuda_buffer_type(int device) {
     }
 
     return &ggml_backend_cuda_buffer_types[device];
+}
+
+// Siliang dynamic K: a compute buffer type whose last bytes are separate physical allocations
+// (one per arena part), so the idle end of a large prefill compute buffer can back extra decode
+// K slots through a second mapping. Every graph plan lays tensors out from offset 0, so a graph
+// whose plan ends before the tail never touches it.
+#if defined(GGML_USE_VMM)
+struct ggml_backend_cuda_siliang_tail_buft_context : ggml_backend_cuda_buffer_type_context {
+    std::vector<size_t> tails;
+    // created once and kept for the process: a reallocated compute buffer maps a new head in front of
+    // the same tail memory, so arena slots that alias the tail stay valid and no second tail is needed
+    std::vector<CUmemGenericAllocationHandle> tail_handles;
+    std::mutex mutex;
+    void * live_base = nullptr;
+    size_t live_size = 0;
+    size_t live_head = 0;
+    uint64_t generation = 0;
+};
+
+static bool ggml_cuda_siliang_vmm_map_new(int device, CUdeviceptr at, size_t size, ggml_backend_cuda_buffer_context * owner) {
+    CUmemAllocationProp prop = {};
+    prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
+    prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+    prop.location.id = ggml_cuda_get_physical_device(device);
+    CUmemGenericAllocationHandle handle;
+    if (cuMemCreate(&handle, size, &prop, 0) != CUDA_SUCCESS) {
+        return false;
+    }
+    const bool mapped = cuMemMap(at, size, 0, handle, 0) == CUDA_SUCCESS;
+    // the mapping keeps the allocation alive; the handle is not needed after it
+    (void) cuMemRelease(handle);
+    if (mapped) {
+        owner->vmm_mappings.push_back({at, size});
+    }
+    return mapped;
+}
+
+static bool ggml_cuda_siliang_vmm_map_alias(CUdeviceptr at, size_t size, CUdeviceptr source, ggml_backend_cuda_buffer_context * owner) {
+    CUmemGenericAllocationHandle handle;
+    if (cuMemRetainAllocationHandle(&handle, reinterpret_cast<void *>(source)) != CUDA_SUCCESS) {
+        return false;
+    }
+    const bool mapped = cuMemMap(at, size, 0, handle, 0) == CUDA_SUCCESS;
+    (void) cuMemRelease(handle);
+    if (mapped) {
+        owner->vmm_mappings.push_back({at, size});
+    }
+    return mapped;
+}
+
+static bool ggml_cuda_siliang_vmm_map_handle(CUdeviceptr at, size_t size, CUmemGenericAllocationHandle handle,
+        ggml_backend_cuda_buffer_context * owner) {
+    if (cuMemMap(at, size, 0, handle, 0) != CUDA_SUCCESS) {
+        return false;
+    }
+    owner->vmm_mappings.push_back({at, size});
+    return true;
+}
+
+static bool ggml_cuda_siliang_vmm_set_access(int device, CUdeviceptr base, size_t size) {
+    CUmemAccessDesc access = {};
+    access.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+    access.location.id = ggml_cuda_get_physical_device(device);
+    access.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+    return cuMemSetAccess(base, size, &access, 1) == CUDA_SUCCESS;
+}
+
+// Builds a VMM buffer from consecutive segments: sources[i] == 0 maps fresh memory, otherwise the
+// allocation mapped at sources[i] (which must span exactly sizes[i] bytes) is mapped again.
+static ggml_backend_buffer_t ggml_cuda_siliang_vmm_buffer(
+        ggml_backend_buffer_type_t buft, int device, const uint64_t * sources, const size_t * sizes, size_t count,
+        const CUmemGenericAllocationHandle * handles = nullptr) {
+    const size_t granularity = ggml_cuda_info().devices[device].vmm_granularity;
+    size_t total = 0;
+    for (size_t index = 0; index < count; ++index) {
+        if (granularity == 0 || sizes[index] == 0 || sizes[index] % granularity != 0) {
+            return nullptr;
+        }
+        total += sizes[index];
+    }
+    ggml_cuda_set_device(device);
+    CUdeviceptr base = 0;
+    if (total == 0 || cuMemAddressReserve(&base, total, 0, 0, 0) != CUDA_SUCCESS) {
+        return nullptr;
+    }
+    auto * ctx = new ggml_backend_cuda_buffer_context(device, reinterpret_cast<void *>(base));
+    ctx->vmm_reserved = total;
+    size_t offset = 0;
+    bool ok = true;
+    for (size_t index = 0; ok && index < count; ++index) {
+        const CUdeviceptr at = base + offset;
+        if (handles != nullptr && handles[index] != 0) {
+            ok = ggml_cuda_siliang_vmm_map_handle(at, sizes[index], handles[index], ctx);
+        } else if (sources[index] != 0) {
+            ok = ggml_cuda_siliang_vmm_map_alias(at, sizes[index], static_cast<CUdeviceptr>(sources[index]), ctx);
+        } else {
+            ok = ggml_cuda_siliang_vmm_map_new(device, at, sizes[index], ctx);
+        }
+        offset += sizes[index];
+    }
+    ok = ok && ggml_cuda_siliang_vmm_set_access(device, base, total);
+    if (!ok) {
+        (void) cudaGetLastError();
+        GGML_LOG_ERROR("%s: VMM mapping of %.2f MiB on device %d failed\n", __func__, total / 1024.0 / 1024.0, device);
+        delete ctx;
+        return nullptr;
+    }
+    return ggml_backend_buffer_init(buft, ggml_backend_cuda_buffer_interface, ctx, total);
+}
+
+static ggml_backend_buffer_t ggml_backend_cuda_siliang_tail_buft_alloc_buffer(ggml_backend_buffer_type_t buft, size_t size) {
+    auto * tctx = static_cast<ggml_backend_cuda_siliang_tail_buft_context *>(buft->context);
+    const size_t granularity = ggml_cuda_info().devices[tctx->device].vmm_granularity;
+    size_t tail_total = 0;
+    for (size_t tail : tctx->tails) {
+        tail_total += tail;
+    }
+    // the head holds everything a plan needs below the tail; it is never smaller than one granule
+    size_t total = std::max(size, tail_total + granularity);
+    total = granularity * ((total + granularity - 1) / granularity);
+    std::vector<uint64_t> sources(tctx->tails.size() + 1, 0);
+    std::vector<size_t> sizes;
+    sizes.push_back(total - tail_total);
+    sizes.insert(sizes.end(), tctx->tails.begin(), tctx->tails.end());
+    std::vector<CUmemGenericAllocationHandle> handles(1, 0);
+    {
+        std::lock_guard<std::mutex> lock(tctx->mutex);
+        if (tctx->tail_handles.empty()) {
+            ggml_cuda_set_device(tctx->device);
+            CUmemAllocationProp prop = {};
+            prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
+            prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+            prop.location.id = ggml_cuda_get_physical_device(tctx->device);
+            for (size_t tail : tctx->tails) {
+                CUmemGenericAllocationHandle handle;
+                if (cuMemCreate(&handle, tail, &prop, 0) != CUDA_SUCCESS) {
+                    for (CUmemGenericAllocationHandle created : tctx->tail_handles) {
+                        (void) cuMemRelease(created);
+                    }
+                    tctx->tail_handles.clear();
+                    GGML_LOG_ERROR("%s: creating the %.2f MiB Siliang tail on device %d failed\n", __func__,
+                            tail_total / 1024.0 / 1024.0, tctx->device);
+                    return nullptr;
+                }
+                tctx->tail_handles.push_back(handle);
+            }
+        }
+        handles.insert(handles.end(), tctx->tail_handles.begin(), tctx->tail_handles.end());
+    }
+    ggml_backend_buffer_t buffer = ggml_cuda_siliang_vmm_buffer(
+            buft, tctx->device, sources.data(), sizes.data(), sizes.size(), handles.data());
+    if (buffer == nullptr) {
+        GGML_LOG_ERROR("%s: allocating %.2f MiB with a %.2f MiB Siliang tail on device %d failed\n", __func__,
+                total / 1024.0 / 1024.0, tail_total / 1024.0 / 1024.0, tctx->device);
+        return nullptr;
+    }
+    auto * ctx = static_cast<ggml_backend_cuda_buffer_context *>(buffer->context);
+    std::lock_guard<std::mutex> lock(tctx->mutex);
+    const uint64_t generation = ++tctx->generation;
+    tctx->live_base = ctx->dev_ptr;
+    tctx->live_size = total;
+    tctx->live_head = total - tail_total;
+    ctx->vmm_on_free = [tctx, generation]() {
+        std::lock_guard<std::mutex> free_lock(tctx->mutex);
+        if (tctx->generation == generation) {
+            tctx->live_base = nullptr;
+            tctx->live_size = 0;
+            tctx->live_head = 0;
+        }
+    };
+    return buffer;
+}
+
+static const ggml_backend_buffer_type_i ggml_backend_cuda_siliang_tail_buffer_type_interface = {
+    /* .get_name         = */ ggml_backend_cuda_buffer_type_get_name,
+    /* .alloc_buffer     = */ ggml_backend_cuda_siliang_tail_buft_alloc_buffer,
+    /* .get_alignment    = */ ggml_backend_cuda_buffer_type_get_alignment,
+    /* .get_max_size     = */ NULL, // defaults to SIZE_MAX
+    /* .get_alloc_size   = */ ggml_backend_cuda_buffer_type_get_alloc_size,
+    /* .is_host          = */ NULL,
+};
+#endif // defined(GGML_USE_VMM)
+
+ggml_backend_buffer_type_t ggml_backend_cuda_siliang_tail_buffer_type(ggml_backend_t backend, const size_t * tail_bytes, size_t tail_count) {
+#if defined(GGML_USE_VMM)
+    ggml_backend_cuda_context * context = nullptr;
+    if (tail_bytes == nullptr || tail_count == 0 ||
+        ggml_backend_cuda_siliang_get_context(backend, &context) != GGML_BACKEND_CUDA_SILIANG_STATUS_SUCCESS ||
+        !ggml_cuda_info().devices[context->device].vmm) {
+        return nullptr;
+    }
+    const size_t granularity = ggml_cuda_info().devices[context->device].vmm_granularity;
+    auto * tctx = new ggml_backend_cuda_siliang_tail_buft_context();
+    tctx->device = context->device;
+    tctx->name = GGML_CUDA_NAME + std::to_string(context->device);
+    for (size_t index = 0; index < tail_count; ++index) {
+        if (tail_bytes[index] == 0) {
+            delete tctx;
+            return nullptr;
+        }
+        tctx->tails.push_back(granularity * ((tail_bytes[index] + granularity - 1) / granularity));
+    }
+    // lives for the process: buffers keep a pointer to it and outlive any single context teardown order
+    return new ggml_backend_buffer_type{
+        /* .iface    = */ ggml_backend_cuda_siliang_tail_buffer_type_interface,
+        /* .device   = */ ggml_backend_reg_dev_get(ggml_backend_cuda_reg(), context->device),
+        /* .context  = */ tctx,
+    };
+#else
+    GGML_UNUSED(backend);
+    GGML_UNUSED(tail_bytes);
+    GGML_UNUSED(tail_count);
+    return nullptr;
+#endif // defined(GGML_USE_VMM)
+}
+
+enum ggml_backend_cuda_siliang_status ggml_backend_cuda_siliang_tail_query(
+        ggml_backend_buffer_type_t buft,
+        void ** out_base,
+        size_t * out_size,
+        size_t * out_head,
+        uint64_t * out_generation) {
+#if defined(GGML_USE_VMM)
+    if (buft == nullptr || out_base == nullptr || out_size == nullptr || out_head == nullptr || out_generation == nullptr ||
+        buft->iface.alloc_buffer != ggml_backend_cuda_siliang_tail_buft_alloc_buffer) {
+        return GGML_BACKEND_CUDA_SILIANG_STATUS_INVALID_ARGUMENT;
+    }
+    auto * tctx = static_cast<ggml_backend_cuda_siliang_tail_buft_context *>(buft->context);
+    std::lock_guard<std::mutex> lock(tctx->mutex);
+    if (tctx->live_base == nullptr) {
+        return GGML_BACKEND_CUDA_SILIANG_STATUS_NOT_READY;
+    }
+    *out_base = tctx->live_base;
+    *out_size = tctx->live_size;
+    *out_head = tctx->live_head;
+    *out_generation = tctx->generation;
+    return GGML_BACKEND_CUDA_SILIANG_STATUS_SUCCESS;
+#else
+    GGML_UNUSED(buft);
+    GGML_UNUSED(out_base);
+    GGML_UNUSED(out_size);
+    GGML_UNUSED(out_head);
+    GGML_UNUSED(out_generation);
+    return GGML_BACKEND_CUDA_SILIANG_STATUS_INVALID_ARGUMENT;
+#endif // defined(GGML_USE_VMM)
+}
+
+ggml_backend_buffer_t ggml_backend_cuda_siliang_alias_buffer(
+        ggml_backend_t backend,
+        const uint64_t * sources,
+        const size_t * sizes,
+        size_t count) {
+#if defined(GGML_USE_VMM)
+    ggml_backend_cuda_context * context = nullptr;
+    if (sources == nullptr || sizes == nullptr || count == 0 ||
+        ggml_backend_cuda_siliang_get_context(backend, &context) != GGML_BACKEND_CUDA_SILIANG_STATUS_SUCCESS ||
+        !ggml_cuda_info().devices[context->device].vmm) {
+        return nullptr;
+    }
+    return ggml_cuda_siliang_vmm_buffer(ggml_backend_cuda_buffer_type(context->device), context->device, sources, sizes, count);
+#else
+    GGML_UNUSED(backend);
+    GGML_UNUSED(sources);
+    GGML_UNUSED(sizes);
+    GGML_UNUSED(count);
+    return nullptr;
+#endif // defined(GGML_USE_VMM)
+}
+
+size_t ggml_backend_cuda_siliang_vmm_granularity(ggml_backend_t backend) {
+#if defined(GGML_USE_VMM)
+    ggml_backend_cuda_context * context = nullptr;
+    if (ggml_backend_cuda_siliang_get_context(backend, &context) != GGML_BACKEND_CUDA_SILIANG_STATUS_SUCCESS ||
+        !ggml_cuda_info().devices[context->device].vmm) {
+        return 0;
+    }
+    return ggml_cuda_info().devices[context->device].vmm_granularity;
+#else
+    GGML_UNUSED(backend);
+    return 0;
+#endif // defined(GGML_USE_VMM)
+}
+
+enum ggml_backend_cuda_siliang_status ggml_backend_cuda_siliang_memset_async(
+        ggml_backend_cuda_siliang_stream_t stream,
+        struct ggml_tensor * tensor,
+        size_t offset,
+        size_t size,
+        int value) {
+    auto * stream_value = static_cast<ggml_backend_cuda_siliang_stream *>(stream);
+    if (stream_value == nullptr || tensor == nullptr || tensor->buffer == nullptr) {
+        return GGML_BACKEND_CUDA_SILIANG_STATUS_INVALID_ARGUMENT;
+    }
+    if (!ggml_backend_buffer_is_cuda(tensor->buffer)) {
+        return GGML_BACKEND_CUDA_SILIANG_STATUS_WRONG_BUFFER;
+    }
+    auto * buffer_context = static_cast<ggml_backend_cuda_buffer_context *>(tensor->buffer->context);
+    if (buffer_context == nullptr || buffer_context->device != stream_value->device) {
+        return GGML_BACKEND_CUDA_SILIANG_STATUS_WRONG_DEVICE;
+    }
+    const size_t tensor_size = ggml_nbytes(tensor);
+    if (offset > tensor_size || size > tensor_size - offset) {
+        return GGML_BACKEND_CUDA_SILIANG_STATUS_RANGE;
+    }
+    ggml_cuda_set_device(stream_value->device);
+    return cudaMemsetAsync(static_cast<char *>(tensor->data) + offset, value, size, stream_value->stream) == cudaSuccess
+        ? GGML_BACKEND_CUDA_SILIANG_STATUS_SUCCESS
+        : GGML_BACKEND_CUDA_SILIANG_STATUS_CUDA_ERROR;
 }
 
 // Communication context for multi-GPU AllReduce during tensor parallelism.
@@ -2871,6 +3220,12 @@ static const char * ggml_backend_cuda_get_name(ggml_backend_t backend) {
     return cuda_ctx->name.c_str();
 }
 
+// A plain CUDA buffer type or a Siliang tail buffer type of this device: both hold ordinary device memory.
+static bool ggml_backend_cuda_buft_on_device(ggml_backend_buffer_type_t buft, int device) {
+    return buft != nullptr && ggml_backend_buft_is_cuda(buft) &&
+        static_cast<ggml_backend_cuda_buffer_type_context *>(buft->context)->device == device;
+}
+
 static void ggml_backend_cuda_free(ggml_backend_t backend) {
     ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *)backend->context;
 
@@ -2882,7 +3237,7 @@ static void ggml_backend_cuda_set_tensor_async(ggml_backend_t backend, ggml_tens
     ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *) backend->context;
     ggml_backend_buffer_t buf = tensor->view_src ? tensor->view_src->buffer : tensor->buffer;
 
-    GGML_ASSERT(buf->buft == ggml_backend_cuda_buffer_type(cuda_ctx->device) && "unsupported buffer type");
+    GGML_ASSERT(ggml_backend_cuda_buft_on_device(buf->buft, cuda_ctx->device) && "unsupported buffer type");
 
     CUDA_CHECK(cudaMemcpyAsync((char *) tensor->data + offset, data, size, cudaMemcpyHostToDevice, cuda_ctx->stream()));
 }
@@ -2891,7 +3246,7 @@ static void ggml_backend_cuda_get_tensor_async(ggml_backend_t backend, const ggm
     ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *) backend->context;
     ggml_backend_buffer_t buf = tensor->view_src ? tensor->view_src->buffer : tensor->buffer;
 
-    GGML_ASSERT(buf->buft == ggml_backend_cuda_buffer_type(cuda_ctx->device) && "unsupported buffer type");
+    GGML_ASSERT(ggml_backend_cuda_buft_on_device(buf->buft, cuda_ctx->device) && "unsupported buffer type");
 
     CUDA_CHECK(cudaMemcpyAsync(data, (const char *) tensor->data + offset, size, cudaMemcpyDeviceToHost, cuda_ctx->stream()));
 }
@@ -2901,7 +3256,7 @@ static void ggml_backend_cuda_set_tensor_2d_async(ggml_backend_t backend, struct
     ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *) backend->context;
     ggml_backend_buffer_t buf = tensor->view_src ? tensor->view_src->buffer : tensor->buffer;
 
-    GGML_ASSERT(buf->buft == ggml_backend_cuda_buffer_type(cuda_ctx->device) && "unsupported buffer type");
+    GGML_ASSERT(ggml_backend_cuda_buft_on_device(buf->buft, cuda_ctx->device) && "unsupported buffer type");
 
     CUDA_CHECK(cudaMemcpy2DAsync(
         (char *) tensor->data + offset, stride_tensor, data, stride_data, size, n_copies, cudaMemcpyHostToDevice, cuda_ctx->stream()));
@@ -2912,7 +3267,7 @@ static void ggml_backend_cuda_get_tensor_2d_async(ggml_backend_t backend, const 
     ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *) backend->context;
     ggml_backend_buffer_t buf = tensor->view_src ? tensor->view_src->buffer : tensor->buffer;
 
-    GGML_ASSERT(buf->buft == ggml_backend_cuda_buffer_type(cuda_ctx->device) && "unsupported buffer type");
+    GGML_ASSERT(ggml_backend_cuda_buft_on_device(buf->buft, cuda_ctx->device) && "unsupported buffer type");
 
     CUDA_CHECK(cudaMemcpy2DAsync(
         data, stride_data, (const char *) tensor->data + offset, stride_tensor, size, n_copies, cudaMemcpyDeviceToHost, cuda_ctx->stream()));
@@ -4793,12 +5148,12 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
                 // On integrated GPUs (APUs, e.g. RDNA3.5) the scheduler may place a
                 // node's output on the host-visible buffer, which the compute path
                 // handles. Allow that here, mirroring the src-tensor check below.
-                assert(node->buffer->buft == ggml_backend_cuda_buffer_type(cuda_ctx->device) ||
+                assert(ggml_backend_cuda_buft_on_device(node->buffer->buft, cuda_ctx->device) ||
                        (integrated && ggml_backend_buft_is_cuda_host(node->buffer->buft)));
                 for (int j = 0; j < GGML_MAX_SRC; j++) {
                     if (node->src[j] != nullptr) {
                         assert(node->src[j]->buffer);
-                        assert(node->src[j]->buffer->buft == ggml_backend_cuda_buffer_type(cuda_ctx->device) ||
+                        assert(ggml_backend_cuda_buft_on_device(node->src[j]->buffer->buft, cuda_ctx->device) ||
                                (integrated && ggml_backend_buft_is_cuda_host(node->src[j]->buffer->buft)));
                     }
                 }
@@ -6234,6 +6589,9 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
     if (strcmp(name, "ggml_backend_cuda_siliang_event_synchronize") == 0) {
         return (void *)ggml_backend_cuda_siliang_event_synchronize;
     }
+    if (strcmp(name, "ggml_backend_cuda_siliang_event_query") == 0) {
+        return (void *)ggml_backend_cuda_siliang_event_query;
+    }
     if (strcmp(name, "ggml_backend_cuda_siliang_event_record") == 0) {
         return (void *)ggml_backend_cuda_siliang_event_record;
     }
@@ -6260,6 +6618,21 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
     }
     if (strcmp(name, "ggml_backend_cuda_siliang_host_register_readonly") == 0) {
         return (void *)ggml_backend_cuda_siliang_host_register_readonly;
+    }
+    if (strcmp(name, "ggml_backend_cuda_siliang_tail_buffer_type") == 0) {
+        return (void *)ggml_backend_cuda_siliang_tail_buffer_type;
+    }
+    if (strcmp(name, "ggml_backend_cuda_siliang_tail_query") == 0) {
+        return (void *)ggml_backend_cuda_siliang_tail_query;
+    }
+    if (strcmp(name, "ggml_backend_cuda_siliang_alias_buffer") == 0) {
+        return (void *)ggml_backend_cuda_siliang_alias_buffer;
+    }
+    if (strcmp(name, "ggml_backend_cuda_siliang_vmm_granularity") == 0) {
+        return (void *)ggml_backend_cuda_siliang_vmm_granularity;
+    }
+    if (strcmp(name, "ggml_backend_cuda_siliang_memset_async") == 0) {
+        return (void *)ggml_backend_cuda_siliang_memset_async;
     }
     if (strcmp(name, "ggml_backend_cuda_siliang_host_unregister") == 0) {
         return (void *)ggml_backend_cuda_siliang_host_unregister;

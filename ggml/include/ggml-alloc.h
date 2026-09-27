@@ -72,6 +72,9 @@ GGML_API bool ggml_gallocr_reserve_n(
 GGML_API bool ggml_gallocr_alloc_graph(ggml_gallocr_t galloc, struct ggml_cgraph * graph);
 
 GGML_API size_t ggml_gallocr_get_buffer_size(ggml_gallocr_t galloc, int buffer_id);
+// Bytes from the start of buffer_id that the most recently planned graph uses (the peak of that plan).
+// Every plan lays its tensors out from offset 0, so the buffer beyond this size is untouched by that graph.
+GGML_API size_t ggml_gallocr_get_plan_size(ggml_gallocr_t galloc, int buffer_id);
 
 // Utils
 // Create a buffer and allocate all the tensors in a ggml_context

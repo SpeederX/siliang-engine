@@ -1815,6 +1815,14 @@ int ggml_siliangem_cache_state_wait_experts(struct ggml_siliangem_cache_state * 
     return 1;
 }
 
+int ggml_siliangem_cache_state_wait_expert(struct ggml_siliangem_cache_state * state, uint32_t layer, uint32_t expert) {
+    if (!state) return 0;
+    siliangem_bind_state(state);
+    if (!g_siliangem.ready || layer >= g_siliangem.n_layers || expert >= g_siliangem.n_experts) return 0;
+    siliangem_wait_key((layer << 16) | expert);
+    return 1;
+}
+
 int ggml_siliangem_cache_state_copy_cached_part(
         struct ggml_siliangem_cache_state * state, uint32_t layer, uint32_t expert, uint32_t part,
         void * destination, size_t destination_size) {
@@ -1825,6 +1833,7 @@ int ggml_siliangem_cache_state_copy_cached_part(
     const uint32_t slot = siliangem_lookup(key);
     const uint32_t transient = slot == SILIANGEM_EMPTY ? siliangem_transient_find(key) : SILIANGEM_EMPTY;
     if (slot == SILIANGEM_EMPTY && transient == SILIANGEM_EMPTY) return 0;
+    if (siliangem_read_pending(slot, transient)) return 0;
     uint32_t offset = 0;
     uint32_t bytes = 0;
     if (g_siliangem.em) {
@@ -1842,6 +1851,66 @@ int ggml_siliangem_cache_state_copy_cached_part(
         ? g_siliangem.arena + (size_t) slot * g_siliangem.expert_bytes
         : g_siliangem.transient_arena + (size_t) transient * g_siliangem.expert_bytes;
     memcpy(destination, source + offset, bytes);
+    return 1;
+}
+
+int ggml_siliangem_cache_state_arena_span(
+        struct ggml_siliangem_cache_state * state,
+        void ** base, size_t * slot_bytes, uint32_t * slot_count) {
+    if (!state || !base || !slot_bytes || !slot_count) return 0;
+    siliangem_bind_state(state);
+    if (!g_siliangem.ready || !g_siliangem.arena || g_siliangem.nslots == 0) return 0;
+    *base = g_siliangem.arena;
+    *slot_bytes = g_siliangem.expert_bytes;
+    *slot_count = g_siliangem.nslots;
+    return 1;
+}
+
+int ggml_siliangem_cache_state_expert_slot(
+        struct ggml_siliangem_cache_state * state, uint32_t layer, uint32_t expert, uint32_t * slot) {
+    if (!state || !slot) return 0;
+    siliangem_bind_state(state);
+    if (!g_siliangem.ready || layer >= g_siliangem.n_layers || expert >= g_siliangem.n_experts) return 0;
+    *slot = siliangem_lookup((layer << 16) | expert);
+    return *slot != SILIANGEM_EMPTY;
+}
+
+int ggml_siliangem_cache_state_lease_cached_part(
+        struct ggml_siliangem_cache_state * state, uint32_t layer, uint32_t expert, uint32_t part,
+        const void ** source, size_t * source_size, uint32_t * slot) {
+    if (!state || !source || !source_size || !slot) return 0;
+    siliangem_bind_state(state);
+    if (!g_siliangem.ready || layer >= g_siliangem.n_layers || expert >= g_siliangem.n_experts) return 0;
+    const uint32_t resident = siliangem_lookup((layer << 16) | expert);
+    if (resident == SILIANGEM_EMPTY || g_siliangem.slots[resident].leases == UINT32_MAX) return 0;
+    if (siliangem_read_pending(resident, SILIANGEM_EMPTY)) return 0;
+    uint32_t offset = 0;
+    uint32_t bytes = 0;
+    if (g_siliangem.em) {
+        if (part >= (uint32_t) g_siliangem.em_nparts) return 0;
+        const size_t index = (size_t) layer * (uint32_t) g_siliangem.em_nparts + part;
+        offset = g_siliangem.em_poff[index];
+        bytes = g_siliangem.em_pbytes[index];
+    } else {
+        if (part >= 3) return 0;
+        offset = g_siliangem.part_off[part];
+        bytes = g_siliangem.part_bytes[part];
+    }
+    if (bytes == 0) return 0;
+    // a leased slot is never chosen as an eviction victim, so its bytes stay put
+    // until the asynchronous reader (a CUDA copy) is done and unleases it
+    ++g_siliangem.slots[resident].leases;
+    *source = g_siliangem.arena + (size_t) resident * g_siliangem.expert_bytes + offset;
+    *source_size = bytes;
+    *slot = resident;
+    return 1;
+}
+
+int ggml_siliangem_cache_state_unlease_slot(struct ggml_siliangem_cache_state * state, uint32_t slot) {
+    if (!state) return 0;
+    siliangem_bind_state(state);
+    if (!g_siliangem.ready || slot >= g_siliangem.nslots || g_siliangem.slots[slot].leases == 0) return 0;
+    --g_siliangem.slots[slot].leases;
     return 1;
 }
 
@@ -1867,9 +1936,7 @@ int ggml_siliangem_cache_state_release_cached_expert(
     const uint32_t key = (layer << 16) | expert;
     const uint32_t slot = siliangem_lookup(key);
     if (slot == SILIANGEM_EMPTY || g_siliangem.slots[slot].leases != 0) return 0;
-    for (int pending = 0; pending < g_siliangem.n_pending; ++pending) {
-        if (g_siliangem.pend_slot[pending] == slot) return 0;
-    }
+    if (siliangem_read_pending(slot, SILIANGEM_EMPTY)) return 0;
     g_siliangem.slots[slot].key = SILIANGEM_EMPTY;
     g_siliangem.slots[slot].stamp = 0;
     g_siliangem.slots[slot].frequency = 0;
@@ -2067,11 +2134,42 @@ int ggml_siliangem_cache_state_wait_experts(struct ggml_siliangem_cache_state * 
     return 0;
 }
 
+int ggml_siliangem_cache_state_wait_expert(struct ggml_siliangem_cache_state * state, uint32_t layer, uint32_t expert) {
+    GGML_UNUSED(state); GGML_UNUSED(layer); GGML_UNUSED(expert);
+    return 0;
+}
+
 int ggml_siliangem_cache_state_copy_cached_part(
         struct ggml_siliangem_cache_state * state, uint32_t layer, uint32_t expert, uint32_t part,
         void * destination, size_t destination_size) {
     GGML_UNUSED(state); GGML_UNUSED(layer); GGML_UNUSED(expert); GGML_UNUSED(part);
     GGML_UNUSED(destination); GGML_UNUSED(destination_size);
+    return 0;
+}
+
+int ggml_siliangem_cache_state_arena_span(
+        struct ggml_siliangem_cache_state * state,
+        void ** base, size_t * slot_bytes, uint32_t * slot_count) {
+    GGML_UNUSED(state); GGML_UNUSED(base); GGML_UNUSED(slot_bytes); GGML_UNUSED(slot_count);
+    return 0;
+}
+
+int ggml_siliangem_cache_state_expert_slot(
+        struct ggml_siliangem_cache_state * state, uint32_t layer, uint32_t expert, uint32_t * slot) {
+    GGML_UNUSED(state); GGML_UNUSED(layer); GGML_UNUSED(expert); GGML_UNUSED(slot);
+    return 0;
+}
+
+int ggml_siliangem_cache_state_lease_cached_part(
+        struct ggml_siliangem_cache_state * state, uint32_t layer, uint32_t expert, uint32_t part,
+        const void ** source, size_t * source_size, uint32_t * slot) {
+    GGML_UNUSED(state); GGML_UNUSED(layer); GGML_UNUSED(expert); GGML_UNUSED(part);
+    GGML_UNUSED(source); GGML_UNUSED(source_size); GGML_UNUSED(slot);
+    return 0;
+}
+
+int ggml_siliangem_cache_state_unlease_slot(struct ggml_siliangem_cache_state * state, uint32_t slot) {
+    GGML_UNUSED(state); GGML_UNUSED(slot);
     return 0;
 }
 
@@ -2216,7 +2314,13 @@ static void ggml_compute_forward_mul_mat_id(
             for (int id = 0; id < n_ids; ++id) {
                 const int32_t i02 = *(const int32_t *) ((const char *) ids->data + iid1*ids->nb[1] + id*ids->nb[0]);
 
-                assert(i02 >= 0 && i02 < n_as);
+                if (i02 < 0) {
+                    // Siliang hybrid decode: this route slot runs on another backend; its row is zero here
+                    memset((char *) dst->data + id*nb1 + iid1*nb2, 0, ne0*sizeof(float));
+                    continue;
+                }
+
+                assert(i02 < n_as);
 
                 MMID_MATRIX_ROW(i02, matrix_row_counts[i02]) = (struct mmid_row_mapping) {id, iid1};
                 matrix_row_counts[i02] += 1;
@@ -2308,6 +2412,9 @@ static void ggml_compute_forward_mul_mat_id(
         // correctness failure, never permission to dereference the proxy.
         const char * cached = siliangem_state
                 ? siliangem_ptr(src0->name, cur_a, (size_t) nb02, ith, managed_only) : NULL;
+        if (!cached && siliangem_state && ith == 0 && g_siliangem.ready) {
+            ++g_siliangem.ptr_declines;
+        }
         if (cached) {
             src0_cur = cached;
         } else if (managed_only) {
@@ -2319,6 +2426,11 @@ static void ggml_compute_forward_mul_mat_id(
         if (src0_cur == NULL) {
             // IQP decodes from src0->data, so use it only for model-resident expert bytes
             if (iqp && ggml_cpu_iqp_mul_mat_id_min_batch(cne1)) {
+#if defined(_WIN32)
+                if (siliangem_state && ith == 0 && g_siliangem.ready) {
+                    ++g_siliangem.fallback_iqp_experts;
+                }
+#endif
                 ggml_compute_forward_mul_mat_id_iqp(params, dst, cur_a, cne1, (const int32_t *) &MMID_MATRIX_ROW(cur_a, 0),
                                                     iqp_panels);
 

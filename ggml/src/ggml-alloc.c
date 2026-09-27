@@ -1115,6 +1115,17 @@ size_t ggml_gallocr_get_buffer_size(ggml_gallocr_t galloc, int buffer_id) {
     return ggml_vbuffer_size(galloc->buffers[buffer_id]);
 }
 
+size_t ggml_gallocr_get_plan_size(ggml_gallocr_t galloc, int buffer_id) {
+    GGML_ASSERT(buffer_id >= 0 && buffer_id < galloc->n_buffers);
+
+    struct ggml_dyn_tallocr * talloc = galloc->buf_tallocs[buffer_id];
+    size_t size = 0;
+    for (int chunk = 0; talloc != NULL && chunk < talloc->n_chunks; chunk++) {
+        size += ggml_dyn_tallocr_max_size(talloc, chunk);
+    }
+    return size;
+}
+
 // utils
 
 static void free_buffers(ggml_backend_buffer_t ** buffers, const size_t * n_buffers) {

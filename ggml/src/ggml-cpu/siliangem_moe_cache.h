@@ -142,6 +142,9 @@ typedef struct {
     uint32_t   pend_slot[SILIANGEM_MAX_BATCH];
     uint32_t   pend_transient[SILIANGEM_MAX_BATCH];
     int        n_pending;
+    /* reads [0, pend_done) have landed; siliangem_wait_key completes them in issue order so the
+     * caller can copy an expert while later reads are still in flight */
+    int        pend_done;
 
     /* Distribution of cne1 -- how many tokens routed to each expert.
      * llama.cpp takes a fast path when cne1 == 1:
@@ -171,6 +174,10 @@ typedef struct {
     uint64_t wait_ns;
     uint64_t fetch_ns;
     uint64_t wait_calls;
+    /* expert pointer requests the cache could not serve (non-managed tensors fall back
+     * to model-mapped bytes, possibly through a different CPU kernel) */
+    uint64_t ptr_declines;
+    uint64_t fallback_iqp_experts;
 
     /* Sub-split of fetch_ns. Several mechanisms can contribute to submission
      * cost, so record them separately before optimizing:
@@ -577,6 +584,8 @@ static void siliangem_report(const char *tag) {
             (unsigned long long) g_siliangem.expert_hits,
             (unsigned long long) g_siliangem.expert_requests,
             (double) g_siliangem.bytes_read / (1024.0 * 1024.0 * 1024.0));
+    fprintf(stderr, "siliangem[%s]: pointer declines %llu, model-mapped IQP fallback experts %llu\n", tag,
+            (unsigned long long) g_siliangem.ptr_declines, (unsigned long long) g_siliangem.fallback_iqp_experts);
 
     if (g_siliangem.mem_report) {
         /* Residency, every report. Throughput numbers taken while the file
@@ -980,7 +989,7 @@ static void siliangem_shutdown(void) {
     if (g_siliangem.verbose && (g_siliangem.hits + g_siliangem.misses)) {
         siliangem_report("final");
     }
-    for (int i = 0; i < g_siliangem.n_pending; ++i) {
+    for (int i = g_siliangem.pend_done; i < g_siliangem.n_pending; ++i) {
         DWORD ignored = 0;
         if (g_siliangem.file && g_siliangem.file != INVALID_HANDLE_VALUE) {
             GetOverlappedResult(g_siliangem.file, &g_siliangem.pend_ov[i], &ignored, TRUE);
@@ -1934,24 +1943,65 @@ static int siliangem_prepare_async(const char *name, const int64_t *counts, int 
     return 1;
 }
 
+/* Complete pending read i: a failed read poisons its key, so the expert is fetched again. */
+static void siliangem_complete_read(int i) {
+    DWORD got = 0;
+    if (GetOverlappedResult(g_siliangem.file, &g_siliangem.pend_ov[i], &got, TRUE)) {
+        g_siliangem.bytes_read += got;
+    } else if (g_siliangem.pend_transient[i] != SILIANGEM_EMPTY) {
+        g_siliangem.transient_keys[g_siliangem.pend_transient[i]] = SILIANGEM_EMPTY;
+    } else {
+        g_siliangem.slots[g_siliangem.pend_slot[i]].key = SILIANGEM_EMPTY;
+        siliangem_table_rebuild();
+    }
+    CloseHandle(g_siliangem.pend_ev[i]);
+}
+
 /* Block until every read issued by siliangem_prepare_async has landed. */
 static void siliangem_wait(void) {
     if (g_siliangem.n_pending == 0) return;
     int64_t t_start = siliangem_now_ns();
     g_siliangem.wait_calls++;
-    for (int i = 0; i < g_siliangem.n_pending; i++) {
-        DWORD got = 0;
-        if (GetOverlappedResult(g_siliangem.file, &g_siliangem.pend_ov[i], &got, TRUE)) {
-            g_siliangem.bytes_read += got;
-        } else if (g_siliangem.pend_transient[i] != SILIANGEM_EMPTY) {
-            g_siliangem.transient_keys[g_siliangem.pend_transient[i]] = SILIANGEM_EMPTY;
-        } else {
-            g_siliangem.slots[g_siliangem.pend_slot[i]].key = SILIANGEM_EMPTY;
-            siliangem_table_rebuild();
-        }
-        CloseHandle(g_siliangem.pend_ev[i]);
+    for (int i = g_siliangem.pend_done; i < g_siliangem.n_pending; i++) {
+        siliangem_complete_read(i);
     }
     g_siliangem.n_pending = 0;
+    g_siliangem.pend_done = 0;
+    g_siliangem.wait_ns += (uint64_t)(siliangem_now_ns() - t_start);
+}
+
+/* True while the read that fills this slot (or transient entry) has not been completed. */
+static int siliangem_read_pending(uint32_t slot, uint32_t transient) {
+    for (int i = g_siliangem.pend_done; i < g_siliangem.n_pending; ++i) {
+        if (transient != SILIANGEM_EMPTY ? g_siliangem.pend_transient[i] == transient
+                                         : (g_siliangem.pend_transient[i] == SILIANGEM_EMPTY &&
+                                            g_siliangem.pend_slot[i] == slot)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Complete pending reads in issue order up to the one that fetches `key`, leaving later reads in
+ * flight. Returns immediately when no pending read fetches `key`. */
+static void siliangem_wait_key(uint32_t key) {
+    int target = -1;
+    for (int i = g_siliangem.pend_done; i < g_siliangem.n_pending && target < 0; ++i) {
+        const uint32_t fetched = g_siliangem.pend_transient[i] != SILIANGEM_EMPTY
+            ? g_siliangem.transient_keys[g_siliangem.pend_transient[i]]
+            : g_siliangem.slots[g_siliangem.pend_slot[i]].key;
+        if (fetched == key) target = i;
+    }
+    if (target < 0) return;
+    int64_t t_start = siliangem_now_ns();
+    for (int i = g_siliangem.pend_done; i <= target; ++i) {
+        siliangem_complete_read(i);
+    }
+    g_siliangem.pend_done = target + 1;
+    if (g_siliangem.pend_done == g_siliangem.n_pending) {
+        g_siliangem.n_pending = 0;
+        g_siliangem.pend_done = 0;
+    }
     g_siliangem.wait_ns += (uint64_t)(siliangem_now_ns() - t_start);
 }
 
