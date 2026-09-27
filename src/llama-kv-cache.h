@@ -461,4 +461,11 @@ private:
     // a heuristic, to avoid attending the full cache if it is not yet utilized
     // as the cache gets filled, the benefit from this heuristic disappears
     int32_t n_kv;
+
+    // layer-major prefill: n_kv as it was when each ubatch was placed, replayed per layer
+    std::vector<int32_t> n_kv_by_ubatch;
+    bool replay = false;
+
+public:
+    bool seek_replay(size_t i) override;
 };

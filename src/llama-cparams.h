@@ -44,6 +44,8 @@ struct llama_siliang_moe_arena_state {
     int32_t top_k = 0;
     uint32_t prefill_ubatch_cap = 1;
     bool prefill_enabled = false;
+    // decode routes may carry LLAMA_SILIANG_MOE_ARENA_CPU_ROUTE; the graph splits them to CPU
+    bool hybrid_decode = false;
     llama_siliang_moe_arena_slot_mapper mapper = nullptr;
     llama_siliang_moe_arena_failure_query failure_query = nullptr;
     llama_siliang_moe_arena_compute_wait_hook compute_wait_hook = nullptr;
@@ -120,6 +122,12 @@ struct llama_cparams {
     llama_siliang_moe_arena_state * siliang_moe_arena_state;
     uint64_t siliang_moe_arena_generation;
     bool siliang_moe_arena_enabled;
+
+    // layer-major prefill: build layers [begin, end) only; end < 0 means every layer. With begin > 0 the
+    // residual stream comes from siliang_hidden_in (one ubatch); with end < n_layer the graph returns it.
+    int32_t siliang_layer_begin = 0;
+    int32_t siliang_layer_end = -1;
+    const float * siliang_hidden_in = nullptr;
 
     std::array<const void *, 43> siliang_ds4_front_slab_layers;
     uint64_t siliang_ds4_front_slab_generation;

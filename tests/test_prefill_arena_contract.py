@@ -33,7 +33,9 @@ class PrefillArenaContractTests(unittest.TestCase):
         self.assertIn("ggml_map_custom1(", LLAMA_GRAPH)
         self.assertIn("ctx0, logical_dispatch_experts, &moe_arena->map_calls_by_layer[il]", LLAMA_GRAPH)
         self.assertNotIn("natural_weights", LLAMA_GRAPH)
-        self.assertNotIn("ggml_map_custom2(", LLAMA_GRAPH)
+        # the slot mapper sees route IDs only; the one binary custom op builds hybrid CPU ids from IDs
+        self.assertEqual(LLAMA_GRAPH.count("ggml_map_custom2("), 1)
+        self.assertIn("ctx0, logical_dispatch_experts, physical_ids, siliang_moe_arena_hybrid_cpu_ids_custom", LLAMA_GRAPH)
         self.assertIn("experts = ggml_mul(ctx0, experts, weights)", LLAMA_GRAPH)
         self.assertIn("n_tokens == n_tokens_at_build", LLAMA_GRAPH)
         self.assertIn("n_tokens <= static_cast<int64_t>(state->prefill_ubatch_cap)", LLAMA_GRAPH)
@@ -46,7 +48,10 @@ class PrefillArenaContractTests(unittest.TestCase):
         self.assertIn("build_route_union", MOE_RUNTIME)
         self.assertIn("enter_phase(route_phase::prefill)", MOE_RUNTIME)
         self.assertIn("record_staging_completion()", MOE_RUNTIME)
-        self.assertIn("copy_expert(\n                        layer, route.experts[union_index], physical_slot, lane, true)", MOE_RUNTIME)
+        # exclusive L2 release unless --expert-cache-prefill-l2-retain keeps the expert in L2
+        # exclusive unless retained; an expert in pinned L2 goes straight to K, its lease held until the wave's event
+        self.assertIn("copy_expert(\n                        layer, route.experts[union_index], physical_slot, lane, "
+                      "!params.prefill_l2_retain, true)", MOE_RUNTIME)
         self.assertIn('"exclusive L2-to-K release failed"', MOE_RUNTIME)
         self.assertIn("++metrics.l2_release_failures", MOE_RUNTIME)
         self.assertIn("++metrics.l2_releases", MOE_RUNTIME)

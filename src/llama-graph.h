@@ -141,6 +141,21 @@ public:
     const int64_t n_embd = 0;
 };
 
+// layer-major prefill: the residual stream of one ubatch entering a layer range
+class llm_graph_input_siliang_hidden : public llm_graph_input_i {
+public:
+    llm_graph_input_siliang_hidden(const float * data) : data(data) {}
+    virtual ~llm_graph_input_siliang_hidden() = default;
+
+    void set_input(const llama_ubatch * ubatch) override;
+
+    bool can_reuse(const llm_graph_params & params) override;
+
+    ggml_tensor * hidden = nullptr; // F32 [n_embd, hc, n_tokens]
+
+    const float * data = nullptr;
+};
+
 // similar to llm_graph_input_embd but with an additional hidden state input
 class llm_graph_input_embd_h : public llm_graph_input_i {
 public:
@@ -899,6 +914,8 @@ struct llm_graph_params {
             cparams.siliang_moe_arena_enabled == other.cparams.siliang_moe_arena_enabled &&
             cparams.siliang_moe_arena_state == other.cparams.siliang_moe_arena_state &&
             cparams.siliang_moe_arena_generation == other.cparams.siliang_moe_arena_generation &&
+            cparams.siliang_layer_begin     == other.cparams.siliang_layer_begin     &&
+            cparams.siliang_layer_end       == other.cparams.siliang_layer_end       &&
             arch  == other.arch  &&
             gtype == other.gtype &&
             cvec  == other.cvec  &&
@@ -959,6 +976,7 @@ public:
     ggml_tensor * t_embd        = nullptr;
     ggml_tensor * t_embd_pooled = nullptr;
     ggml_tensor * t_h_nextn     = nullptr; // [n_embd, n_outputs] hidden state before final output norm
+    ggml_tensor * t_siliang_hidden = nullptr; // layer-major prefill: residual stream leaving the layer range
 
     std::vector<ggml_tensor *> t_layer_inp;
 
@@ -1187,6 +1205,8 @@ struct llm_graph_context {
     //
 
     ggml_tensor * build_inp_embd(ggml_tensor * tok_embd) const;
+    // layer-major prefill: the residual stream of the ubatch as a graph input, [ne0, ne1, n_tokens]
+    ggml_tensor * build_inp_siliang_hidden(int64_t ne0, int64_t ne1) const;
     ggml_tensor * build_inp_pos() const;
     ggml_tensor * build_inp_attn_scale() const;
     ggml_tensor * build_inp_out_ids() const;

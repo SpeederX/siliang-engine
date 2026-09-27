@@ -130,6 +130,7 @@ public:
 
     bool next()  override;
     bool apply() override;
+    bool seek_replay(size_t i) override;
 
     //
     // llama_memory_hybrid_idx_context specific API

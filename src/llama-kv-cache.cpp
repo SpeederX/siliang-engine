@@ -2724,9 +2724,34 @@ bool llama_kv_cache_context::apply() {
         return true;
     }
 
+    if (replay) {
+        // the cells were placed on the first pass; later ubatches may have grown n_kv since then
+        n_kv = n_kv_by_ubatch[i_cur];
+        return true;
+    }
+
     kv->apply_ubatch(sinfos[i_cur], ubatches[i_cur]);
     n_kv = kv->get_n_kv(sinfos[i_cur]);
 
+    if (n_kv_by_ubatch.size() != ubatches.size()) {
+        n_kv_by_ubatch.assign(ubatches.size(), -1);
+    }
+    n_kv_by_ubatch[i_cur] = n_kv;
+
+    return true;
+}
+
+bool llama_kv_cache_context::seek_replay(size_t i) {
+    if (ubatches.empty() || i >= ubatches.size() || n_kv_by_ubatch.size() != ubatches.size()) {
+        return false;
+    }
+    for (int32_t value : n_kv_by_ubatch) {
+        if (value < 0) {
+            return false;
+        }
+    }
+    i_cur = i;
+    replay = true;
     return true;
 }
 

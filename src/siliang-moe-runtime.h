@@ -333,6 +333,125 @@ inline bool wtinylfu_record_hit(
 
 } // namespace siliang_moe_policy
 
+namespace siliang_moe_hybrid {
+
+// Per-expert costs in microseconds for one decode route of one layer.
+struct cost_coefficients {
+    double cpu_l2_us = 0.0;       // CPU compute of an L2-resident expert
+    double cpu_miss_us = 0.0;     // CPU compute of an uncached expert, read overlapped with resident compute
+    double stage_l2_us = 0.0;     // host staging of an L2-resident expert through P (memcpy + submit)
+    double stage_pinned_us = 0.0; // host submission of an expert copied straight from registered L2
+    double stage_miss_us = 0.0;   // host staging of an uncached expert (blocking read + memcpy + submit)
+    double gpu_us = 0.0;          // H2D into R or K plus GPU compute of a staged expert
+};
+
+// Route candidates by class; g crosses to GPU regardless (predicted K admissions).
+struct route_classes {
+    uint32_t pinned = 0; // L2-resident in the registered part of the arena
+    uint32_t l2 = 0;     // L2-resident elsewhere
+    uint32_t miss = 0;   // not in L2
+    uint32_t g = 0;
+};
+
+struct cpu_share {
+    uint8_t pinned = 0;
+    uint8_t l2 = 0;
+    uint8_t miss = 0;
+};
+
+// Candidates that stay on GPU are staged on the host before either side
+// computes. CPU compute then overlaps the H2D copies on the private copy
+// stream; the short GPU compute that follows is folded into gpu_us. K hits are
+// resident and cost nothing here.
+inline double predicted_us(const cost_coefficients & cost, const route_classes & route, const cpu_share & cpu) {
+    const uint32_t gpu_pinned = route.pinned - cpu.pinned;
+    const uint32_t gpu_l2 = route.l2 - cpu.l2;
+    const uint32_t gpu_miss = route.miss - cpu.miss;
+    const double staged = gpu_pinned * cost.stage_pinned_us + gpu_l2 * cost.stage_l2_us + gpu_miss * cost.stage_miss_us;
+    const double cpu_us = (cpu.pinned + cpu.l2) * cost.cpu_l2_us + cpu.miss * cost.cpu_miss_us;
+    const double gpu = (static_cast<double>(gpu_pinned) + gpu_l2 + gpu_miss + route.g) * cost.gpu_us;
+    return staged + std::max(cpu_us, gpu);
+}
+
+inline bool valid(const cost_coefficients & cost) {
+    for (double value : {cost.cpu_l2_us, cost.cpu_miss_us, cost.stage_l2_us, cost.stage_pinned_us,
+                         cost.stage_miss_us, cost.gpu_us}) {
+        if (!(value > 0.0) || value > 1e9) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Decision matrix indexed by the route classes, with pinned + l2 + miss + g
+// <= top_k. Ties keep more experts on GPU, which is the numerically unchanged
+// path.
+class cost_table {
+public:
+    bool build(const cost_coefficients & cost, uint32_t top_k) {
+        entries.clear();
+        side = 0;
+        if (!valid(cost) || top_k == 0 || top_k > 32) {
+            return false;
+        }
+        side = top_k + 1;
+        entries.assign(static_cast<size_t>(side) * side * side * side, {});
+        route_classes route;
+        for (route.pinned = 0; route.pinned <= top_k; ++route.pinned) {
+            for (route.l2 = 0; route.pinned + route.l2 <= top_k; ++route.l2) {
+                for (route.miss = 0; route.pinned + route.l2 + route.miss <= top_k; ++route.miss) {
+                    for (route.g = 0; route.pinned + route.l2 + route.miss + route.g <= top_k; ++route.g) {
+                        entries[index(route)] = best_share(cost, route);
+                    }
+                }
+            }
+        }
+        return true;
+    }
+
+    bool ready() const {
+        return side != 0;
+    }
+
+    cpu_share lookup(const route_classes & route) const {
+        if (side == 0 || route.pinned + route.l2 + route.miss + route.g >= side) {
+            return {};
+        }
+        return entries[index(route)];
+    }
+
+private:
+    static cpu_share best_share(const cost_coefficients & cost, const route_classes & route) {
+        cpu_share best;
+        double best_us = predicted_us(cost, route, best);
+        cpu_share share;
+        for (uint32_t x = 0; x <= route.pinned; ++x) {
+            for (uint32_t y = 0; y <= route.l2; ++y) {
+                for (uint32_t z = 0; z <= route.miss; ++z) {
+                    share.pinned = static_cast<uint8_t>(x);
+                    share.l2 = static_cast<uint8_t>(y);
+                    share.miss = static_cast<uint8_t>(z);
+                    const double us = predicted_us(cost, route, share);
+                    if (us < best_us) {
+                        best_us = us;
+                        best = share;
+                    }
+                }
+            }
+        }
+        return best;
+    }
+
+    size_t index(const route_classes & route) const {
+        return ((static_cast<size_t>(route.pinned) * side + route.l2) * side + route.miss) * side + route.g;
+    }
+
+    uint32_t side = 0;
+    std::vector<cpu_share> entries;
+};
+
+} // namespace siliang_moe_hybrid
+
 struct siliang_moe_runtime;
 
 LLAMA_API struct siliang_moe_runtime * siliang_moe_runtime_create(

@@ -961,6 +961,38 @@ static bool common_params_parse_ex(int argc, char ** argv, common_params_context
         throw std::invalid_argument(
             "error: expert-cache R, P, roll, prefill, route stats, admit-k-cold, and demote-k-hot require --expert-cache-l1-k > 0\n");
     }
+    if ((expert_cache.hybrid || !expert_cache.hybrid_cost.empty()) &&
+        (expert_cache.l1_k == 0 || expert_cache.l2_mib == 0)) {
+        throw std::invalid_argument(
+            "error: --expert-cache-hybrid and --expert-cache-hybrid-cost require --expert-cache-l1-k > 0 and "
+            "--expert-cache-l2-mib > 0; CPU experts are served by L2\n");
+    }
+    if (expert_cache.l2_pinned_mib != 0 &&
+        (expert_cache.l1_k == 0 || expert_cache.l2_mib == 0 || expert_cache.l2_pinned_mib > expert_cache.l2_mib)) {
+        throw std::invalid_argument(
+            "error: --expert-cache-l2-pinned-mib requires --expert-cache-l1-k > 0 and at most --expert-cache-l2-mib\n");
+    }
+    if (expert_cache.prefill_l2_retain && (!expert_cache.prefill || expert_cache.l2_mib == 0)) {
+        throw std::invalid_argument(
+            "error: --expert-cache-prefill-l2-retain requires --expert-cache-prefill and --expert-cache-l2-mib > 0\n");
+    }
+    if (expert_cache.prefill_layer_major && !expert_cache.prefill) {
+        throw std::invalid_argument("error: --expert-cache-prefill-layer-major requires --expert-cache-prefill\n");
+    }
+    if (expert_cache.l1_k_decode != 0 &&
+        (expert_cache.l1_k == 0 || expert_cache.l1_k_decode <= expert_cache.l1_k || !expert_cache.prefill)) {
+        throw std::invalid_argument(
+            "error: --expert-cache-l1-k-decode requires --expert-cache-prefill and a value above --expert-cache-l1-k\n");
+    }
+    if (expert_cache.staging_threads != 1 && expert_cache.l1_k == 0) {
+        throw std::invalid_argument("error: --expert-cache-staging-threads requires --expert-cache-l1-k > 0\n");
+    }
+    if (expert_cache.verify && expert_cache.l1_k == 0) {
+        throw std::invalid_argument("error: --expert-cache-verify requires --expert-cache-l1-k > 0\n");
+    }
+    if (!expert_cache.hybrid_cost.empty() && !expert_cache.hybrid) {
+        throw std::invalid_argument("error: --expert-cache-hybrid-cost requires --expert-cache-hybrid\n");
+    }
     if (expert_cache.l1_k > 0 && expert_cache.l1_policy == COMMON_EXPERT_CACHE_POLICY_LRU) {
         throw std::invalid_argument(
             "error: L1 LRU is retired: global K scan-thrashes when routed reuse distance exceeds K; use slfu, lfu, or wtinylfu\n");
@@ -1833,6 +1865,15 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.checkpoint_min_step = value;
         }
     ).set_env("LLAMA_ARG_CHECKPOINT_MIN_SPACING_NT").set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--no-checkpoint-ubatch"},
+        "do not split the prompt n_ubatch + 4 tokens before its end for an extra context checkpoint; the checkpoint "
+        "4 tokens before the end and the ones at user messages remain. Each split is one more pass over the routed "
+        "experts with a streamed expert cache (default: split)",
+        [](common_params & params) {
+            params.checkpoint_ubatch = false;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
         {"-cram", "--cache-ram"}, "N",
         string_format("set the maximum cache size in MiB (default: %d, -1 - no limit, 0 - disable)"
@@ -2859,6 +2900,104 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, const std::string & value) {
             params.expert_cache.l1_k = static_cast<uint32_t>(parse_unsigned_decimal(
                 value, std::numeric_limits<uint32_t>::max()));
+            params.expert_cache.tier_configured = true;
+        }
+    ).set_examples({LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--expert-cache-prefill-layer-major"},
+        "experimental, qwen4exp: a prompt longer than one ubatch runs every ubatch through a layer before the next "
+        "layer starts, so each layer's routed experts are loaded once per prompt instead of once per ubatch; the "
+        "residual stream of the prompt is held in host memory. Requires --expert-cache-prefill (default: disabled)",
+        [](common_params & params) {
+            params.expert_cache.prefill_layer_major = true;
+            params.expert_cache.tier_configured = true;
+        }
+    ).set_examples({LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--expert-cache-l1-k-decode"}, "N",
+        "total K slots during decode, above --expert-cache-l1-k: the extra slots live in the end of the CUDA "
+        "compute buffer that a large prefill ubatch needs and a decode graph leaves idle. Bounded prefill evicts "
+        "them and uses the --expert-cache-l1-k slots only. Requires --expert-cache-prefill, one expert schema, "
+        "and CUDA VMM (default: 0, same as --expert-cache-l1-k)",
+        [](common_params & params, const std::string & value) {
+            params.expert_cache.l1_k_decode = static_cast<uint32_t>(parse_unsigned_decimal(
+                value, std::numeric_limits<uint32_t>::max()));
+            params.expert_cache.tier_configured = true;
+        }
+    ).set_examples({LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--expert-cache-hybrid"},
+        "decode only: experts the L1 policy would not admit to K may run on CPU from L2 instead of "
+        "crossing P and R; a cost table chooses per route (experimental, default: disabled)",
+        [](common_params & params) {
+            params.expert_cache.hybrid = true;
+            params.expert_cache.tier_configured = true;
+        }
+    ).set_examples({LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--expert-cache-hybrid-cost"}, "CPU_L2,CPU_MISS,STAGE_L2,STAGE_PINNED,STAGE_MISS,GPU",
+        "per-expert cost table coefficients in microseconds for --expert-cache-hybrid: CPU compute of an L2 hit, "
+        "CPU compute of an uncached expert, host staging of an L2 hit through P, host submission of a pinned L2 hit, "
+        "host staging of an uncached expert, and H2D plus GPU compute of a staged expert "
+        "(default: 350,650,400,40,900,170)",
+        [](common_params & params, const std::string & value) {
+            std::vector<float> cost;
+            for (const std::string & item : string_split<std::string>(value, ',')) {
+                size_t used = 0;
+                const float coefficient = std::stof(item, &used);
+                if (used != item.size() || !std::isfinite(coefficient) || coefficient <= 0.0f) {
+                    throw std::invalid_argument("expected a finite positive coefficient");
+                }
+                cost.push_back(coefficient);
+            }
+            if (cost.size() != 6) {
+                throw std::invalid_argument("expected six comma-separated coefficients");
+            }
+            params.expert_cache.hybrid_cost = std::move(cost);
+            params.expert_cache.tier_configured = true;
+        }
+    ).set_examples({LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--expert-cache-prefill-l2-retain"},
+        "bounded prefill keeps each expert it copies into K in L2 as well, instead of releasing it; K is "
+        "transient during prefill, so the next ubatch can read the expert from RAM instead of disk. Pair it "
+        "with the slfu L2 policy so one prefill pass does not flush L2 (default: disabled)",
+        [](common_params & params) {
+            params.expert_cache.prefill_l2_retain = true;
+            params.expert_cache.tier_configured = true;
+        }
+    ).set_examples({LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--expert-cache-staging-threads"}, "N",
+        "host threads, including the mapping thread, that copy each expert from L2 into the pinned P ring before "
+        "its H2D copy; requires K > 0 (1-16, default: 1)",
+        [](common_params & params, const std::string & value) {
+            const uint64_t threads = parse_unsigned_decimal(value, 16);
+            if (threads == 0) {
+                throw std::invalid_argument("expected at least one staging thread");
+            }
+            params.expert_cache.staging_threads = static_cast<uint32_t>(threads);
+            params.expert_cache.tier_configured = true;
+        }
+    ).set_examples({LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--expert-cache-verify"},
+        "diagnostic, slow: after each decode route, sample the device bytes of every routed K/R slot and compare "
+        "them with the model bytes of the expected expert; mismatches are logged with the expert whose bytes the "
+        "slot actually holds. Requires K > 0 and model-mapped experts (default: disabled)",
+        [](common_params & params) {
+            params.expert_cache.verify = true;
+            params.expert_cache.tier_configured = true;
+        }
+    ).set_examples({LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--expert-cache-l2-pinned-mib"}, "N",
+        "leading MiB of the L2 arena registered with CUDA so decode and bounded-prefill copies of experts "
+        "resident there go "
+        "straight to K or R without the P memcpy; startup fails if CUDA refuses the registration. "
+        "Requires K > 0 and L2 >= N (experimental, default: 0)",
+        [](common_params & params, const std::string & value) {
+            params.expert_cache.l2_pinned_mib = parse_unsigned_decimal(value, 1ull << 30);
             params.expert_cache.tier_configured = true;
         }
     ).set_examples({LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER}));

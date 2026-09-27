@@ -64,6 +64,11 @@ struct llama_memory_context_i {
 
     // get the status of the memory context - used for error handling and checking if any updates would be applied
     virtual llama_memory_status get_status() const = 0;
+
+    // Layer-major prefill: once every ubatch has been applied in order, return to ubatch i. From then on
+    // apply() replays the placement recorded for each ubatch instead of placing it again (placing twice
+    // would, for example, skip the state reset of a new recurrent sequence). false when unsupported.
+    virtual bool seek_replay(size_t i) { (void) i; return false; }
 };
 
 using llama_memory_context_ptr = std::unique_ptr<llama_memory_context_i>;

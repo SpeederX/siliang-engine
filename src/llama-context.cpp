@@ -9,17 +9,22 @@
 #include "llama-batch.h"
 #include "llama-io.h"
 #include "llama-memory.h"
+#include "llama-memory-hybrid.h"
+#include "llama-memory-recurrent.h"
 #include "llama-mmap.h"
 #include "llama-model.h"
 #include "llama-ext.h"
 #include "llama-sampler.h"
 #include "llama.h"
 
+#include <algorithm>
+#include <array>
 #include <cinttypes>
 #include <cmath>
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -174,6 +179,14 @@ llama_context::llama_context(
                         "Siliang expert-cache prefill requires min(n_ubatch * top-k, expert-count) <= L1 K; "
                         "the runtime will additionally validate each layer-local schema-bank K slice");
             }
+        }
+        if (expert_cache.prefill_layer_major && (!expert_cache.prefill || model.arch != LLM_ARCH_QWEN4EXP)) {
+            throw std::runtime_error("Siliang layer-major prefill requires bounded prefill and a qwen4exp model");
+        }
+        if (expert_cache.l1_k_decode != 0 &&
+            (!expert_cache.prefill || expert_cache.l1_k_decode <= expert_cache.l1_k || expert_cache.demote_k_hot)) {
+            throw std::runtime_error(
+                    "Siliang decode K requires bounded prefill, a value above L1 K, and no K demotion");
         }
         LLAMA_LOG_INFO("%s: Siliang expert cache enabled: L2=%" PRIu64 " MiB K=%u R=%u P=%u roll=%d prefill=%d\n",
                 __func__, expert_cache.l2_bytes / (1024 * 1024), expert_cache.l1_k,
@@ -565,6 +578,10 @@ llama_context::llama_context(
             backend_buf_exp_size.push_back(0);
         }
 
+        if (cparams.expert_cache.enabled && cparams.expert_cache.l1_k_decode > cparams.expert_cache.l1_k) {
+            siliang_setup_decode_tail();
+        }
+
         LLAMA_LOG_DEBUG("%s: backend_ptrs.size() = %zu\n", __func__, backend_ptrs.size());
 
         // TODO: move these checks to ggml_backend_sched
@@ -910,6 +927,12 @@ void llama_context::sched_reserve() {
 
     LLAMA_LOG_INFO("%s: reserve took %.2f ms, sched copies = %d\n",
             __func__, (t_end_us - t_start_us)/1000.0, ggml_backend_sched_get_n_copies(sched.get()));
+
+    // Siliang decode K: size the compute buffer tail from this reservation, then reserve again with it
+    if (siliang_fit_decode_tail()) {
+        sched_need_reserve = true;
+        sched_reserve();
+    }
 }
 
 void llama_context::synchronize() {
@@ -1251,6 +1274,129 @@ ggml_backend_t llama_context::siliang_cuda_backend() {
     return nullptr;
 }
 
+void llama_context::siliang_setup_decode_tail() {
+    ggml_backend_t cuda = siliang_cuda_backend();
+    size_t index = backend_ptrs.size();
+    for (size_t i = 0; i < backend_ptrs.size(); ++i) {
+        if (backend_ptrs[i] == cuda) {
+            index = i;
+        }
+    }
+    if (cuda == nullptr || index == backend_ptrs.size()) {
+        throw std::runtime_error("Siliang decode K requires the CUDA backend");
+    }
+    ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(ggml_backend_get_device(cuda));
+    using tail_buft_fn = ggml_backend_buffer_type_t (*)(ggml_backend_t, const size_t *, size_t);
+    using granularity_fn = size_t (*)(ggml_backend_t);
+    auto make_tail_buft = reinterpret_cast<tail_buft_fn>(
+            ggml_backend_reg_get_proc_address(reg, "ggml_backend_cuda_siliang_tail_buffer_type"));
+    auto get_granularity = reinterpret_cast<granularity_fn>(
+            ggml_backend_reg_get_proc_address(reg, "ggml_backend_cuda_siliang_vmm_granularity"));
+    if (make_tail_buft == nullptr || get_granularity == nullptr || get_granularity(cuda) == 0) {
+        throw std::runtime_error("Siliang decode K requires CUDA virtual memory management");
+    }
+
+    // the extra slots are one block per expert part, so every managed layer must share the part sizes
+    std::array<size_t, LLAMA_SILIANG_MOE_ARENA_PART_ROLE_COUNT> part_bytes = {};
+    bool found = false;
+    for (int32_t layer = 0; layer < static_cast<int32_t>(model.hparams.n_layer()); ++layer) {
+        llama_siliang_moe_arena_layer_info info = {};
+        if (!llama_siliang_moe_arena_get_layer_info(&model, layer, &info)) {
+            continue;
+        }
+        std::array<size_t, LLAMA_SILIANG_MOE_ARENA_PART_ROLE_COUNT> bytes = {};
+        for (size_t part = 0; part < info.part_count; ++part) {
+            bytes[static_cast<size_t>(info.parts[part].role)] = info.parts[part].bytes_per_expert;
+        }
+        if (found && bytes != part_bytes) {
+            throw std::runtime_error("Siliang decode K requires one expert schema across the managed layers");
+        }
+        part_bytes = bytes;
+        found = true;
+    }
+    if (!found) {
+        throw std::runtime_error("Siliang decode K found no routed expert layer");
+    }
+
+    // the extra slots end where the base slots begin, and the arena tensor starts at the first extra
+    // slot, so extra * bytes must keep that start on the 128-byte CUDA tensor alignment for every part
+    uint32_t step = 1;
+    for (size_t bytes : part_bytes) {
+        if (bytes != 0) {
+            const uint32_t need = 128 / static_cast<uint32_t>(std::gcd(bytes, static_cast<size_t>(128)));
+            step = std::lcm(step, need);
+        }
+    }
+    const uint32_t requested = cparams.expert_cache.l1_k_decode - cparams.expert_cache.l1_k;
+    if (requested < step) {
+        throw std::runtime_error("Siliang decode K adds fewer slots than one aligned block of " + std::to_string(step));
+    }
+    siliang_decode_part_bytes.clear();
+    for (size_t bytes : part_bytes) {
+        if (bytes != 0) {
+            siliang_decode_part_bytes.push_back(bytes);
+        }
+    }
+    siliang_decode_step = step;
+    siliang_decode_requested = requested;
+    siliang_decode_backend_index = index;
+    siliang_decode_granularity = get_granularity(cuda);
+    siliang_decode_make_tail_buft = reinterpret_cast<void *>(make_tail_buft);
+}
+
+// Called after a reservation with the plain CUDA buffer type: the extension takes what the measured
+// compute buffer leaves above a head kept for decode graph plans, up to the requested slot count.
+bool llama_context::siliang_fit_decode_tail() {
+    if (siliang_decode_requested == 0 || siliang_tail_buft != nullptr) {
+        return false;
+    }
+    // decode graph plans measured 6-22 MiB at 32k context; the head also grows when the buffer is reallocated
+    const size_t head_min = 64ull * 1024 * 1024;
+    const size_t measured = backend_buf_exp_size[siliang_decode_backend_index];
+    const size_t granularity = siliang_decode_granularity;
+    const auto tail_bytes = [&](uint32_t slots) {
+        size_t total = 0;
+        for (size_t bytes : siliang_decode_part_bytes) {
+            total += (static_cast<size_t>(slots) * bytes + granularity - 1) / granularity * granularity;
+        }
+        return total;
+    };
+    uint32_t extension = siliang_decode_requested / siliang_decode_step * siliang_decode_step;
+    while (extension > 0 && (measured < head_min || tail_bytes(extension) > measured - head_min)) {
+        extension -= siliang_decode_step;
+    }
+    siliang_decode_requested = 0;
+    if (extension == 0) {
+        LLAMA_LOG_WARN("%s: Siliang decode K: the %.1f MiB CUDA compute buffer leaves no room for extra slots; "
+                "decode uses K=%u\n", __func__, measured / (1024.0 * 1024.0), cparams.expert_cache.l1_k);
+        return false;
+    }
+    std::vector<size_t> tails;
+    for (size_t bytes : siliang_decode_part_bytes) {
+        tails.push_back(static_cast<size_t>(extension) * bytes);
+    }
+    using tail_buft_fn = ggml_backend_buffer_type_t (*)(ggml_backend_t, const size_t *, size_t);
+    auto make_tail_buft = reinterpret_cast<tail_buft_fn>(siliang_decode_make_tail_buft);
+    ggml_backend_buffer_type_t buft = make_tail_buft(backend_ptrs[siliang_decode_backend_index], tails.data(), tails.size());
+    if (buft == nullptr) {
+        throw std::runtime_error("Siliang decode K: the CUDA tail buffer type could not be created");
+    }
+    backend_buft[siliang_decode_backend_index] = buft;
+    siliang_tail_buft = buft;
+    siliang_decode_extension = extension;
+    LLAMA_LOG_INFO("%s: Siliang decode K: %u extra slots (of %u requested, K=%u during decode) in a %.1f MiB tail "
+            "of the %.1f MiB CUDA compute buffer\n", __func__, extension,
+            cparams.expert_cache.l1_k_decode - cparams.expert_cache.l1_k,
+            cparams.expert_cache.l1_k + extension, tail_bytes(extension) / (1024.0 * 1024.0),
+            measured / (1024.0 * 1024.0));
+    return true;
+}
+
+size_t llama_context::siliang_sched_plan_bytes() {
+    ggml_backend_t cuda = siliang_cuda_backend();
+    return sched && cuda ? ggml_backend_sched_get_plan_size(sched.get(), cuda) : 0;
+}
+
 bool llama_context::siliang_moe_arena_lora_compatible() const {
     return cparams.expert_cache.l1_k == 0 && !cparams.siliang_moe_arena_enabled;
 }
@@ -1413,6 +1559,7 @@ bool llama_context::siliang_moe_arena_bind(
     state.top_k = model_info.top_k;
     state.prefill_enabled = cparams.expert_cache.prefill;
     state.prefill_ubatch_cap = cparams.expert_cache.prefill ? cparams.n_ubatch : 1;
+    state.hybrid_decode = cparams.expert_cache.hybrid;
     state.mapper = mapper;
     state.failure_query = failure_query;
     state.compute_wait_hook = nullptr;
@@ -2224,6 +2371,167 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
     return res;
 }
 
+void llama_context::siliang_capture_checkpoints(const llama_ubatch & ubatch, int32_t il_begin, int32_t il_end) {
+    if (ubatch.n_tokens == 0) {
+        return;
+    }
+    const llama_pos last_pos = ubatch.pos[ubatch.n_tokens - 1];
+    const llama_seq_id seq_id = ubatch.seq_id[ubatch.n_tokens - 1][0];
+    auto * hybrid = dynamic_cast<llama_memory_hybrid *>(memory.get());
+    bool synced = false;
+    for (auto & ck : siliang_ckpts) {
+        if (ck.seq_id != seq_id || ck.pos != last_pos || ck.failed) {
+            continue;
+        }
+        if (hybrid == nullptr) {
+            ck.failed = true;
+            continue;
+        }
+        if (!synced) {
+            // the rows are read from the recurrent state the graph just wrote
+            ggml_backend_sched_synchronize(sched.get());
+            synced = true;
+        }
+        for (int32_t il = il_begin; il < il_end; ++il) {
+            if (!hybrid->get_mem_recr()->siliang_capture_layer(seq_id, il, ck.rows[il])) {
+                ck.failed = true;
+                break;
+            }
+            ck.captured[il] = 1;
+        }
+    }
+}
+
+bool llama_context::siliang_checkpoints_supported() const {
+    return cparams.expert_cache.prefill_layer_major && model.arch == LLM_ARCH_QWEN4EXP &&
+        dynamic_cast<const llama_memory_hybrid *>(memory.get()) != nullptr;
+}
+
+void llama_context::siliang_checkpoints_request(llama_seq_id seq_id, const llama_pos * pos, size_t count) {
+    siliang_ckpt_requests.clear();
+    for (size_t i = 0; pos != nullptr && i < count; ++i) {
+        siliang_ckpt_requests.emplace_back(seq_id, pos[i]);
+    }
+}
+
+size_t llama_context::siliang_checkpoints_count() const {
+    return siliang_ckpts.size();
+}
+
+bool llama_context::siliang_checkpoints_get(
+        size_t i, llama_seq_id * seq_id, llama_pos * pos, const uint8_t ** data, size_t * size) const {
+    if (i >= siliang_ckpts.size() || siliang_ckpts[i].blob.empty()) {
+        return false;
+    }
+    if (seq_id) { *seq_id = siliang_ckpts[i].seq_id; }
+    if (pos)    { *pos    = siliang_ckpts[i].pos; }
+    if (data)   { *data   = siliang_ckpts[i].blob.data(); }
+    if (size)   { *size   = siliang_ckpts[i].blob.size(); }
+    return true;
+}
+
+int llama_context::siliang_prefill_layer_major(
+        llama_memory_context_i * mctx, std::vector<float> & hidden, std::vector<size_t> & offsets) {
+    const int64_t t_start_us = ggml_time_us();
+
+    // place every ubatch once, in order, exactly as the ubatch loop would
+    std::vector<const llama_ubatch *> ubatches;
+    do {
+        if (!mctx->apply()) {
+            LLAMA_LOG_ERROR("%s: failed to apply memory context\n", __func__);
+            return -2;
+        }
+        ubatches.push_back(&mctx->get_ubatch());
+    } while (mctx->next());
+
+    if (ubatches.size() < 2) {
+        // nothing to gain from layer-major: the caller runs the one placed ubatch through every layer
+        if (!mctx->seek_replay(0)) {
+            LLAMA_LOG_ERROR("%s: the memory module cannot replay ubatch placements\n", __func__);
+            return -3;
+        }
+        return 1;
+    }
+
+    const int n_layer = (int) model.hparams.n_layer();
+    const auto gtype = ctx_type_to_graph_type(cparams.ctx_type);
+    hidden.clear();
+    offsets.assign(ubatches.size(), 0);
+
+    // every ubatch is placed already: on failure remove all of their positions, as the ubatch loop does
+    // for the ubatch that failed
+    const auto remove_placed = [&]() {
+        llama_pos pos_min[LLAMA_MAX_SEQ];
+        for (int s = 0; s < LLAMA_MAX_SEQ; ++s) {
+            pos_min[s] = std::numeric_limits<llama_pos>::max();
+        }
+        for (const llama_ubatch * ub : ubatches) {
+            for (uint32_t i = 0; i < ub->n_tokens; ++i) {
+                const llama_seq_id seq_id = ub->seq_id[i][0];
+                pos_min[seq_id] = std::min(pos_min[seq_id], ub->pos[i]);
+            }
+        }
+        for (int s = 0; s < LLAMA_MAX_SEQ; ++s) {
+            if (pos_min[s] != std::numeric_limits<llama_pos>::max()) {
+                LLAMA_LOG_WARN("%s: removing memory module entries for seq_id = %d, pos = [%d, +inf)\n",
+                        __func__, s, pos_min[s]);
+                memory->seq_rm(s, pos_min[s], -1);
+            }
+        }
+    };
+
+    for (int il = 0; il + 1 < n_layer; ++il) {
+        for (size_t u = 0; u < ubatches.size(); ++u) {
+            // the ubatches are placed already: replaying keeps each layer's first ubatch state reset
+            if (!mctx->seek_replay(u)) {
+                LLAMA_LOG_ERROR("%s: the memory module cannot replay ubatch placements; "
+                        "layer-major prefill cannot continue\n", __func__);
+                remove_placed();
+                return -3;
+            }
+            cparams.siliang_layer_begin = il;
+            cparams.siliang_layer_end   = il + 1;
+            cparams.siliang_hidden_in   = il == 0 ? nullptr : hidden.data() + offsets[u];
+            // layers before the last produce no logits
+            n_outputs = 0;
+
+            ggml_status status;
+            const auto * res = process_ubatch(*ubatches[u], gtype, mctx, status);
+            if (!res || !res->t_siliang_hidden) {
+                LLAMA_LOG_ERROR("%s: layer %d ubatch %zu failed\n", __func__, il, u);
+                remove_placed();
+                return status == GGML_STATUS_ABORTED ? 2 : status == GGML_STATUS_ALLOC_FAILED ? -2 : -3;
+            }
+            ggml_tensor * t = res->t_siliang_hidden;
+            if (hidden.empty()) {
+                const size_t row = ggml_nbytes(t) / sizeof(float) / ubatches[u]->n_tokens;
+                size_t total = 0;
+                for (size_t k = 0; k < ubatches.size(); ++k) {
+                    offsets[k] = total;
+                    total += (size_t) ubatches[k]->n_tokens * row;
+                }
+                hidden.resize(total);
+            }
+            ggml_backend_sched_synchronize(sched.get());
+            ggml_backend_tensor_get(t, hidden.data() + offsets[u], 0, ggml_nbytes(t));
+            if (!siliang_ckpts.empty()) {
+                siliang_capture_checkpoints(*ubatches[u], il, il + 1);
+            }
+        }
+    }
+
+    // the last layer runs in the regular ubatch loop, from the first ubatch again
+    if (!mctx->seek_replay(0)) {
+        LLAMA_LOG_ERROR("%s: the memory module cannot replay ubatch placements\n", __func__);
+        remove_placed();
+        return -3;
+    }
+    LLAMA_LOG_INFO("%s: %zu ubatches x %d layers in %.1f s, residual stream %.1f MiB\n", __func__,
+            ubatches.size(), n_layer - 1, (ggml_time_us() - t_start_us) / 1e6,
+            hidden.size() * sizeof(float) / (1024.0 * 1024.0));
+    return 0;
+}
+
 int llama_context::encode(const llama_batch_ext & batch_inp) {
     if (batch_inp.tokens.empty()) {
         LLAMA_LOG_ERROR("%s: n_tokens == 0\n", __func__);
@@ -2564,7 +2872,17 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
     llama_memory_context_ptr mctx;
 
     while (true) {
+        // in-batch checkpoints: every requested position ends a ubatch
+        std::vector<llama_pos> cuts;
+        if (siliang_checkpoints_supported()) {
+            for (const auto & request : siliang_ckpt_requests) {
+                cuts.push_back(request.second);
+            }
+            std::sort(cuts.begin(), cuts.end());
+        }
+        balloc->set_split_cuts(std::move(cuts));
         mctx = memory->init_batch(*balloc, cparams.n_ubatch, output_all);
+        balloc->set_split_cuts({});
         if (!mctx) {
             return -2;
         }
@@ -2620,8 +2938,53 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
     int64_t n_outputs_prev = 0;
     int64_t n_tokens_prev  = 0;
 
+    // layer-major prefill: layers [0, n_layer - 1) run for every ubatch before the next layer starts; the
+    // last layer then runs in the ubatch loop below, reading each ubatch's residual stream
+    struct siliang_layer_range_reset {
+        llama_cparams & cparams;
+        ~siliang_layer_range_reset() {
+            cparams.siliang_layer_begin = 0;
+            cparams.siliang_layer_end   = -1;
+            cparams.siliang_hidden_in   = nullptr;
+        }
+    } siliang_layer_range_guard { cparams };
+    std::vector<float>  siliang_hidden;
+    std::vector<size_t> siliang_hidden_offset;
+    siliang_ckpts.clear();
+    if (siliang_checkpoints_supported()) {
+        for (const auto & request : siliang_ckpt_requests) {
+            siliang_checkpoint ck;
+            ck.seq_id = request.first;
+            ck.pos = request.second;
+            ck.rows.resize(model.hparams.n_layer());
+            ck.captured.assign(model.hparams.n_layer(), 0);
+            siliang_ckpts.push_back(std::move(ck));
+        }
+    }
+    siliang_ckpt_requests.clear();
+    bool siliang_layer_major = cparams.expert_cache.prefill_layer_major &&
+        model.arch == LLM_ARCH_QWEN4EXP && !cparams.embeddings &&
+        (n_tokens_all > (int64_t) cparams.n_ubatch || !siliang_ckpts.empty());
+    if (siliang_layer_major) {
+        const int rc = siliang_prefill_layer_major(mctx.get(), siliang_hidden, siliang_hidden_offset);
+        if (rc == 1) {
+            // one ubatch: it is placed already and runs every layer in the loop below, replaying its placement
+            siliang_layer_major = false;
+        } else if (rc != 0) {
+            return rc;
+        }
+    }
+    size_t siliang_ubatch_index = 0;
+
     do {
         const auto & ubatch = mctx->get_ubatch();
+
+        if (siliang_layer_major) {
+            cparams.siliang_layer_begin = (int32_t) model.hparams.n_layer() - 1;
+            cparams.siliang_layer_end   = (int32_t) model.hparams.n_layer();
+            cparams.siliang_hidden_in   = siliang_hidden.data() + siliang_hidden_offset[siliang_ubatch_index];
+        }
+        ++siliang_ubatch_index;
 
         // count the outputs in this ubatch
         {
@@ -2793,9 +3156,35 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
             copy_tensor_async_rows(res->t_candidates,     sampling.candidates, stride, n_outputs_prev, sched.get(), &sampling.candidates_count);
         }
 
+        if (!siliang_ckpts.empty()) {
+            const int32_t n_layer_all = (int32_t) model.hparams.n_layer();
+            siliang_capture_checkpoints(ubatch, siliang_layer_major ? n_layer_all - 1 : 0, n_layer_all);
+        }
+
         n_outputs_prev += n_outputs;
         n_tokens_prev  += ubatch.n_tokens;
     } while (mctx->next());
+
+    // in-batch checkpoints: a position every layer has passed becomes a state blob
+    if (!siliang_ckpts.empty()) {
+        auto * hybrid = dynamic_cast<llama_memory_hybrid *>(memory.get());
+        for (auto & ck : siliang_ckpts) {
+            bool complete = !ck.failed && hybrid != nullptr;
+            for (uint8_t done : ck.captured) {
+                complete = complete && done != 0;
+            }
+            std::vector<uint8_t> memory_part;
+            if (!complete || !hybrid->get_mem_recr()->siliang_checkpoint_blob(ck.pos, ck.rows, memory_part)) {
+                LLAMA_LOG_WARN("%s: in-batch checkpoint at pos %d was not captured\n", __func__, ck.pos);
+                ck.blob.clear();
+            } else {
+                // the same bytes state_seq_get_data(seq_id, PARTIAL_ONLY) returns: its header, then the memory
+                siliang_seq_state_header(ck.seq_id, ck.blob);
+                ck.blob.insert(ck.blob.end(), memory_part.begin(), memory_part.end());
+            }
+            ck.rows.clear();
+        }
+    }
 
     // set to total number of outputs in the batch, for use in llama_get_logits_ith
     n_outputs = n_outputs_all;
@@ -3918,6 +4307,13 @@ size_t llama_context::state_set_data(const uint8_t * src, size_t size) {
 
 static constexpr uint32_t io_magic = 0xaf143cd8;
 
+void llama_context::siliang_seq_state_header(llama_seq_id seq_id, std::vector<uint8_t> & out) const {
+    // must match the header state_seq_get_data writes
+    out.clear();
+    out.insert(out.end(), reinterpret_cast<const uint8_t *>(&io_magic), reinterpret_cast<const uint8_t *>(&io_magic) + sizeof(io_magic));
+    out.insert(out.end(), reinterpret_cast<const uint8_t *>(&seq_id), reinterpret_cast<const uint8_t *>(&seq_id) + sizeof(seq_id));
+}
+
 size_t llama_context::state_seq_get_size(llama_seq_id seq_id, llama_state_seq_flags flags) {
     llama_io_write_dummy io(flags & LLAMA_STATE_SEQ_FLAGS_ON_DEVICE);
     try {
@@ -4540,6 +4936,39 @@ ggml_backend_t llama_siliang_cpu_backend(llama_context * ctx) {
     return ctx ? ctx->siliang_cpu_backend() : nullptr;
 }
 
+uint32_t llama_siliang_decode_tail(llama_context * ctx, ggml_backend_buffer_type_t * out_buft) {
+    if (ctx == nullptr) {
+        return 0;
+    }
+    if (out_buft != nullptr) {
+        *out_buft = ctx->siliang_decode_tail_buft();
+    }
+    return ctx->siliang_decode_extension_slots();
+}
+
+size_t llama_siliang_sched_plan_bytes(llama_context * ctx) {
+    return ctx ? ctx->siliang_sched_plan_bytes() : 0;
+}
+
+bool llama_siliang_checkpoints_supported(const llama_context * ctx) {
+    return ctx && ctx->siliang_checkpoints_supported();
+}
+
+void llama_siliang_checkpoints_request(llama_context * ctx, llama_seq_id seq_id, const llama_pos * pos, size_t count) {
+    if (ctx) {
+        ctx->siliang_checkpoints_request(seq_id, pos, count);
+    }
+}
+
+size_t llama_siliang_checkpoints_count(const llama_context * ctx) {
+    return ctx ? ctx->siliang_checkpoints_count() : 0;
+}
+
+bool llama_siliang_checkpoints_get(
+        const llama_context * ctx, size_t i, llama_seq_id * seq_id, llama_pos * pos, const uint8_t ** data, size_t * size) {
+    return ctx && ctx->siliang_checkpoints_get(i, seq_id, pos, data, size);
+}
+
 int llama_siliang_ds4_front_slab_bind(
         llama_context * ctx,
         const void * const * alternate_layers,
@@ -4607,6 +5036,19 @@ llama_context_params llama_context_default_params() {
             /*.admit_k_cold  =*/ true,
             /*.demote_k_hot  =*/ false,
             /*.deferred_wait =*/ true,
+            /*.hybrid                 =*/ false,
+            /*.hybrid_cpu_l2_us       =*/ 350.0f,
+            /*.hybrid_cpu_miss_us     =*/ 650.0f,
+            /*.hybrid_stage_l2_us     =*/ 400.0f,
+            /*.hybrid_stage_pinned_us =*/ 40.0f,
+            /*.hybrid_stage_miss_us   =*/ 900.0f,
+            /*.hybrid_gpu_us          =*/ 170.0f,
+            /*.l2_pinned_bytes        =*/ 0,
+            /*.verify                 =*/ false,
+            /*.staging_threads        =*/ 1,
+            /*.prefill_l2_retain      =*/ false,
+            /*.l1_k_decode            =*/ 0,
+            /*.prefill_layer_major    =*/ false,
         },
     };
 

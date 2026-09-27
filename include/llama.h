@@ -97,7 +97,44 @@ extern "C" {
         bool admit_k_cold;
         bool demote_k_hot;
         bool deferred_wait;
+        // Decode only. Experts the L1 policy would not admit to K may run on CPU
+        // from L2 instead of crossing to GPU. A cost table built from the six
+        // per-expert coefficients below (microseconds) picks, for each route,
+        // how many pinned-L2, other-L2, and uncached bypass experts stay on CPU.
+        bool hybrid;
+        float hybrid_cpu_l2_us;       // CPU compute of one L2-resident expert
+        float hybrid_cpu_miss_us;     // CPU compute of one uncached expert, read overlapped
+        float hybrid_stage_l2_us;     // host staging through P of one L2-resident expert
+        float hybrid_stage_pinned_us; // host submission of one expert copied straight from pinned L2
+        float hybrid_stage_miss_us;   // host staging of one uncached expert (read + P)
+        float hybrid_gpu_us;          // H2D plus GPU compute of one staged expert
+        // Leading bytes of the L2 arena registered with CUDA. Decode and bounded-prefill
+        // copies of experts resident there go straight to K or R without the P memcpy.
+        // 0 disables; rounded down to whole L2 slots.
+        uint64_t l2_pinned_bytes;
+        // Diagnostic, slow: after each decode route's copies complete, sample the
+        // device bytes of every routed K/R slot and compare them with the model
+        // bytes of the expert the route expects. Requires model-mapped experts.
+        bool verify;
+        // Host threads that copy an expert from L2 into P (the caller included).
+        // 1 keeps the single-threaded copy.
+        uint32_t staging_threads;
+        // Bounded prefill keeps each expert it copies to K in L2 as well, instead of the
+        // exclusive release decode uses. K is transient during prefill, so the released
+        // copy would otherwise be read from disk again on the next ubatch.
+        bool prefill_l2_retain;
+        // Total K slots during decode (0 = l1_k). Slots beyond l1_k live in the end of the CUDA
+        // compute buffer, which a large prefill ubatch needs but a decode graph leaves idle; bounded
+        // prefill evicts them and uses the l1_k base slots only. Requires CUDA VMM and bounded prefill.
+        uint32_t l1_k_decode;
+        // Layer-major bounded prefill (qwen4exp): a prompt longer than one ubatch runs every ubatch through a
+        // layer before the next layer starts, so each layer's routed experts are loaded once per prompt
+        // instead of once per ubatch. The residual stream of the whole prompt is kept in host memory.
+        bool prefill_layer_major;
     };
+
+    // Slot-mapper output for a decode route slot that runs on CPU (hybrid decode).
+    #define LLAMA_SILIANG_MOE_ARENA_CPU_ROUTE (-2)
 
     enum llama_siliang_moe_arena_part_role {
         LLAMA_SILIANG_MOE_ARENA_GATE_WEIGHT = 0,
@@ -743,6 +780,23 @@ extern "C" {
             uint64_t * map_calls);
     LLAMA_API struct ggml_backend * llama_siliang_cuda_backend(struct llama_context * ctx);
     LLAMA_API struct ggml_backend * llama_siliang_cpu_backend(struct llama_context * ctx);
+    // Decode K extra slots (0 when disabled) and the CUDA compute buffer type whose tail backs them.
+    LLAMA_API uint32_t llama_siliang_decode_tail(struct llama_context * ctx, struct ggml_backend_buffer_type ** out_buft);
+    // Bytes of the CUDA compute buffer used by the most recently allocated graph.
+    LLAMA_API size_t llama_siliang_sched_plan_bytes(struct llama_context * ctx);
+
+    // Siliang in-batch context checkpoints (layer-major prefill). Instead of ending a decode call where a
+    // checkpoint is wanted, the caller requests checkpoints after the tokens at the given positions; the
+    // next llama_decode cuts its ubatches there and captures the recurrent state at each position.
+    // A captured checkpoint is the llama_state_seq_get_data_ext(seq_id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY)
+    // blob at that position. Requests are consumed by the next llama_decode.
+    LLAMA_API bool   llama_siliang_checkpoints_supported(const struct llama_context * ctx);
+    LLAMA_API void   llama_siliang_checkpoints_request(
+            struct llama_context * ctx, llama_seq_id seq_id, const llama_pos * pos, size_t count);
+    LLAMA_API size_t llama_siliang_checkpoints_count(const struct llama_context * ctx);
+    LLAMA_API bool   llama_siliang_checkpoints_get(
+            const struct llama_context * ctx, size_t i, llama_seq_id * seq_id, llama_pos * pos,
+            const uint8_t ** data, size_t * size);
 
     // Bind shallow alternate DeepSeek-V4 layer descriptors for the packed FRONT slab.
     // The descriptors remain owned by the caller and must outlive the binding.

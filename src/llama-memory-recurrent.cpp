@@ -875,6 +875,106 @@ void llama_memory_recurrent::state_read(llama_io_read_i & io, llama_seq_id seq_i
     }
 }
 
+bool llama_memory_recurrent::siliang_capture_layer(llama_seq_id seq_id, int32_t il, std::vector<uint8_t> & out) const {
+    out.clear();
+    if (il < 0 || (size_t) il >= r_l.size() || n_rs_seq != 0) {
+        return false;
+    }
+    if (r_l[il] == nullptr && s_l[il] == nullptr) {
+        return true;
+    }
+    int32_t row = -1;
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < size; ++i) {
+        if (cells[i].has_seq_id(seq_id)) {
+            // the same row state_write reads for this cell
+            row = cells[i].src >= 0 ? cells[i].src : (int32_t) i;
+            ++count;
+        }
+    }
+    if (count != 1 || row < 0) {
+        return false;
+    }
+    const auto append = [&](const ggml_tensor * t, size_t row_size) {
+        const size_t at = out.size();
+        out.resize(at + row_size);
+        ggml_backend_tensor_get(t, out.data() + at, (size_t) row * row_size, row_size);
+    };
+    if (r_l[il] != nullptr) {
+        append(r_l[il], ggml_row_size(r_l[il]->type, hparams.n_embd_r()));
+        if (p_l[il] != nullptr) {
+            append(p_l[il], ggml_row_size(p_l[il]->type, hparams.ple_conv_state()));
+        }
+    }
+    if (s_l[il] != nullptr) {
+        append(s_l[il], ggml_row_size(s_l[il]->type, hparams.n_embd_s()));
+    }
+    return true;
+}
+
+bool llama_memory_recurrent::siliang_checkpoint_blob(
+        llama_pos pos, const std::vector<std::vector<uint8_t>> & layer_rows, std::vector<uint8_t> & out) const {
+    const uint32_t n_layer = hparams.n_layer();
+    if (layer_rows.size() != n_layer || n_rs_seq != 0) {
+        return false;
+    }
+    out.clear();
+    const auto put = [&](const void * data, size_t n) {
+        const uint8_t * bytes = static_cast<const uint8_t *>(data);
+        out.insert(out.end(), bytes, bytes + n);
+    };
+    // same layout as state_write for one sequence owning one cell (see state_write_meta / state_write_data)
+    const uint32_t cell_count = 1;
+    const uint32_t n_seq_id = 0;
+    const uint32_t s_trans = 0;
+    put(&cell_count, sizeof(cell_count));
+    put(&pos, sizeof(pos));
+    put(&n_seq_id, sizeof(n_seq_id));
+    put(&s_trans, sizeof(s_trans));
+    put(&n_layer, sizeof(n_layer));
+    std::vector<size_t> s_offset(n_layer, 0);
+    for (uint32_t il = 0; il < n_layer; ++il) {
+        const auto & rows = layer_rows[il];
+        size_t expected = 0;
+        size_t r_size = 0;
+        size_t p_size = 0;
+        if (r_l[il] != nullptr) {
+            r_size = ggml_row_size(r_l[il]->type, hparams.n_embd_r());
+            p_size = p_l[il] != nullptr ? ggml_row_size(p_l[il]->type, hparams.ple_conv_state()) : 0;
+        }
+        const size_t s_size = s_l[il] != nullptr ? ggml_row_size(s_l[il]->type, hparams.n_embd_s()) : 0;
+        expected = r_size + p_size + s_size;
+        if (rows.size() != expected) {
+            return false;
+        }
+        s_offset[il] = r_size + p_size;
+        if (r_l[il] == nullptr) {
+            continue;
+        }
+        const int32_t r_type_i = (int32_t) r_l[il]->type;
+        const uint64_t r_size_row = r_size;
+        put(&r_type_i, sizeof(r_type_i));
+        put(&r_size_row, sizeof(r_size_row));
+        put(rows.data(), r_size);
+        if (p_l[il] != nullptr) {
+            const uint64_t p_size_row = p_size;
+            put(&p_size_row, sizeof(p_size_row));
+            put(rows.data() + r_size, p_size);
+        }
+    }
+    for (uint32_t il = 0; il < n_layer; ++il) {
+        if (s_l[il] == nullptr) {
+            continue;
+        }
+        const int32_t s_type_i = (int32_t) s_l[il]->type;
+        const uint64_t s_size_row = ggml_row_size(s_l[il]->type, hparams.n_embd_s());
+        put(&s_type_i, sizeof(s_type_i));
+        put(&s_size_row, sizeof(s_size_row));
+        put(layer_rows[il].data() + s_offset[il], s_size_row);
+    }
+    return true;
+}
+
 void llama_memory_recurrent::state_write_meta(llama_io_write_i & io, const std::vector<std::pair<uint32_t, uint32_t>> & cell_ranges, llama_seq_id seq_id) const {
     for (const auto & range : cell_ranges) {
         for (uint32_t i = range.first; i < range.second; ++i) {
@@ -1260,8 +1360,41 @@ bool llama_memory_recurrent_context::apply() {
         return true;
     }
 
+    if (replay) {
+        return true;
+    }
+
     mem->find_slot(ubatches[i_next]);
 
+    if (mem->n_rs_seq == 0 && !is_full) {
+        if (placements.size() != ubatches.size()) {
+            placements.assign(ubatches.size(), {});
+        }
+        auto & cur = placements[i_next];
+        cur.valid = true;
+        cur.head  = mem->head;
+        cur.n_rs  = mem->n;
+        cur.rs_z  = mem->rs_z;
+        cur.s_copy.resize(mem->n);
+        for (uint32_t i = 0; i < mem->n; ++i) {
+            cur.s_copy[i] = mem->cells[i + mem->head].src0;
+        }
+    }
+
+    return true;
+}
+
+bool llama_memory_recurrent_context::seek_replay(size_t i) {
+    if (ubatches.empty() || i >= ubatches.size() || placements.size() != ubatches.size() || mem->n_rs_seq != 0) {
+        return false;
+    }
+    for (const auto & cur : placements) {
+        if (!cur.valid) {
+            return false;
+        }
+    }
+    i_next = i;
+    replay = true;
     return true;
 }
 
@@ -1276,14 +1409,23 @@ const llama_ubatch & llama_memory_recurrent_context::get_ubatch() const {
 }
 
 uint32_t llama_memory_recurrent_context::get_n_rs() const {
+    if (replay) {
+        return placements[i_next].n_rs;
+    }
     return is_full ? mem->size : mem->n;
 }
 
 uint32_t llama_memory_recurrent_context::get_head() const {
+    if (replay) {
+        return placements[i_next].head;
+    }
     return is_full ? 0 : mem->head;
 }
 
 int32_t llama_memory_recurrent_context::get_rs_z() const {
+    if (replay) {
+        return placements[i_next].rs_z;
+    }
     return is_full ? 0 : mem->rs_z;
 }
 
@@ -1304,6 +1446,9 @@ ggml_tensor * llama_memory_recurrent_context::get_p_l(int32_t il) const {
 }
 
 int32_t llama_memory_recurrent_context::s_copy(int i) const {
+    if (replay) {
+        return placements[i_next].s_copy[i];
+    }
     const uint32_t cell_idx = i + mem->head;
     const int32_t  src0     = mem->cells[cell_idx].src0;
 

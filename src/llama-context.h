@@ -125,6 +125,11 @@ struct llama_context {
     bool siliang_moe_arena_lora_compatible() const;
     ggml_backend_t siliang_cuda_backend();
     ggml_backend_t siliang_cpu_backend() const { return backend_cpu; }
+    // decode K: extra slots in the tail of the CUDA compute buffer (0 when disabled)
+    uint32_t siliang_decode_extension_slots() const { return siliang_decode_extension; }
+    ggml_backend_buffer_type_t siliang_decode_tail_buft() const { return siliang_tail_buft; }
+    // bytes of the CUDA compute buffer used by the most recently allocated graph
+    size_t siliang_sched_plan_bytes();
 
     bool siliang_ds4_front_slab_bind(
             const void * const * alternate_layers,
@@ -406,6 +411,43 @@ private:
     // pointers and buffer types used for the compute buffer of each backend
     std::vector<ggml_backend_t>             backend_ptrs;
     std::vector<ggml_backend_buffer_type_t> backend_buft;
+
+    // layer-major prefill of every ubatch in mctx for layers [0, n_layer - 1); returns a decode() status code
+    int siliang_prefill_layer_major(
+            llama_memory_context_i * mctx, std::vector<float> & hidden, std::vector<size_t> & offsets);
+
+    // in-batch checkpoints: requested positions for the next decode, and what the last decode captured
+    struct siliang_checkpoint {
+        llama_seq_id seq_id = -1;
+        llama_pos    pos    = -1;
+        std::vector<std::vector<uint8_t>> rows; // per layer, filled as each layer passes the position
+        std::vector<uint8_t> captured;          // per layer: 1 once rows[il] holds the state
+        bool failed = false;
+        std::vector<uint8_t> blob;
+    };
+    std::vector<std::pair<llama_seq_id, llama_pos>> siliang_ckpt_requests;
+    std::vector<siliang_checkpoint> siliang_ckpts;
+    void siliang_capture_checkpoints(const llama_ubatch & ubatch, int32_t il_begin, int32_t il_end);
+    void siliang_seq_state_header(llama_seq_id seq_id, std::vector<uint8_t> & out) const;
+
+public:
+    bool siliang_checkpoints_supported() const;
+    void siliang_checkpoints_request(llama_seq_id seq_id, const llama_pos * pos, size_t count);
+    size_t siliang_checkpoints_count() const;
+    bool siliang_checkpoints_get(size_t i, llama_seq_id * seq_id, llama_pos * pos, const uint8_t ** data, size_t * size) const;
+
+private:
+    void siliang_setup_decode_tail();
+    bool siliang_fit_decode_tail();
+    ggml_backend_buffer_type_t siliang_tail_buft = nullptr;
+    uint32_t siliang_decode_extension = 0;
+    // geometry measured before the first reservation, used once to fit the tail
+    std::vector<size_t> siliang_decode_part_bytes;
+    uint32_t siliang_decode_step = 0;
+    uint32_t siliang_decode_requested = 0;
+    size_t siliang_decode_backend_index = 0;
+    size_t siliang_decode_granularity = 0;
+    void * siliang_decode_make_tail_buft = nullptr;
     std::vector<size_t>                     backend_buf_exp_size; // expected buffer sizes
 
     // Separate arenas give batches with and without outputs distinct CUDA graph cache keys.

@@ -250,6 +250,14 @@ bool llama_memory_hybrid_context::next() {
     return true;
 }
 
+bool llama_memory_hybrid_context::seek_replay(size_t i) {
+    if (i >= ubatches.size() || !ctx_attn->seek_replay(i) || !ctx_recr->seek_replay(i)) {
+        return false;
+    }
+    i_next = i;
+    return true;
+}
+
 bool llama_memory_hybrid_context::apply() {
     assert(!llama_memory_status_is_fail(status));
 

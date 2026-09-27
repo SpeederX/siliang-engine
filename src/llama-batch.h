@@ -161,6 +161,10 @@ public:
     // n_keep_tail = minimum trailing tokens of a seq that must land in the same ubatch
     llama_ubatch split_equal(uint32_t n_ubatch, bool sequential, uint32_t n_keep_tail);
 
+    // Siliang in-batch checkpoints: single-sequence ubatches from split_equal end right after a token whose
+    // position is in cuts (sorted); the caller clears them after the split
+    void set_split_cuts(std::vector<llama_pos> cuts) { split_cuts = std::move(cuts); }
+
     // sequence-set-wise split - each ubatch contains a single sequence-set
     llama_ubatch split_seq(uint32_t n_ubatch);
 
@@ -225,6 +229,8 @@ private:
 
     // used[i] indicates if token i has already been used in a previous ubatch
     std::vector<bool> used;
+
+    std::vector<llama_pos> split_cuts;
 
     int debug;
 };

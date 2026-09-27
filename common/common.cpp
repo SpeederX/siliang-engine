@@ -1987,6 +1987,22 @@ struct llama_context_params common_context_params_to_llama(const common_params &
     cparams.expert_cache.admit_k_cold  = params.expert_cache.admit_k_cold;
     cparams.expert_cache.demote_k_hot  = params.expert_cache.demote_k_hot;
     cparams.expert_cache.deferred_wait = params.expert_cache.deferred_wait;
+    cparams.expert_cache.hybrid = params.expert_cache.hybrid;
+    if (params.expert_cache.hybrid_cost.size() == 6) {
+        // the parser guarantees six finite positive values
+        cparams.expert_cache.hybrid_cpu_l2_us       = params.expert_cache.hybrid_cost[0];
+        cparams.expert_cache.hybrid_cpu_miss_us     = params.expert_cache.hybrid_cost[1];
+        cparams.expert_cache.hybrid_stage_l2_us     = params.expert_cache.hybrid_cost[2];
+        cparams.expert_cache.hybrid_stage_pinned_us = params.expert_cache.hybrid_cost[3];
+        cparams.expert_cache.hybrid_stage_miss_us   = params.expert_cache.hybrid_cost[4];
+        cparams.expert_cache.hybrid_gpu_us          = params.expert_cache.hybrid_cost[5];
+    }
+    cparams.expert_cache.l2_pinned_bytes = params.expert_cache.l2_pinned_mib * 1024ull * 1024ull;
+    cparams.expert_cache.verify = params.expert_cache.verify;
+    cparams.expert_cache.staging_threads = params.expert_cache.staging_threads;
+    cparams.expert_cache.prefill_l2_retain = params.expert_cache.prefill_l2_retain;
+    cparams.expert_cache.l1_k_decode = params.expert_cache.l1_k_decode;
+    cparams.expert_cache.prefill_layer_major = params.expert_cache.prefill_layer_major;
 
     cparams.type_k = params.cache_type_k;
     cparams.type_v = params.cache_type_v;

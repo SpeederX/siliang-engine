@@ -114,6 +114,14 @@ public:
     // a second conv history that must stay replicated across devices, so it cannot share the r row
     std::vector<ggml_tensor *> p_l;
 
+    // Siliang in-batch checkpoints. The current state rows of layer il for the single cell of seq_id
+    // (r, then p, then s bytes; empty for a layer without recurrent state); false when the sequence does
+    // not own exactly one cell or rollback snapshots are in use.
+    bool siliang_capture_layer(llama_seq_id seq_id, int32_t il, std::vector<uint8_t> & out) const;
+    // The state_write(seq_id, PARTIAL_ONLY) blob of one cell at position pos, built from captured rows.
+    bool siliang_checkpoint_blob(
+            llama_pos pos, const std::vector<std::vector<uint8_t>> & layer_rows, std::vector<uint8_t> & out) const;
+
 private:
     //const llama_model & model;
     const llama_hparams & hparams;
@@ -177,12 +185,26 @@ public:
 
     int32_t s_copy(int i) const;
 
+    bool seek_replay(size_t i) override;
+
 private:
     const llama_memory_status status;
 
     llama_memory_recurrent * mem;
 
     size_t i_next = 0;
+
+    // layer-major prefill: the state indices find_slot produced for each ubatch. Placing a ubatch again
+    // would drop the zeroing of a new sequence's state, so later layers replay these instead.
+    struct placement {
+        bool     valid = false;
+        uint32_t head  = 0;
+        uint32_t n_rs  = 0;
+        int32_t  rs_z  = -1;
+        std::vector<int32_t> s_copy;
+    };
+    std::vector<placement> placements;
+    bool replay = false;
 
     std::vector<llama_ubatch> ubatches;
 

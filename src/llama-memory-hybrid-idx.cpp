@@ -649,6 +649,17 @@ bool llama_memory_hybrid_idx_context::next() {
     return llama_memory_hybrid_context::next();
 }
 
+bool llama_memory_hybrid_idx_context::seek_replay(size_t i) {
+    if (ctx_idx && !ctx_idx->seek_replay(i)) {
+        return false;
+    }
+    if (!llama_memory_hybrid_context::seek_replay(i)) {
+        return false;
+    }
+    i_cur = i;
+    return true;
+}
+
 bool llama_memory_hybrid_idx_context::apply() {
     bool res = llama_memory_hybrid_context::apply();
 

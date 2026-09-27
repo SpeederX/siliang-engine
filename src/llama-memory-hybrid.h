@@ -116,6 +116,7 @@ public:
 
     bool next()  override;
     bool apply() override;
+    bool seek_replay(size_t i) override;
 
     llama_memory_status  get_status() const override;
     const llama_ubatch & get_ubatch() const override;

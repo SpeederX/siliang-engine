@@ -486,6 +486,24 @@ struct common_params_expert_cache {
     bool demote_k_hot = false;
     bool deferred_wait = true;
 
+    // Decode only: bypass experts may run on CPU from L2 when the cost table predicts a gain.
+    // Coefficients are per expert, in microseconds:
+    // CPU L2, CPU miss, stage L2, stage pinned, stage miss, GPU.
+    bool hybrid = false;
+    std::vector<float> hybrid_cost;
+    // Leading MiB of L2 registered with CUDA for direct decode copies (0 = off).
+    uint64_t l2_pinned_mib = 0;
+    // Diagnostic: verify routed K/R slot bytes against the model after each decode route.
+    bool verify = false;
+    // Host threads for the L2 -> P staging copy (1 = single-threaded).
+    uint32_t staging_threads = 1;
+    // Bounded prefill keeps copied experts in L2 instead of releasing them.
+    bool prefill_l2_retain = false;
+    // Total K slots during decode; 0 keeps K. Extra slots borrow the idle end of the prefill compute buffer.
+    uint32_t l1_k_decode = 0;
+    // Layer-major bounded prefill (qwen4exp): load each layer's experts once per prompt.
+    bool prefill_layer_major = false;
+
     // Parser-only presence marker: explicit tier options require --expert-cache.
     bool tier_configured = false;
 };
@@ -676,6 +694,7 @@ struct common_params {
     int32_t n_ctx_checkpoints   = 32;    // max number of context checkpoints per slot
     int32_t kv_unified_per_slot = 0;     // max context per parallel slot; 0 = unset
     int32_t checkpoint_min_step = 8192;  // minimum spacing between context checkpoints
+    bool    checkpoint_ubatch   = true;  // also checkpoint n_ubatch + 4 tokens before the prompt end
     int32_t cache_ram_mib       = 8192;  // -1 = no limit, 0 - disable, 1 = 1 MiB, etc.
 
     std::string public_path   = "";                                                                         // NOLINT

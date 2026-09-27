@@ -148,6 +148,52 @@ class ArenaOptInContractTests(unittest.TestCase):
         self.assertIn("ggml_backend_buffer_is_siliang_managed", embd)
         self.assertIn("managed_token_embd || !ubatch.token ? 1 : 0", embd)
 
+    def test_hybrid_decode_is_explicit_decode_only_and_cost_driven(self) -> None:
+        self.assertIn("bool hybrid;", LLAMA_HEADER)
+        self.assertIn("#define LLAMA_SILIANG_MOE_ARENA_CPU_ROUTE (-2)", LLAMA_HEADER)
+        self.assertIn('{"--expert-cache-hybrid"}', ARG_SOURCE)
+        self.assertIn('{"--expert-cache-hybrid-cost"}', ARG_SOURCE)
+        self.assertIn("--expert-cache-hybrid-cost requires --expert-cache-hybrid", ARG_SOURCE)
+        self.assertRegex(LLAMA_CONTEXT, r"/\*\.hybrid +=\*/ false,")
+        self.assertRegex(LLAMA_CONTEXT, r"/\*\.l2_pinned_bytes +=\*/ 0,")
+        # Only admitted-to-K experts are forced to GPU; the cost table picks CPU bypass experts.
+        plan = function_body(MOE_RUNTIME, "void plan_hybrid_route(")
+        self.assertIn("predict_k_admission", plan)
+        self.assertIn("hybrid_costs.lookup(", plan)
+        self.assertIn("hybrid_gpu_anchors", plan)
+        self.assertIn("hybrid decode requires L2; CPU experts are served by L2", MOE_RUNTIME)
+        self.assertIn("hybrid decode supports routed experts without biases or scales", MOE_RUNTIME)
+        # CPU markers are decode-only and never reach the prefill union.
+        self.assertIn("!prefill && state->hybrid_decode && physical[index] == LLAMA_SILIANG_MOE_ARENA_CPU_ROUTE",
+                      LLAMA_GRAPH)
+        self.assertIn("moe_arena_managed && n_tokens == 1 && moe_arena->hybrid_decode", LLAMA_GRAPH)
+        # A skipped CPU route slot produces an exact zero row.
+        self.assertIn("if (i02 < 0) {", CPU_SOURCE)
+        for doc in (CONFIGURATION, CLI_HELP_DOC, SERVER_HELP_DOC):
+            self.assertIn("--expert-cache-hybrid", doc)
+
+    def test_pinned_l2_is_explicit_leased_and_fail_closed(self) -> None:
+        self.assertIn("uint64_t l2_pinned_bytes;", LLAMA_HEADER)
+        self.assertIn('{"--expert-cache-l2-pinned-mib"}, "N"', ARG_SOURCE)
+        self.assertIn("--expert-cache-l2-pinned-mib requires --expert-cache-l1-k > 0 and at most --expert-cache-l2-mib",
+                      ARG_SOURCE)
+        # CUDA refusing the registration stops startup instead of silently using P.
+        self.assertIn("pinned L2 registration was refused", MOE_RUNTIME)
+        # A direct copy leases its L2 slot; leases return only after the bank event completed.
+        copy = function_body(MOE_RUNTIME, "bool copy_expert(")
+        self.assertIn("cpu_lease_part(", copy)
+        self.assertIn("bank_leases[active_staging_bank].push_back(slot)", copy)
+        self.assertIn("bank_deferred_releases[active_staging_bank].emplace_back(layer, expert)", copy)
+        acquire = function_body(MOE_RUNTIME, "bool acquire_staging_bank()")
+        self.assertLess(acquire.index("cuda_event_synchronize(staging_events[bank])"),
+                        acquire.index("return_bank_leases(bank)"))
+        self.assertIn("(void) drain_direct_copies();", function_body(MOE_RUNTIME, "void enter_phase("))
+        # Leased L2 slots are never eviction victims.
+        self.assertIn("++g_siliangem.slots[resident].leases;", CPU_SOURCE)
+        self.assertIn("slot->leases != 0", CACHE_SOURCE)
+        for doc in (CONFIGURATION, CLI_HELP_DOC, SERVER_HELP_DOC):
+            self.assertIn("--expert-cache-l2-pinned-mib", doc)
+
     def test_prefill_sweep_telemetry_is_explicitly_route_stats_gated(self) -> None:
         sweep = function_body(MOE_RUNTIME, "bool note_prefill_bitmap(")
         self.assertIn("SILIANG_PREFILL_SWEEP", sweep)
@@ -205,7 +251,8 @@ class ArenaOptInContractTests(unittest.TestCase):
         self.assertIn("exchange_slot_count_by_layer", LLAMA_CPARAMS)
         self.assertIn("const bool in_persistent", LLAMA_GRAPH)
         self.assertIn("const bool in_exchange", LLAMA_GRAPH)
-        self.assertIn("(!in_persistent && !in_exchange)", LLAMA_GRAPH)
+        # a decode route slot is K, the shared R tail, or (hybrid decode only) the CPU marker
+        self.assertIn("(!in_persistent && !in_exchange && !on_cpu)", LLAMA_GRAPH)
         self.assertIn("/*.layer_slot_count    =*/ binding_count", MOE_RUNTIME)
         self.assertIn("/*.exchange_slot_first =*/ exchange_first", MOE_RUNTIME)
         self.assertIn("/*.exchange_slot_count =*/ params.exchange_r", MOE_RUNTIME)

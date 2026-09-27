@@ -164,6 +164,7 @@ For the full list of features, please refer to [server's changelog](https://gith
 | `--kv-unified-per-slot N` | context limit per parallel slot (default: unset, behavior unchanged).<br/>when set without -c/--ctx-size, the shared KV pool is sized to n_parallel*N<br/>(env: LLAMA_ARG_KV_UNIFIED_PER_SLOT) |
 | `-ctxcp, --ctx-checkpoints, --swa-checkpoints N` | max number of context checkpoints to create per slot (default: 32)[(more info)](https://github.com/ggml-org/llama.cpp/pull/15293)<br/>(env: LLAMA_ARG_CTX_CHECKPOINTS) |
 | `-cms, --checkpoint-min-step N` | minimum spacing between context checkpoints in tokens (default: 8192, 0 = no minimum)<br/>(env: LLAMA_ARG_CHECKPOINT_MIN_SPACING_NT) |
+| `--no-checkpoint-ubatch` | do not split the prompt n_ubatch + 4 tokens before its end for an extra context checkpoint; the checkpoint 4 tokens before the end and the ones at user messages remain. Each split is one more pass over the routed experts with a streamed expert cache (default: split) |
 | `-cram, --cache-ram N` | set the maximum cache size in MiB (default: 8192, -1 - no limit, 0 - disable)[(more info)](https://github.com/ggml-org/llama.cpp/pull/16391)<br/>(env: LLAMA_ARG_CACHE_RAM) |
 | `-kvu, --kv-unified, -no-kvu, --no-kv-unified` | use single unified KV buffer shared across all sequences (default: enabled if number of slots is auto)<br/>(env: LLAMA_ARG_KV_UNIFIED) |
 | `--cache-idle-slots, --no-cache-idle-slots` | save idle slots to the prompt cache on new task, and clear them when using unified KV (default: enabled, requires cache-ram)<br/>(env: LLAMA_ARG_CACHE_IDLE_SLOTS) |
@@ -187,6 +188,14 @@ For the full list of features, please refer to [server's changelog](https://gith
 | `--expert-cache-l2-mib N` | L2 expert cache capacity in MiB (default: 0) |
 | `--expert-cache-l2-policy {lru,lfu,slfu,cumulative-lfu,wtinylfu,wtinylfu-w10-slru-p80}` | L2 admission/eviction policy; slfu uses lifetime-frequency admission with current-request transient bypass (cumulative-lfu is a legacy alias), and wtinylfu is W-TinyLFU W10/SLRU-P80 (default: lru) |
 | `--expert-cache-l1-k N` | total persistent CUDA L1 policy budget K; heterogeneous models partition K across routed layers; incompatible with LoRA adapters (default: 0) |
+| `--expert-cache-hybrid` | decode only: experts the L1 policy would not admit to K may run on CPU from L2 instead of crossing P and R; a cost table chooses per route (experimental, default: disabled) |
+| `--expert-cache-hybrid-cost CPU_L2,CPU_MISS,STAGE_L2,STAGE_PINNED,STAGE_MISS,GPU` | per-expert cost table coefficients in microseconds for --expert-cache-hybrid: CPU compute of an L2 hit, CPU compute of an uncached expert, host staging of an L2 hit through P, host submission of a pinned L2 hit, host staging of an uncached expert, and H2D plus GPU compute of a staged expert (default: 350,650,400,40,900,170) |
+| `--expert-cache-l2-pinned-mib N` | leading MiB of the L2 arena registered with CUDA so decode and bounded-prefill copies of experts resident there go straight to K or R without the P memcpy; startup fails if CUDA refuses the registration. Requires K > 0 and L2 >= N (experimental, default: 0) |
+| `--expert-cache-l1-k-decode N` | total K slots during decode, above --expert-cache-l1-k; the extra slots live in the end of the CUDA compute buffer that a large prefill ubatch needs and a decode graph leaves idle. Bounded prefill evicts them and uses the --expert-cache-l1-k slots only. Requires --expert-cache-prefill, one expert schema, and CUDA VMM (experimental, default: 0) |
+| `--expert-cache-prefill-layer-major` | experimental, qwen4exp: a prompt longer than one ubatch runs every ubatch through a layer before the next layer starts, so each layer's routed experts are loaded once per prompt; the residual stream of the prompt is held in host memory. Needs -b >= prompt length. Requires --expert-cache-prefill (default: disabled) |
+| `--expert-cache-staging-threads N` | host threads, including the mapping thread, that copy each expert from L2 into the pinned P ring before its H2D copy; requires K > 0 (1-16, default: 1) |
+| `--expert-cache-prefill-l2-retain` | bounded prefill keeps each expert it copies into K in L2 as well, instead of releasing it, so the next ubatch reads it from RAM instead of disk; pair with the slfu L2 policy. Requires --expert-cache-prefill and L2 > 0 (default: disabled) |
+| `--expert-cache-verify` | diagnostic, slow: after each decode route, compare sampled device bytes of every routed K/R slot with the model bytes of the expected expert and log mismatches. Requires K > 0 and model-mapped experts (default: disabled) |
 | `--expert-cache-exchange-r N` | exchange slots R per schema arena; requires K > 0 (default: 0) |
 | `--expert-cache-elevator-p N` | global pinned-host elevator slots P, sized to the largest expert schema; requires K > 0 (default: 0) |
 | `--expert-cache-l1-policy {lfu,slfu,cumulative-lfu,wtinylfu,wtinylfu-w10-slru-p80}` | L1 policy; slfu is Siliang lifetime-frequency admission/bypass (cumulative-lfu is a legacy alias), lfu is always-admit, and wtinylfu is W-TinyLFU W10/SLRU-P80. L1 LRU is retired (default: slfu) |
@@ -1165,6 +1174,8 @@ In *router mode* the query param `?model={model_id}` has to be set. This endpoin
 
 `filename`: Name of the file to save the slot's prompt cache. The file will be saved in the directory specified by the `--slot-save-path` server parameter.
 
+The slot's context checkpoints are written next to it as `<filename>.ckpt` (the file is removed when the slot has none). Recurrent and SWA memory cannot roll back, and a follow-up prompt usually re-tokenizes the last few tokens of the saved sequence differently; without a checkpoint from an earlier position the restored slot would reprocess the whole prompt. Each checkpoint holds the non-rollbackable state (on Qwen3.8 Flash Next about 113 MB), so `--ctx-checkpoints` bounds both host RAM and the sidecar size.
+
 **Response format**
 
 ```json
@@ -1184,6 +1195,10 @@ In *router mode* the query param `?model={model_id}` has to be set. This endpoin
 *Options:*
 
 `filename`: Name of the file to restore the slot's prompt cache from. The file should be located in the directory specified by the `--slot-save-path` server parameter.
+
+With `--expert-cache-prefill-layer-major` the checkpoints inside a prompt are captured during the same decode call instead of splitting the prompt at each checkpoint position.
+
+If `<filename>.ckpt` exists next to it, its context checkpoints are restored too; an invalid checkpoint file is ignored with a warning, and the slot state itself is still restored.
 
 **Response format**
 

@@ -629,6 +629,12 @@ llama_ubatch llama_batch_allocr::split_equal(uint32_t n_ubatch, bool sequential,
             ++cur_idx[s];
         }
 
+        // a requested checkpoint position ends the ubatch after its token
+        if (n_seqs == 1 && !split_cuts.empty() &&
+            std::binary_search(split_cuts.begin(), split_cuts.end(), batch.pos[idxs_per_seq[0].back()])) {
+            break;
+        }
+
         if  ((idxs_per_seq[0].size() + 1)*n_seqs > n_ubatch) {
             break;
         }

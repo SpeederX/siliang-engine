@@ -17,6 +17,14 @@ path without hidden session state.
 | `--expert-cache-l2-mib N` | Managed host L2 capacity in MiB. The requested value is exact and is not silently resized. |
 | `--expert-cache-l2-policy POLICY` | L2 policy: `lru`, `lfu`, `slfu` (`cumulative-lfu` legacy alias), or `wtinylfu-w10-slru-p80`. L2 SLFU admits a candidate only when its lifetime frequency beats the coldest resident victim; rejected candidates are served from bounded current-request host scratch and do not become persistent L2 residency. `wtinylfu` is an accepted short spelling. |
 | `--expert-cache-l1-k N` | Total persistent CUDA L1 policy budget K, in expert slots. Homogeneous models share it globally; heterogeneous models partition it across routed layers. |
+| `--expert-cache-hybrid` | Experimental, decode only. Experts the L1 policy would not admit to K may run on CPU from L2 instead of crossing P and R. A cost table chooses, for every route, how many L2-resident and uncached bypass experts stay on CPU. Predicted K admissions always go to GPU. Requires K and a nonzero L2. Disabled by default. |
+| `--expert-cache-hybrid-cost CPU_L2,CPU_MISS,STAGE_L2,STAGE_PINNED,STAGE_MISS,GPU` | Per-expert cost table coefficients in microseconds for `--expert-cache-hybrid`: CPU compute of an L2 hit, CPU compute of an uncached expert, host staging of an L2 hit through P, host submission of a pinned L2 hit, host staging of an uncached expert, and H2D plus GPU compute of a staged expert. Default: `350,650,400,40,900,170`, measured on Qwen3.8 Flash Next with a Ryzen 5 2600 and an RTX 2070. |
+| `--expert-cache-l2-pinned-mib N` | Experimental. Registers the leading N MiB of the L2 arena with CUDA. Decode and bounded-prefill copies of experts resident there go straight to K or R without the P memcpy (a 900-token prompt increment on Qwen3.8 Flash Next went from about 17.6 to 15.8 s); each such L2 slot stays leased until its copy completes. Startup fails if CUDA refuses the registration. Requires K and at most the L2 size. Default: 0. |
+| `--expert-cache-l1-k-decode N` | Experimental. Total K slots during decode, above `--expert-cache-l1-k`. A large prefill ubatch needs a large CUDA compute buffer, but a decode graph uses only a few MiB of it; the extra slots are mapped onto the end of that buffer with CUDA virtual memory. Bounded prefill evicts them and runs with the `--expert-cache-l1-k` slots, so that value must still hold one prefill route union. Each decode graph is checked before an extra slot is used: if its plan would reach the lent region, the extra slots are dropped with a warning. Requires `--expert-cache-prefill`, one expert schema, and CUDA VMM. Default: 0 (same as K). |
+| `--expert-cache-prefill-layer-major` | Experimental, qwen4exp. A prompt longer than one ubatch runs every ubatch through a layer before the next layer starts, so each layer's routed experts cross the host-to-GPU link once per prompt instead of once per ubatch. The residual stream of the whole prompt is held in host memory (40 KB per token on Qwen3.8 Flash Next). The output is identical to the ubatch-major path for the same ubatch split. A prompt reaches it only when one decode call carries it, so set `-b` to at least the prompt length. Requires `--expert-cache-prefill`. Disabled by default. |
+| `--expert-cache-staging-threads N` | Host threads, the mapping thread included, that copy each expert from L2 into the pinned P ring before its H2D copy. Requires K. Range 1-16, default: 1. |
+| `--expert-cache-prefill-l2-retain` | Bounded prefill keeps each expert it copies into K in L2 as well, instead of the exclusive release decode uses. K is transient during prefill, so without it the next ubatch reads the expert from disk again. Pair it with the `slfu` L2 policy so one prefill pass does not flush L2. Requires `--expert-cache-prefill` and a nonzero L2. Disabled by default. |
+| `--expert-cache-verify` | Diagnostic and slow. After each decode route, samples the device bytes of every routed K/R slot, compares them with the model bytes of the expected expert, and logs mismatches with the expert whose bytes the slot actually holds. Requires K and model-mapped experts. Disabled by default. |
 | `--expert-cache-exchange-r N` | CUDA exchange capacity R per schema arena, in expert slots. Homogeneous physical capacity is K + R. |
 | `--expert-cache-elevator-p N` | One global pinned-host elevator ring P, in expert slots, sized to the largest expert schema. |
 | `--expert-cache-l1-policy POLICY` | L1 policy: `slfu` (Siliang lifetime-frequency admission/bypass; `cumulative-lfu` is a legacy alias), always-admit `lfu`, or W-TinyLFU W10/SLRU-P80. L1 LRU is retired because it scan-thrashes when routed reuse distance exceeds K. |
@@ -45,6 +53,100 @@ B distinct expert schemas, the slot-equivalent device count is K + B*R, not
 K + R. Actual bytes are schema-dependent: each bank allocates its local K plus
 R using that schema's expert size. The resolved runtime logs every bank before
 serving a request.
+
+Per-layer K slices are usually too small for bounded prefill, whose route union
+can reach the full expert count. A file whose routed layers all use one expert
+schema gets one K shared by every layer. Qwen3.8 Flash Next UD-Q2_K_XL
+quantizes layer 2 gate and up as IQ3_XXS and every other layer as IQ2_XS; the
+expert-major converter's `--replace-part` option can swap in layer-2 parts
+requantized to IQ2_XS, which gives a single-schema file.
+
+`--expert-cache-hybrid` changes where decode experts run, not which experts run.
+For each route of each routed layer, K hits stay on GPU and predicted K
+admissions cross to GPU as before. The remaining bypass experts are split by
+residency (L2 hit or uncached), and a precomputed cost table indexed by those
+two counts and the forced-GPU count gives how many of each class stay on CPU.
+The predicted layer time is the host staging of every expert that crosses to
+GPU plus the larger of CPU compute and H2D-plus-GPU compute: the CPU branch
+runs in the host step that maps the route, while the H2D copies it started
+proceed on the private copy stream. Ties keep the expert on GPU. The lowest-ranked candidates are
+the ones moved to CPU, and at least one route slot always stays on GPU.
+
+CPU experts read L2 directly, and uncached ones are read with the same
+overlapped I/O as an L2-only configuration. Their K, P, and R state is
+untouched. The graph computes both branches over full route rows. Each branch
+yields exact zeros for the other's slots, and they are added before the
+ordinary weighted reduction, so the reduction order is unchanged. CPU and GPU
+kernels quantize activations differently, so hybrid output is not bit-identical
+to the all-GPU path. Evaluate divergence before relying on it. Prompt
+processing never uses the CPU route. The shutdown `decode_host` line reports
+host staging time per decode map and per staged expert, which is the
+measurement the staging coefficients should come from.
+
+`--expert-cache-l1-k-decode` separates the prefill and decode K sizes. Prefill
+throughput grows with the ubatch, and a 4096-token ubatch needs about 2.2 GB of
+CUDA compute buffer at 32k context, which leaves room for only a small K next to
+it. Decode wants a large K but runs one token at a time, and its graph plan
+uses only a few MiB of that buffer. With this option the compute buffer is
+allocated with CUDA virtual memory and its end is a separate physical block per
+expert part; the arena maps the same blocks as extra K slots in front of the
+base slots. Every phase change already invalidates K, so the extra slots never
+carry prefill state into decode; entering decode zeroes them, and a decode
+admission into an extra slot keeps the expert's L2 copy because the next prefill
+will drop the slot. When the scheduler reallocates the compute buffer for a
+larger graph, the new buffer maps the same end blocks, so the extra slots stay
+valid. On Qwen3.8 Flash Next with an RTX 2070 (32k context, 29k-token prompt,
+f16 KV cache on GPU): ubatch 3072 with `--expert-cache-l1-k 512
+--expert-cache-l1-k-decode 1440` prefilled at 88 tok/s and decoded at 7.0 tok/s
+after the prompt, against 102.8 and 2.8 tok/s for ubatch 4096 with K 512 and
+`-nkvo`, whose attention on the host costs decode 364 graph splits per token
+instead of 98.
+
+`--expert-cache-prefill-layer-major` targets the other half of that cost. With
+bounded prefill every ubatch streams nearly all routed experts of every layer
+through K, so a long prompt pays the expert traffic once per ubatch. Layer-major
+prefill places every ubatch in the memory modules once, then runs layers
+0..n-2 for all ubatches before moving to the next layer, keeping the residual
+stream in host memory; the memory modules replay each ubatch's placement per
+layer (a second placement would skip the state reset of a new recurrent
+sequence). The last layer runs in the regular ubatch loop, so outputs are
+produced as before. With the same ubatch split the output is identical to the
+ubatch-major path. On the same machine and prompt: 88 -> 211 tok/s with
+`-b 32768 --no-checkpoint-ubatch` (the server otherwise ends the prompt with an
+extra ubatch-sized chunk for a context checkpoint, which costs one more full
+pass over the experts).
+
+With layer-major prefill the server also stops splitting prompts for context
+checkpoints. A recurrent model needs a checkpoint a few tokens before the end of
+each prompt (and at user messages) so the next request can roll back to it; the
+server used to end a decode call at each such position, and every extra call is
+one more pass over the routed experts. Instead the server passes the positions
+to the context, which ends a ubatch at each of them and copies every layer's
+recurrent state row as that layer passes the position. The captured checkpoint
+is byte-identical to the one the split path creates (verified on Qwen3.8 Flash
+Next); a 7.4k-token prompt took 43 s instead of 65 s. Draft-model and multimodal
+requests keep the split path.
+
+Within each layer, bounded prefill issues the disk reads for the experts that
+are not in L2 and copies the L2-resident experts first; each missing expert is
+copied as soon as its own read has landed, while the later reads are still in
+flight. Reading and copying therefore overlap instead of running one after the
+other: on Qwen3.8 Flash Next a 930-token prompt increment went from about 24 s
+to about 16 s, and ubatch-major prefill of a 3.6k-token prompt from 38.7 to
+57.4 tok/s, with bit-identical output.
+
+`--expert-cache-l2-pinned-mib` removes the host memcpy from the GPU route for
+experts resident in the registered part of L2. The registration is split into
+chunks of at most 2 GiB, and every chunk is touched once at startup because the
+driver pins lazily on the first copy. A direct copy leases its L2 slot; the
+lease is returned only after the P bank event of the route that issued the copy
+has completed, and an exclusive L2-to-K release waits for the same point. A
+leased slot is never an L2 eviction victim. Windows limits how much a process
+can register: on a 24 GB machine with an 8 GB RTX 2070 the limit was about
+10 GiB in total, so a 14 GiB L2 can only be partly pinned. Pinned pages cannot
+be trimmed, which leaves less room for the file cache under memory pressure.
+With `--expert-cache-hybrid`, pinned L2 hits are a separate class in the cost
+table.
 
 `--expert-cache-roll deepseek4` is accepted only for the validated DeepSeek4
 shape: 43 routed layers, 256 experts per layer, and top-k 6. v0.1.3 rolls the
@@ -274,6 +376,65 @@ measurements where context checkpoints are not required, add
 `--ctx-checkpoints 0`. To isolate bounded prefill, toggle
 `--expert-cache-prefill` / `--no-expert-cache-prefill` while keeping K, ubatch,
 checkpoint policy, and `-tb 12` unchanged.
+
+## Qwen3.8 Flash Next agent profiles (v0.1.8)
+
+These profiles target a coding agent on the reference workstation: Ryzen 5
+2600, 24 GB RAM, 8 GB RTX 2070, model on an NVMe SSD. They use the
+single-schema expert-major file (UD-Q2_K_XL with layer 2 gate/up requantized to
+IQ2_XS, 78.9 GB) and an f16 KV cache on the GPU. All numbers are
+machine-specific measurements, not guarantees.
+
+32k context, the default agent profile:
+
+```powershell
+& "<llama-server.exe>" -m "<qwen3.8-flash-next-em.gguf>" `
+  -c 32768 -b 32768 -ub 3072 --parallel 1 -ngl 99 -ncmoe 48 --no-op-offload -t 8 -tb 8 `
+  --expert-cache --expert-cache-l2-mib 12288 --expert-cache-l2-policy lfu `
+  --expert-cache-l1-k 512 --expert-cache-l1-k-decode 1440 `
+  --expert-cache-exchange-r 20 --expert-cache-elevator-p 20 --expert-cache-l1-policy slfu `
+  --expert-cache-prefill --expert-cache-prefill-layer-major --no-checkpoint-ubatch `
+  --expert-cache-hybrid --expert-cache-staging-threads 2 --expert-cache-l2-pinned-mib 8192 `
+  --ctx-checkpoints 4 --cache-ram 0 --slot-save-path "<slot-dir>" `
+  --reasoning-budget 16384 --reasoning-budget-message " Time is up: I must stop thinking now and give the final answer." `
+  --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0 --host 127.0.0.1 --port 18081
+```
+
+On a 29k-token prompt: prefill 229 tok/s, decode after it 7.9 tok/s; decode on
+a short prompt 8.9 tok/s. Through a real agent session (Pi, sampling on,
+5k-25k context) decode was 5.1-7.7 tok/s.
+
+Short prompt increments are bounded by disk reads, not by prompt length. A
+20-token follow-up routes to about 4,200 distinct (layer, expert) pairs and a
+900-token tool result to about 18,800 of the 24,064, while the 12 GiB L2 holds
+6,870 experts; the missing ones (about 5 GB and 30 GB) are read from the SSD in
+every prefill pass. Measured: a 20-token follow-up takes 2.0-2.5 s of prefill,
+a 900-token increment about 16 s. More RAM for L2 is what removes this cost.
+
+64k context: replace `-c 32768 -b 32768 -ub 3072` with `-c 65536 -b 65536 -ub
+1024` and use `--expert-cache-l2-mib 10240`, which leaves host RAM for the
+layer-major residual stream (about 2.3 GB on a 59k-token prompt). On a
+59k-token prompt: prefill 195 tok/s, decode after it 5.2 tok/s, 3.4 GB of RAM
+still free. A long agent task that reads many files can fill 32k, so prefer 64k
+for agent work.
+
+A quantized KV cache is an opt-in alternative for 64k, not the default: `-ctk
+q8_0 -ctv q8_0` frees enough VRAM for `-ub 2048` and `--expert-cache-l2-mib
+12288`. On the same 59k-token prompt: prefill 196 tok/s, decode 6.3 tok/s, but
+only 1.5 GB of RAM free. Against the f16 KV cache (all experts on GPU, 65
+teacher-forced positions after the prompt) the next token agreed on 61, with a
+mean top-10 KL divergence of 0.043 (max 0.79).
+
+Thinking: the Qwen3.8 chat template supports it, and the request chooses it.
+`chat_template_kwargs.enable_thinking` turns it on or off, and
+`thinking_budget_tokens` caps it; when the cap is reached the server inserts
+`--reasoning-budget-message` and the end-of-thinking tag, and the model
+answers. `--reasoning-budget` is the cap for requests that do not send one.
+The message must be one line when it comes from a `.cmd` file: the option
+does not unescape `\n`. Pi 0.84.3 sends both fields with `thinkingFormat:
+"qwen-chat-template"` and `thinkingTokenBudgetField: "thinking_budget_tokens"`,
+taking the budgets from its `thinkingBudgets` setting; it maps `xhigh` and
+`max` to the `high` budget.
 
 ## Pi and the OpenAI-compatible server
 
