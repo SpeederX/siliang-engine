@@ -14,33 +14,33 @@
   "source": {
     "canonicalPatch": {
       "path": "patches/siliang-engine.patch",
-      "sha256": "089C75CCB662F33B2B0DE4C4B2EB8100C525BEBC6B07C9AEE6B96C273F818748",
-      "gitBlob": "72899b15202e122ac31d7feb05a6dea950c0c58b"
+      "sha256": "E17AF8BD6A38BCC4CFEF09A934EC719B4050A8815D76285325D6B0359B6DCD68",
+      "gitBlob": "a5f5c67474591f22250cfc1d3ca1fa62c4f4f020"
     },
     "engineDelta": {
-      "insertions": 11241,
-      "deletions": 37,
+      "insertions": 15119,
+      "deletions": 266,
       "files": [
         {
           "path": "common/arg.cpp",
           "status": "modified",
           "mode": "100644",
           "baseBlob": "63e342776d549b6abaf9c4aef5543a729e6dfd97",
-          "finalBlob": "88257aecdd6e4b6606e8750d67aaaea0d64c5bba"
+          "finalBlob": "99fba78ea8e1c06c42bd2aa8d4c2f48becfc0e4a"
         },
         {
           "path": "common/common.cpp",
           "status": "modified",
           "mode": "100644",
           "baseBlob": "364688ef466dab454e278e4e7c8f85864e39f432",
-          "finalBlob": "7e5ff09b17a5e7f0016d9b91c6edba556e751583"
+          "finalBlob": "e71da00dae2766a165ecdf9fbcccaef01448ef74"
         },
         {
           "path": "common/common.h",
           "status": "modified",
           "mode": "100644",
           "baseBlob": "9194d3dcb650a37c10dade1f10b7f1430936db9c",
-          "finalBlob": "9102beb9fe390a49365d2e9016d1d0649fbf44ea"
+          "finalBlob": "7bc8a90dc6a2abb359a3cfe84cad262396b6795f"
         },
         {
           "path": "common/speculative.cpp",
@@ -50,74 +50,95 @@
           "finalBlob": "2eb9ce9c722052ef40fdc986e4687ac1354473aa"
         },
         {
+          "path": "ggml/include/ggml-alloc.h",
+          "status": "modified",
+          "mode": "100644",
+          "baseBlob": "a7926a21a9a20f37a4b75cf19fbca5d8d88b7779",
+          "finalBlob": "aa704df1748a76cc20242817bf2abe28c50eeb70"
+        },
+        {
           "path": "ggml/include/ggml-backend.h",
           "status": "modified",
           "mode": "100644",
           "baseBlob": "cc3f8cd36e3549c4f3ed3d6ad5f6b577af4b837b",
-          "finalBlob": "7f5cf0f4f39d27998cbcf9c2ac1dc62fd52dc3dc"
+          "finalBlob": "7a74515c6df84c85157967e882840c50ff19a4cc"
         },
         {
           "path": "ggml/include/ggml-cpu.h",
           "status": "modified",
           "mode": "100644",
           "baseBlob": "dc6453c6eaa16667f720f987659ad42d03a403a2",
-          "finalBlob": "8f1634660f907e8e2d52ad8c20c122e576544184"
+          "finalBlob": "d138f1f5ad8bb6cd216f1155989648712a14d38e"
         },
         {
           "path": "ggml/include/ggml-cuda.h",
           "status": "modified",
           "mode": "100644",
           "baseBlob": "1cd81eeaebcdf4abcd46c87ba1a9a46e275aa12b",
-          "finalBlob": "6c4776a86af28a6485d8cfb8b4242b2080e7bd16"
+          "finalBlob": "ce2e5aee685b23a6ecc8c912969b43c352e6389d"
+        },
+        {
+          "path": "ggml/src/ggml-alloc.c",
+          "status": "modified",
+          "mode": "100644",
+          "baseBlob": "a71838eafc69d1cab66dfb87885690a6e1e464d0",
+          "finalBlob": "7d73bf15df2849ed07b3b370729ffc33874d606e"
         },
         {
           "path": "ggml/src/ggml-backend.cpp",
           "status": "modified",
           "mode": "100644",
           "baseBlob": "20bf965017e31338f579c1d8d1a64b0ab56c78ee",
-          "finalBlob": "fa80801b1ed78088f5b04d426a40931e1df87161"
+          "finalBlob": "221e903a33d8b40d1ea5399a0f2c2d52846abf4b"
         },
         {
           "path": "ggml/src/ggml-cpu/ggml-cpu-impl.h",
           "status": "modified",
           "mode": "100644",
           "baseBlob": "5dd9ec8e628acad32537e87eccfdeb01c1c1dc46",
-          "finalBlob": "699e60a2680883f6872dad7cf26ac72c3eb587e1"
+          "finalBlob": "747ca497185a82b1d9960f033e077fb0081f2e94"
         },
         {
           "path": "ggml/src/ggml-cpu/ggml-cpu.c",
           "status": "modified",
           "mode": "100644",
           "baseBlob": "8bb0ff7bc3366be957dd20aba3fbe0f50dd249d7",
-          "finalBlob": "0be59cf484cc81ba3da5c5b0d6c066d1a593487f"
+          "finalBlob": "e69f8787edf331dd8ed243df304711105e98c200"
         },
         {
           "path": "ggml/src/ggml-cpu/ggml-cpu.cpp",
           "status": "modified",
           "mode": "100644",
           "baseBlob": "1df0f2bb926894eba96beef691ff2bf520ab70b3",
-          "finalBlob": "1dc3a427112d12dd268388fbfc519dd56ccba6d1"
+          "finalBlob": "7d9ef8cc749e2618c598032f3844eb24fad7c4fb"
         },
         {
           "path": "ggml/src/ggml-cpu/siliangem_moe_cache.h",
           "status": "added",
           "mode": "100644",
           "baseBlob": null,
-          "finalBlob": "ac2847ed50393af5b29366492386249a61f378a2"
+          "finalBlob": "749c822367ec5a820c9f0c1dfd88c47400d9a0aa"
         },
         {
           "path": "ggml/src/ggml-cuda/ggml-cuda.cu",
           "status": "modified",
           "mode": "100644",
           "baseBlob": "e76ff3128fddd7bf248e16b8469d27c2f441b8e1",
-          "finalBlob": "011f69f075910448498ed2fbe0c6d2f7e5b346d0"
+          "finalBlob": "a27e493276bc405253355a748f41fdec9890c914"
+        },
+        {
+          "path": "ggml/src/ggml-cuda/top-k.cu",
+          "status": "modified",
+          "mode": "100644",
+          "baseBlob": "c7a0c831788df8547ffd86c8a68e6d53aff61130",
+          "finalBlob": "af47a8172298ca3f0e9746b06b9dd42776d93201"
         },
         {
           "path": "include/llama.h",
           "status": "modified",
           "mode": "100644",
           "baseBlob": "1805ed0559f92a818dfe951b012608ee2be3115c",
-          "finalBlob": "22c232bb3d86d746747514d04ff213400846c68f"
+          "finalBlob": "601fcd1eac17ce398073a00cc83ff856dd6f17dd"
         },
         {
           "path": "src/CMakeLists.txt",
@@ -127,39 +148,116 @@
           "finalBlob": "4ff52fe171c6f3f525997cb3156d095792821b14"
         },
         {
+          "path": "src/llama-batch.cpp",
+          "status": "modified",
+          "mode": "100644",
+          "baseBlob": "89a1f3f37c7b3cce944e4114aa3bbae89f42f109",
+          "finalBlob": "0dd4fec52bcc881db5c6e878ced208b1054fe814"
+        },
+        {
+          "path": "src/llama-batch.h",
+          "status": "modified",
+          "mode": "100644",
+          "baseBlob": "201d48cce18dd56786162fde75987fd0989b69fd",
+          "finalBlob": "e8eac6aafe48153048fdaf25c3bc92e05b42347d"
+        },
+        {
           "path": "src/llama-context.cpp",
           "status": "modified",
           "mode": "100644",
           "baseBlob": "8675f6087336069c43dffff0435002bb4358c6f5",
-          "finalBlob": "da980e7990e8f69496983dc3086ec4af2bf33bf1"
+          "finalBlob": "00c648eaec5c27aecadbdef7c0c1528c89a94e16"
         },
         {
           "path": "src/llama-context.h",
           "status": "modified",
           "mode": "100644",
           "baseBlob": "b403b099b76fefea6f3d8a4959bb12287b633876",
-          "finalBlob": "5a147f5459407f34c7a37804ef8c2481ea0e9f71"
+          "finalBlob": "b73d7a7865154cd622f8ad956292f5feb1ede981"
         },
         {
           "path": "src/llama-cparams.h",
           "status": "modified",
           "mode": "100644",
           "baseBlob": "b592de18c79470243ece446cb7db1ca00b0b803b",
-          "finalBlob": "5a1a83b306b2a0b88f872d158155a66a2924f2e8"
+          "finalBlob": "4dffdc345d10d6cba198831cf040b40191a898fe"
         },
         {
           "path": "src/llama-graph.cpp",
           "status": "modified",
           "mode": "100644",
           "baseBlob": "0b3bab612375b27b357971287857826dcc8b66e8",
-          "finalBlob": "158cf8b74993536ea05ebd7a37b2c26fa73a51d1"
+          "finalBlob": "ffdb9bdb2348be65a21747168b99ae9e154c9eb5"
         },
         {
           "path": "src/llama-graph.h",
           "status": "modified",
           "mode": "100644",
           "baseBlob": "3daa425bc07bdb2ee9b618124bfa7dfcebc6094f",
-          "finalBlob": "e03a1b59a38ed55d5556a3e457b93d21e9a3b531"
+          "finalBlob": "ec0ef82b2ff4ec48193ee24e972d3cc583a7cd07"
+        },
+        {
+          "path": "src/llama-kv-cache.cpp",
+          "status": "modified",
+          "mode": "100644",
+          "baseBlob": "332d1abe028f23b974e47d9643cdd849afcd75a0",
+          "finalBlob": "f8d0cc47ed67be63587538095c3bd790d9d2fd22"
+        },
+        {
+          "path": "src/llama-kv-cache.h",
+          "status": "modified",
+          "mode": "100644",
+          "baseBlob": "c4d8699def1216170b3d7d00ba2f8712070ebfcf",
+          "finalBlob": "76f1c7e49149993de7403f1518c403a84e57d9de"
+        },
+        {
+          "path": "src/llama-memory-hybrid-idx.cpp",
+          "status": "modified",
+          "mode": "100644",
+          "baseBlob": "3972ce9ce29346dc5fb319232a634b01897ec2e0",
+          "finalBlob": "d4a931ca1bce5fc07ebe9af024005b432d398803"
+        },
+        {
+          "path": "src/llama-memory-hybrid-idx.h",
+          "status": "modified",
+          "mode": "100644",
+          "baseBlob": "705189e7eb5886b3faccefd6e21745aabf0d41fa",
+          "finalBlob": "516fe65c2569c1822426c122964158af017e9862"
+        },
+        {
+          "path": "src/llama-memory-hybrid.cpp",
+          "status": "modified",
+          "mode": "100644",
+          "baseBlob": "42c7381a9e6fa507c925ba66a35a7e433c4447b8",
+          "finalBlob": "89681ea7cb1f369fc7454b1f27bd7bb523c1d3a1"
+        },
+        {
+          "path": "src/llama-memory-hybrid.h",
+          "status": "modified",
+          "mode": "100644",
+          "baseBlob": "484eafb749910567b8c50ec36d46bdb678c75426",
+          "finalBlob": "b55d050a5109e086073e88cbe1255de8a2bbad10"
+        },
+        {
+          "path": "src/llama-memory-recurrent.cpp",
+          "status": "modified",
+          "mode": "100644",
+          "baseBlob": "57919accf09569e129ab35b5b2bd4dab7dbe8a3a",
+          "finalBlob": "412506ca15efada908b7e1a5a7a064213c124635"
+        },
+        {
+          "path": "src/llama-memory-recurrent.h",
+          "status": "modified",
+          "mode": "100644",
+          "baseBlob": "4abb3f5cf5c09611844dff5361ca36e51ff9c07f",
+          "finalBlob": "cf5ecd27d976fe8164ff2fd2d11a3782771d761d"
+        },
+        {
+          "path": "src/llama-memory.h",
+          "status": "modified",
+          "mode": "100644",
+          "baseBlob": "db825396645e61c94213ca1e94b78d71d1538d67",
+          "finalBlob": "c68dba585e40599d00f512eaf5d8edb104f0ed03"
         },
         {
           "path": "src/llama-model-loader.cpp",
@@ -204,6 +302,13 @@
           "finalBlob": "bf61c024c1cf005a85c9f7e3c8f21c0abb2514b3"
         },
         {
+          "path": "src/models/qwen4exp.cpp",
+          "status": "modified",
+          "mode": "100644",
+          "baseBlob": "f33989de023d377505b0da438f484efb12114410",
+          "finalBlob": "3a53e9bcf7f217726c19341aef676cdac807c7c5"
+        },
+        {
           "path": "src/siliang-ds4-front-slab.cpp",
           "status": "added",
           "mode": "100644",
@@ -229,14 +334,14 @@
           "status": "added",
           "mode": "100644",
           "baseBlob": null,
-          "finalBlob": "9839e977f8d1a4f6bcd2ec26154576f17890cb1e"
+          "finalBlob": "508d971c25405067716b9f067913582c6aa68631"
         },
         {
           "path": "src/siliang-moe-runtime.h",
           "status": "added",
           "mode": "100644",
           "baseBlob": null,
-          "finalBlob": "351dbbdfde9540f9b553accb30ec949dd6da5616"
+          "finalBlob": "2e374427813aad8142028a6d8c738d433842dc12"
         },
         {
           "path": "tests/CMakeLists.txt",
@@ -257,14 +362,14 @@
           "status": "added",
           "mode": "100644",
           "baseBlob": null,
-          "finalBlob": "7d740fe1e709cf8a7985ff418124a732c3f281c8"
+          "finalBlob": "d4237159e5c1f1c284c5c466a13fc93ec4e17db2"
         },
         {
           "path": "tools/server/server-context.cpp",
           "status": "modified",
           "mode": "100644",
           "baseBlob": "e95fb63ab3cca4352f627738edb077ce8413b31f",
-          "finalBlob": "2f4325a704f82a07174369d1f3e861cfc67deb8a"
+          "finalBlob": "dabeccf6843172be0e7cc9492818aecd388e6d70"
         }
       ]
     }
