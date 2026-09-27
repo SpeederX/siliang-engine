@@ -139,7 +139,7 @@ def w_kv_str(k, v):
     return w_str(k) + struct.pack("<I", 8) + w_str(v)
 
 
-def verify(a, g, parts, layers, n_experts, geom):
+def verify(a, g, parts, layers, n_experts, geom, replacements=None):
     """Byte-compare random (layer, expert, part) slices dst vs src.
 
     The reorder is pure data movement, so every byte must survive it. A wrong
@@ -178,8 +178,13 @@ def verify(a, g, parts, layers, n_experts, geom):
         for p in parts:
             per, _, tname, _tid = geom[L][p]
             got = buf[off:off + per].tobytes()
-            fs.seek(g.tensors[tname].abs_offset + e * per)
-            want = fs.read(per)
+            if replacements and tname in replacements:
+                with open(replacements[tname][0], "rb") as fr:
+                    fr.seek(e * per)
+                    want = fr.read(per)
+            else:
+                fs.seek(g.tensors[tname].abs_offset + e * per)
+                want = fs.read(per)
             off += per            # parts are contiguous within one expert
             if want != got:
                 bad += 1
@@ -193,6 +198,36 @@ def verify(a, g, parts, layers, n_experts, geom):
           f"byte-identical to source  OK")
 
 
+def apply_replacements(specs, geom, layers, parts, n_experts):
+    """Point selected (layer, part) slices at raw files with a new type.
+
+    Returns {tensor_name: (path, bytes_per_expert)}. geom is updated in place,
+    so strides, padding and the siliangem.* part metadata follow the new type.
+    """
+    out = {}
+    by_name = {geom[L][p][2]: (L, p) for L in layers for p in parts}
+    for spec in specs:
+        name, _, rest = spec.partition("=")
+        type_text, _, path = rest.partition(":")
+        if not name or not type_text or not path:
+            raise SystemExit(f"--replace-part expects TENSOR=TYPE_ID:PATH, got {spec!r}")
+        if name not in by_name:
+            raise SystemExit(f"--replace-part: {name} is not a routed-expert part")
+        type_id = int(type_text)
+        if type_id not in GGML_TYPES:
+            raise SystemExit(f"--replace-part: unknown ggml type id {type_id}")
+        size = os.path.getsize(path)
+        if size % n_experts:
+            raise SystemExit(f"--replace-part: {path} ({size} B) is not a whole number of {n_experts} experts")
+        per = size // n_experts
+        L, p = by_name[name]
+        _old_per, n_exp, tname, _old_type = geom[L][p]
+        geom[L][p] = (per, n_exp, tname, type_id)
+        out[name] = (path, per)
+        print(f"replace       : {name} <- {path} ({GGML_TYPES[type_id][0]}, {per:,} B per expert)")
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--src", required=True)
@@ -202,6 +237,10 @@ def main():
     ap.add_argument("--verify", action="store_true",
                     help="byte-compare random experts in --dst against --src")
     ap.add_argument("--samples", type=int, default=64)
+    ap.add_argument("--replace-part", action="append", default=[], metavar="TENSOR=TYPE_ID:PATH",
+                    help="take one routed-expert tensor from a raw file instead of --src, with a new "
+                         "ggml type id (for example a layer requantized to the majority schema); "
+                         "the file holds the experts back to back in source order")
     a = ap.parse_args()
 
     if os.path.exists(a.dst) and not a.dry_run and not a.verify:
@@ -210,9 +249,10 @@ def main():
     g = GGUF(a.src)
     parts, layers, n_experts, geom = discover(g)
     n_layers = len(layers)
+    replacements = apply_replacements(a.replace_part, geom, layers, parts, n_experts)
 
     if a.verify:
-        return verify(a, g, parts, layers, n_experts, geom)
+        return verify(a, g, parts, layers, n_experts, geom, replacements)
 
     # ---- expert stride padding ------------------------------------------
     # TWO hard constraints, satisfied by one pad target.
@@ -454,24 +494,34 @@ def main():
             L = src[1]
             idx = layers.index(L)
             bases = {}
+            sources = {}
             for p in parts:
                 per, _, tname, _tid = geom[L][p]
-                bases[p] = (g.tensors[tname].abs_offset, per)
+                if tname in replacements:
+                    sources[p] = open(replacements[tname][0], "rb")
+                    bases[p] = (0, per)
+                else:
+                    sources[p] = fin
+                    bases[p] = (g.tensors[tname].abs_offset, per)
             pad_n = expert_bytes[idx] - raw_expert_bytes[idx]
             pad_buf = b"\0" * pad_n
             for e in range(n_experts):
                 for p in parts:
                     base, per = bases[p]
-                    fin.seek(base + e * per)
+                    src_file = sources[p]
+                    src_file.seek(base + e * per)
                     left = per
                     while left:
-                        chunk = fin.read(min(1 << 24, left))
+                        chunk = src_file.read(min(1 << 24, left))
                         if not chunk:
                             raise SystemExit(f"short read on {name} expert {e}")
                         fout.write(chunk)
                         left -= len(chunk)
                 if pad_n:
                     fout.write(pad_buf)   # never read by compute; alignment only
+            for handle in sources.values():
+                if handle is not fin:
+                    handle.close()
         written += nbytes
         if written % (1 << 30) < nbytes:
             print(f"  ... {written/1024**3:.1f} GiB", flush=True)
