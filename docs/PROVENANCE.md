@@ -34,10 +34,12 @@ The patch uses full Git object IDs and LF line endings. It contains exactly
 
 ## Engine delta
 
-The v0.1.7 engine boundary covers the shared typed argument and context
-configuration, CPU/CUDA backend transfer hooks, model-owned expert sources,
-the generic K/R/P runtime, the DeepSeek4 FRONT slab, graph and server error
-propagation, the C++ argument-parser contract test, and the focused bounded-
+The v0.1.8 engine boundary covers the shared typed argument and context
+configuration, CPU/CUDA backend transfer hooks, the ggml plan-size query, the
+CUDA decode tail buffer and deterministic top-k, model-owned expert sources,
+the generic K/R/P runtime, the DeepSeek4 FRONT slab, the batch splitter, KV and
+recurrent memory replay for layer-major prefill and in-batch checkpoints, the
+qwen4exp layer-range graph, graph and server error propagation, the C++ argument-parser contract test, and the focused bounded-
 prefill/bitmap test. Product documentation,
 release workflows, PowerShell helpers, and Python product-contract tests are
 maintained in the fork but are deliberately excluded from the canonical engine

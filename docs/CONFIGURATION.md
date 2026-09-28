@@ -405,8 +405,8 @@ a short prompt 8.9 tok/s. Through a real agent session (Pi, sampling on,
 5k-25k context) decode was 5.1-7.7 tok/s.
 
 Short prompt increments are bounded by disk reads, not by prompt length. A
-20-token follow-up routes to about 4,200 distinct (layer, expert) pairs and a
-900-token tool result to about 18,800 of the 24,064, while the 12 GiB L2 holds
+20-token follow-up routes to about 4,400 distinct (layer, expert) pairs and a
+900-token tool result to about 19,300 of the 24,576, while the 12 GiB L2 holds
 6,870 experts; the missing ones (about 5 GB and 30 GB) are read from the SSD in
 every prefill pass. Measured: a 20-token follow-up takes 2.0-2.5 s of prefill,
 a 900-token increment about 16 s. More RAM for L2 is what removes this cost.
