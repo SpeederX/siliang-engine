@@ -1,7 +1,7 @@
 # Runtime configuration
 
-Siliang Engine v0.1.3 configures its expert memory hierarchy through typed
-command-line options. The same options appear in `llama-cli --help` and
+Siliang Engine configures its expert memory hierarchy through typed
+command-line options (introduced in v0.1.3; this page describes v0.1.8). The same options appear in `llama-cli --help` and
 `llama-server --help`. The expert cache is opt-in: omit the options, or pass
 `--no-expert-cache`, to use the ordinary model path.
 
@@ -35,6 +35,7 @@ path without hidden session state.
 | `--expert-cache-memory-report` / `--no-expert-cache-memory-report` | Enable or suppress periodic host-memory reporting. |
 | `--expert-cache-route-stats` / `--no-expert-cache-route-stats` | Emit aggregate decode-route residency/execution statistics at shutdown, including L1/L2/uncached and K/R/CPU execution composition histograms. Requires L1 K/R/P. The explicit telemetry is written to stderr even at normal CLI verbosity. Disabled by default. |
 | `--expert-cache-deferred-wait` / `--no-expert-cache-deferred-wait` | Enable or disable deferred L2 I/O waits. |
+| `--no-checkpoint-ubatch` | `llama-server` only. By default the server ends a prompt `n_ubatch + 4` tokens before its end for an extra context checkpoint; with a streamed expert cache that split is one more pass over the routed experts. This option drops that split and keeps the checkpoint 4 tokens before the end and those at user messages. Use it with layer-major prefill. |
 
 L1 does not exist as a standalone K allocation. If K is nonzero, both R and P
 must be nonzero. K must be at least the model top-k; R and P must each be at

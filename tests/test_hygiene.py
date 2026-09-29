@@ -18,6 +18,7 @@ SILIANG_AUTHORED_FILES = (
     "THIRD_PARTY_NOTICES.md",
     "assets/siliang-engine.png",
     "docs/CONFIGURATION.md",
+    "docs/HISTORICAL_RESULTS.md",
     "docs/PERFORMANCE.md",
     "docs/PROVENANCE.md",
     "docs/REPOSITORY_LAYOUT.md",

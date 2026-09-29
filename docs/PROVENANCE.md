@@ -148,9 +148,12 @@ part of the source manifest.
 Siliang intentionally carries two workflows. `.github/workflows/ci.yaml`
 validates the Windows release path plus representative Linux CPU and macOS Metal
 builds, and packages Windows CPU/CUDA artifacts for version tags.
-`.github/workflows/release.yml` is the tag-triggered and manually dispatchable
-publisher for an existing `v*` tag; it rebuilds and verifies the release packages
-before creating a draft prerelease. These compatibility jobs prove that the Siliang delta does
+`.github/workflows/release.yml` is the publisher. It starts when a CI run for a
+`v*` tag push completes successfully, or by manual dispatch for an existing tag.
+It does not rebuild: it checks that the tag resolves to the checked-out commit,
+downloads that CI run's packaged artifacts, verifies their checksums and
+inventory, and publishes them as a prerelease. It replaces an existing release
+only if that release is still a draft. These compatibility jobs prove that the Siliang delta does
 not silently narrow the upstream build surface; they do not claim that the
 Windows-only expert arena is implemented on those platforms. Other upstream
 llama.cpp workflows are not carried into the fork because their scheduled,

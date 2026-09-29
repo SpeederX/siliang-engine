@@ -19,7 +19,9 @@ L1 keeps K persistent experts plus R exchange slots and a bounded pinned P
   the CPU cache-control path. Per-sweep route bitmaps measure reuse without
   enabling speculative admission. Expert-major GGUF remains the recommended source layout for DS4 and
 GPT-OSS; compatible stock MoE models can promote experts from their existing
-resident host tensors without allocating a redundant L2.
+resident host tensors without allocating a redundant L2. v0.1.8 qualifies the
+arena for Qwen3.8 Flash Next as a local coding-agent backend on an 8 GB GPU and
+24 GB of RAM.
 
 The Siliang expert arena is supported on Windows today. The fork preserves the
 upstream backend architecture, and release CI also builds Linux CPU and macOS
@@ -63,65 +65,35 @@ K216/R12/P12 server command, Pi endpoint, policy options, and conservative
 
 ## Performance
 
-Values below are experimental decode throughput. Each row names its paired
-control; the current layout comparison keeps the arena enabled in both arms,
-while the arena comparisons use an explicit mmap control. Raw measurements,
-settings, calculations, and evidence limitations are in
-[`docs/PERFORMANCE.md`](docs/PERFORMANCE.md).
+Reference-workstation observations (hardware below), not universal throughput
+claims. Rates are server-reported tokens per second; benchmarks use greedy
+sampling (temperature 0, top-k 1, seed 42) and a fresh server process per run.
+Rows were not re-measured on later engine versions; the Engine column links to
+the release notes or benchmark record. In the configurations, K is the number of
+GPU slots that keep experts resident, R the GPU exchange slots, P the pinned
+host staging slots, and the RAM cache is the L2 expert cache in system memory.
 
-These rows describe earlier runtime revisions and remain **historical evidence**.
-They are not v0.1.8 throughput claims. v0.1.8 keeps the broader model qualification
-for Gemma4, Qwen3, Qwen3.6, Ornith, GPT-OSS, and DeepSeek4 at the v0.1.3
-evidence recorded in
-[`docs/releases/v0.1.3.md`](docs/releases/v0.1.3.md) and
-[`docs/PERFORMANCE.md`](docs/PERFORMANCE.md#v013-release-candidate-qualification-2026-08-31).
-The historical DS4 2,000-token capacity observations remain documented separately
-in [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md#historical-ds4-capacity-observations).
+| Model | Result | Configuration | Engine |
+| --- | --- | --- | --- |
+| Qwen3.8 Flash Next, UD-Q2_K_XL expert-major ([model](https://huggingface.co/SpeederX/Qwen3.8-Flash-Next-UD-Q2_K_XL-EM-GGUF)) | Prefill of 28,908 tok: 229.4 tok/s<br>Decode of 256 tok: 6.9 tok/s (7.9 after token 64)<br>Runs: 1<br>Warmup: 0 tok | [32k agent profile](docs/CONFIGURATION.md#qwen38-flash-next-agent-profiles-v018): 12 GiB RAM cache (8 GiB pinned), K 512 in prefill and 1,440 in decode, hybrid CPU/GPU decode, layer-major prefill, ubatch 3072, f16 KV | [v0.1.8](docs/releases/v0.1.8.md) |
+| Qwen3.8 Flash Next | Prefill of 26 tok: not measured<br>Decode of 512 tok: 8.92 tok/s<br>Runs: 1<br>Warmup: 48 tok | [32k agent profile](docs/CONFIGURATION.md#qwen38-flash-next-agent-profiles-v018) | [v0.1.8](docs/releases/v0.1.8.md) |
+| Qwen3.8 Flash Next | Prefill of 5k-25k tok context: not measured<br>Decode of agent replies: 5.1-7.7 tok/s (range over turns)<br>Runs: real Pi agent session, sampling on<br>Warmup: none | [32k agent profile](docs/CONFIGURATION.md#qwen38-flash-next-agent-profiles-v018) | [v0.1.8](docs/releases/v0.1.8.md) |
+| Qwen3.8 Flash Next | Prefill of 58,777 tok: 194.8 / 195.0 tok/s<br>Decode of 256 tok: 5.3 / 5.2 tok/s after token 64<br>Runs: 2 (both values shown)<br>Warmup: 0 tok | [64k agent profile](docs/CONFIGURATION.md#qwen38-flash-next-agent-profiles-v018): as 32k, with a 10 GiB RAM cache and ubatch 1024 | [v0.1.8](docs/releases/v0.1.8.md) |
+| DeepSeek V4 Flash 0731, expert-major | Prefill of 7,369 tok: 37.97 tok/s (v0.1.7 in the same session: 26.36)<br>Decode of 32 tok: not reported<br>Runs: 3, median (range 37.83-38.47)<br>Warmup: 0 tok | Bounded prefill on GPU: K256/R12/P12, 2 GiB RAM cache (LFU), FRONT rolling, ubatch 1024, 12 prompt threads | [v0.1.8](docs/releases/v0.1.8.md) |
+| DeepSeek V4 Flash 0731, expert-major | Prefill of 26 tok: not measured<br>Decode of 128 tok: 1.666 tok/s (v0.1.7 in the same session: 1.672); desktop in use<br>Runs: 3, median (range 1.643-1.702)<br>Warmup: 48 tok | v0.1.3 DS4 profile: K216/R12/P12, 8 GiB RAM cache (LRU), FRONT rolling, prefill off, 2 threads | [v0.1.8](docs/releases/v0.1.8.md) |
+| DeepSeek V4 Flash 0731, expert-major | Prefill of 26 tok: not measured<br>Decode of 128 tok: 2.044 tok/s; idle machine<br>Runs: 3, median (range 1.973-2.129)<br>Warmup: 48 tok | v0.1.3 DS4 profile, as above | [v0.1.7](docs/releases/v0.1.7.md) |
+| Gemma4 26B-A4B | Prefill of short prompt: not measured<br>Decode of 256 tok: 21.651 tok/s<br>Runs: 3, median (range 21.253-21.672)<br>Warmup: not recorded | Stock GGUF, experts promoted from host memory (no separate RAM cache): K1440/R16/P16, W-TinyLFU GPU policy | [v0.1.3](docs/releases/v0.1.3.md) |
+| Qwen3 30B-A3B | Prefill of short prompt: not measured<br>Decode of 256 tok: 19.261 tok/s<br>Runs: 3, median (range 17.360-20.164)<br>Warmup: not recorded | Stock GGUF, experts promoted from host memory: K1440/R16/P16, W-TinyLFU GPU policy | [v0.1.3](docs/releases/v0.1.3.md) |
+| Ornith 1.0 35B | Prefill of short prompt: not measured<br>Decode of 256 tok: 13.967 tok/s<br>Runs: 3, median (range 13.948-14.004)<br>Warmup: not recorded | Stock GGUF, experts promoted from host memory: K1920/R16/P16, W-TinyLFU GPU policy | [v0.1.3](docs/releases/v0.1.3.md) |
+| Qwen3.6 35B-A3B | Prefill of short prompt: not measured<br>Decode of 256 tok: 11.011 tok/s<br>Runs: 3, median (range 10.210-11.392)<br>Warmup: not recorded | Expert cache off (plain CPU-MoE path). With K1440/R16/P16 it was correct but slower: 9.279 tok/s | [v0.1.3](docs/releases/v0.1.3.md) |
+| GPT-OSS 120B | Prefill of short prompt: not measured<br>Decode of 256 tok: 3.344 tok/s; low host-memory headroom<br>Runs: 3, median (range 3.335-3.356)<br>Warmup: not recorded | Expert-major GGUF, 18 GiB managed RAM cache (LRU), no GPU expert slots, prefill off | [v0.1.3](docs/releases/v0.1.3.md) |
+| DeepSeek V4 Flash | Prefill of short prompt: not measured<br>Decode of 2,048 tok: 1.944 tok/s; depth and stability check<br>Runs: 1<br>Warmup: not recorded | v0.1.3 DS4 profile: K216/R12/P12, 8 GiB RAM cache, FRONT rolling | [v0.1.3](docs/releases/v0.1.3.md) |
+| DeepSeek V4 Flash 0731 | Prefill of short prompt: not measured<br>Decode of 256 tok: 2.774 tok/s vs 2.274 on the stock file (1.22x)<br>Runs: 3 per arm, median (range 2.689-2.850)<br>Warmup: 0 tok, file cache purged | Layout A/B: expert-major vs stock GGUF, both with the same 18 GiB RAM cache | [pre-v0.1.3](docs/HISTORICAL_RESULTS.md#arena-and-layout-benchmarks-2026-08) |
+| DeepSeek V4 Flash 0731 | Prefill of short prompt: not measured<br>Decode of 256 tok: 2.291 tok/s vs 1.375 on mmap (1.67x)<br>Runs: 3 per arm, median (range 2.217-2.385)<br>Warmup: not recorded | Cache A/B on the stock GGUF: 18 GiB RAM cache vs plain mmap | [pre-v0.1.3](docs/HISTORICAL_RESULTS.md#arena-and-layout-benchmarks-2026-08) |
+| DeepSeek V4 (pre-0731) | Prefill of short prompt: not measured<br>Decode of 256 tok: 2.246 tok/s vs 1.098 on stock mmap (2.05x)<br>Runs: 3 per arm, median (range 2.171-2.257)<br>Warmup: 48 tok | Expert-major file with a 12 GiB RAM cache vs the stock file on plain mmap | [pre-v0.1.3](docs/HISTORICAL_RESULTS.md#arena-and-layout-benchmarks-2026-08) |
+| gpt-oss-120B | Prefill of short prompt: not measured<br>Decode of 256 tok: 4.052 tok/s vs 1.972 on mmap (2.06x)<br>Runs: 3 per arm, median (range 3.953-4.094)<br>Warmup: 48 tok | Cache A/B on the same expert-major file: RAM cache vs plain mmap | [pre-v0.1.3](docs/HISTORICAL_RESULTS.md#arena-and-layout-benchmarks-2026-08) |
 
-### v0.1.3 qualification snapshot
-
-Fresh `llama-server` release-candidate qualification on the reference Windows
-CUDA workstation produced the following 3-start 256-token decode medians. These
-are release evidence, not universal presets:
-
-| Model / v0.1.3 path | Median decode | Range |
-| --- | ---: | ---: |
-| Gemma4 26B-A4B, K1440/R16/P16 | **21.651 tok/s** | 21.253-21.672 |
-| Qwen3 30B-A3B, K1440/R16/P16 | **19.261 tok/s** | 17.360-20.164 |
-| Qwen3.6 35B-A3B, no expert cache | **11.011 tok/s** | 10.210-11.392 |
-| Ornith 1.0 35B, K1920/R16/P16 | **13.967 tok/s** | 13.948-14.004 |
-| GPT-OSS 120B, 18 GiB managed L2 | **3.344 tok/s** | 3.335-3.356 (host-memory pressure) |
-| DeepSeek V4 Flash, 8 GiB L2 + K216/R12/P12 + FRONT | **1.944 tok/s** | one complete 2,048-token decode; low host-memory headroom |
-
-Qwen3.6 K1440 was also correct but slower (9.279 tok/s median), so the release
-recommendation remains the matched no-cache path. DeepSeek4 also passed a separate 3-start 64-token determinism gate after the FRONT completion fence was added; all three runs produced the same token hash. The 2,048-token row above is a depth/stability result, not a replacement for the historical 18 GiB benchmark.
-
-### Historical performance evidence
-
-| Model | Baseline path | Siliang path | Speedup | Evidence |
-| --- | --- | --- | ---: | --- |
-| DeepSeek V4 Flash 0731, expert-major layout | Stock GGUF, 18 GiB arena: 2.274 tok/s median (2.269-2.407) | Expert-major GGUF, same 18 GiB arena: 2.774 tok/s median (2.689-2.850) | 1.22x (+22.0%) | [Current fully cold layout benchmark](docs/PERFORMANCE.md#current-fully-cold-expert-major-layout-benchmark-2026-08-10), n=3 per arm |
-| DeepSeek V4 Flash 0731, stock GGUF | Stock GGUF mmap: 1.375 tok/s median (1.375-1.414) | Same stock GGUF, 18 GiB arena: 2.291 tok/s median (2.217-2.385) | 1.67x (+66.6%) | [Current same-file benchmark](docs/PERFORMANCE.md#current-stock-gguf-arena-benchmark-2026-08-10), n=3 per arm |
-| DeepSeek V4 (pre-0731) | Stock GGUF mmap: 1.098 tok/s median (1.083-1.104) | 2.246 tok/s median (2.171-2.257) | 2.05x (+104.6%) | [Historical matched run](docs/PERFORMANCE.md#deepseek-v4-pre-0731), n=3 per arm |
-| gpt-oss-120B | Same repacked GGUF on mmap: 1.972 tok/s median (1.964-2.030) | 4.052 tok/s median (3.953-4.094) | 2.06x (+105.5%) | [Historical matched run](docs/PERFORMANCE.md#gpt-oss-120b), n=3 per arm |
-
-The current 0731 layout row directly isolates the present repack: both arms use
-the same binary, disk, 18 GiB arena, and request, with the standby list purged
-before every process start.
-All six 256-token outputs were byte-identical, and every expert-major repetition
-was faster than every stock repetition. The repack moved nearly the same bytes
-but reduced engine expert-read requests from 34,866 to 11,653 and total process
-read operations from 37,945 to 14,418. This +22.0% result describes the current
-experimental layout, not a guaranteed gain or a ceiling for future layout and
-routing work.
-
-The separate current stock-GGUF row isolates the arena against mmap. The older
-DeepSeek row is a matched historical experiment. A comparable gpt-oss stock
-GGUF control was not retained, so that row isolates the arena using the same
-repacked file on both paths; it must not be presented as a stock-model
-comparison. The earlier 0731 expert-major precursor remains documented in the
-detailed evidence, but it is no longer the basis for the direct layout claim.
-See the evidence labels when comparing results from different tiers.
+### Reference workstation
 
 The benchmark workstation runs Windows 11 on an
 [ASUS ROG Strix B450-F Gaming](https://rog.asus.com/motherboards/rog-strix/rog-strix-b450-f-gaming-model/spec/)
@@ -222,6 +194,10 @@ fixed-slot arena and overlapped Windows I/O path are separate implementations.
   reset workflow.
 - [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) - raw benchmark evidence,
   calculations, and evidence limits.
+- [`docs/HISTORICAL_RESULTS.md`](docs/HISTORICAL_RESULTS.md) - results of
+  earlier releases and benchmarks.
+- [`docs/releases/`](docs/releases/) - per-release changes, qualification, and
+  known boundaries.
 - [`tools/README.md`](tools/README.md) - expert-major model preparation.
 - [`scripts/README.md`](scripts/README.md) - build, checks, and runtime-gate
   commands.
@@ -255,8 +231,8 @@ that the run built the tagged commit, verifies the checksums, and publishes thos
 exact artifacts as a prerelease. The publisher remains manually dispatchable for
 an existing tag whose CI run has already succeeded, without rebuilding the
 packages.
-For v0.1.8, see the [release notes](docs/releases/v0.1.8.md); the broader
-performance qualification remains in [v0.1.3](docs/releases/v0.1.3.md).
+For v0.1.8, see the [release notes](docs/releases/v0.1.8.md); results of
+earlier releases are in [`docs/HISTORICAL_RESULTS.md`](docs/HISTORICAL_RESULTS.md).
 
 ## License
 

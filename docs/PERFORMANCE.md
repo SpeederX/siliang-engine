@@ -1,7 +1,9 @@
 # Performance evidence
 
-This page contains the sanitized measurements behind the performance table in
-the root [`README.md`](../README.md). Values are decode throughput unless a
+This page contains the sanitized measurements behind the historical tables in
+[`HISTORICAL_RESULTS.md`](HISTORICAL_RESULTS.md) and the root
+[`README.md`](../README.md). Current release results are in
+[`releases/`](releases/). Values are decode throughput unless a
 section is explicitly labeled prompt processing. They describe one Windows
 workstation and the named model and runtime configurations; they are not general
 performance guarantees.
