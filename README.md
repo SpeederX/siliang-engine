@@ -240,8 +240,9 @@ that the run built the tagged commit, verifies the checksums, and publishes thos
 exact artifacts as a prerelease. The publisher remains manually dispatchable for
 an existing tag whose CI run has already succeeded, without rebuilding the
 packages.
-For v0.1.8, see the [release notes](docs/releases/v0.1.8.md); results of
-earlier releases are in [`docs/HISTORICAL_RESULTS.md`](docs/HISTORICAL_RESULTS.md).
+See the [v0.1.9 stability changes](docs/releases/v0.1.9.md), the
+[v0.1.8 qualification results](docs/releases/v0.1.8.md), and the
+[results from earlier releases](docs/HISTORICAL_RESULTS.md).
 
 ## License
 
