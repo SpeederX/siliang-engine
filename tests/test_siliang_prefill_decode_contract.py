@@ -1,7 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
+import os
+import socket
+import subprocess
+import tempfile
+import time
 import unittest
+import urllib.request
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -119,6 +126,122 @@ class SiliangPrefillDecodeContract(unittest.TestCase):
         for source in (MOE_RUNTIME, QWEN4EXP, LLAMA_CONTEXT):
             self.assertNotIn("SILIANG_DEV_", source)
             self.assertNotIn("std::getenv(", source)
+
+
+class RecurrentPromptReuseIntegration(unittest.TestCase):
+    context_size = 512
+    batch_size = 256
+    ubatch_size = 32
+    prompt_size = 197
+    common_prefix_size = 161
+    marker_positions = (16, 80, 144)
+    request_timeout = 30
+    reuse_pattern = ("a", "b", "b", "a", "a", "b")
+
+    @classmethod
+    def setUpClass(cls):
+        binary = os.environ.get("SILIANG_TEST_SERVER")
+        model = os.environ.get("SILIANG_TEST_QWEN_MODEL")
+        if not binary or not model:
+            raise unittest.SkipTest("set SILIANG_TEST_SERVER and SILIANG_TEST_QWEN_MODEL to run the generated-model regression")
+        cls.binary = Path(binary).resolve()
+        cls.model = Path(model).resolve()
+        if not cls.binary.is_file() or not cls.model.is_file():
+            raise AssertionError("regression binary/model is missing")
+        output = os.environ.get("SILIANG_TEST_OUTPUT")
+        cls.output = Path(output if output else tempfile.mkdtemp(prefix="siliang-prompt-reuse-"))
+        cls.output.mkdir(parents=True, exist_ok=True)
+
+    def check_prompt_reuse(self, checkpoints, message_spans=False):
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            port = listener.getsockname()[1]
+        alias = f"prompt-reuse-regression-{port}"
+        command = [str(self.binary), "--model", str(self.model), "--host", "127.0.0.1",
+                   "--port", str(port), "--alias", alias, "--ctx-size", str(self.context_size), "--parallel", "1",
+                   "--batch-size", str(self.batch_size), "--ubatch-size", str(self.ubatch_size), "--threads", "1",
+                   "--threads-batch", "1", "--ctx-checkpoints", str(checkpoints), "--no-checkpoint-ubatch"]
+        extra = json.loads(os.environ.get("SILIANG_TEST_EXTRA_ARGS", "[]"))
+        if not isinstance(extra, list) or not all(isinstance(arg, str) for arg in extra):
+            raise AssertionError("SILIANG_TEST_EXTRA_ARGS must be a JSON array of arguments")
+        command.extend(extra)
+        stem = self.output / f"checkpoints-{checkpoints}{'-spans' if message_spans else ''}"
+        results = {"command": command, "requests": [], "passed": False, "fresh_reuse_mismatches": []}
+        flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        with stem.with_suffix(".log").open("wb") as log:
+            process = subprocess.Popen(command, stdout=log, stderr=log, stdin=subprocess.DEVNULL, creationflags=flags)
+            def request(method, path, data=None):
+                payload = json.dumps(data).encode() if data is not None else None
+                req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", payload,
+                                             {"Content-Type": "application/json"}, method=method)
+                with urllib.request.urlopen(req, timeout=self.request_timeout) as response:
+                    return json.load(response)
+            try:
+                deadline = time.monotonic() + 90
+                while True:
+                    if process.poll() is not None:
+                        self.fail(f"server exited during startup with {process.returncode}; see {stem}.log")
+                    try:
+                        request("GET", "/health")
+                        self.assertEqual(request("GET", "/v1/models")["data"][0]["id"], alias)
+                        break
+                    except (OSError, TimeoutError):
+                        if time.monotonic() > deadline:
+                            raise
+                        time.sleep(.1)
+                prompts = {"a": [3 + i % 4 for i in range(self.prompt_size)],
+                           "b": [3 + i % 4 for i in range(self.common_prefix_size)] +
+                                [7 + i % 4 for i in range(self.prompt_size - self.common_prefix_size)]}
+                delimiters = []
+                if message_spans:
+                    marker = "<|im_start|>user\n"
+                    marker_tokens = request("POST", "/tokenize", {"content": marker, "add_special": False})["tokens"]
+                    self.assertTrue(marker_tokens)
+                    for prompt in prompts.values():
+                        for pos in self.marker_positions:
+                            prompt[pos:pos + len(marker_tokens)] = marker_tokens
+                    delimiters = [{"role": "user", "delimiter": marker}]
+                def complete(name, cached):
+                    body = request("POST", "/completion", {"prompt": prompts[name], "id_slot": 0,
+                        "cache_prompt": cached, "n_predict": 4, "temperature": 0, "top_k": 1,
+                        "seed": 1234, "ignore_eos": True, "return_tokens": True, "message_delimiters": delimiters})
+                    self.assertEqual(body["tokens_predicted"], 4)
+                    self.assertEqual(len(body["tokens"]), 4)
+                    self.assertFalse(body["truncated"])
+                    self.assertIsNone(process.poll(), "server must survive the completion")
+                    results["requests"].append({"prompt": name, "cache_prompt": cached,
+                        "tokens": body["tokens"], "timings": body["timings"]})
+                    return body["tokens"]
+                control = {name: complete(name, False) for name in prompts}
+                # Alternate a changed suffix and identical prompts; a valid prefix trim must preserve greedy tokens.
+                for name in self.reuse_pattern:
+                    with self.subTest(checkpoints=checkpoints, prompt=name, request=len(results["requests"])):
+                        tokens = complete(name, True)
+                        if tokens != control[name]:
+                            results["fresh_reuse_mismatches"].append(len(results["requests"]) - 1)
+                        self.assertEqual(tokens, control[name])
+                results["passed"] = not results["fresh_reuse_mismatches"]
+            finally:
+                results["server_alive_before_cleanup"] = process.poll() is None
+                results["cleanup_requested"] = process.poll() is None
+                if process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=10)
+                results["exit_code_after_cleanup"] = process.returncode
+                stem.with_suffix(".json").write_text(json.dumps(results, indent=2), encoding="utf-8")
+
+    def test_reuse_without_checkpoints(self):
+        self.check_prompt_reuse(0)
+
+    def test_reuse_with_checkpoints(self):
+        self.check_prompt_reuse(4)
+
+    def test_reuse_with_message_spans(self):
+        self.check_prompt_reuse(4, message_spans=True)
 
 
 if __name__ == "__main__":

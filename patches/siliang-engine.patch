@@ -441,7 +441,7 @@ index 63e342776d549b6abaf9c4aef5543a729e6dfd97..99fba78ea8e1c06c42bd2aa8d4c2f48b
          }
      ));
 diff --git a/common/common.cpp b/common/common.cpp
-index 364688ef466dab454e278e4e7c8f85864e39f432..e71da00dae2766a165ecdf9fbcccaef01448ef74 100644
+index 364688ef466dab454e278e4e7c8f85864e39f432..643537b16378a6087b2f23557d21d7191f19015c 100644
 --- a/common/common.cpp
 +++ b/common/common.cpp
 @@ -9,6 +9,7 @@
@@ -698,7 +698,24 @@ index 364688ef466dab454e278e4e7c8f85864e39f432..e71da00dae2766a165ecdf9fbcccaef0
      return res;
  }
  
-@@ -1687,7 +1874,7 @@ void common_memory::seq_add(llama_seq_id seq_id, llama_pos p0, llama_pos p1, lla
+@@ -1673,6 +1860,16 @@ void common_memory::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) cons
+     }
+ }
+ 
++bool common_memory::seq_rm_or_clear(llama_seq_id seq_id, llama_pos p0, llama_pos p1) const {
++    if (llama_memory_seq_rm(llama_get_memory(ctx_tgt), seq_id, p0, p1) &&
++            (ctx_dft == nullptr || llama_memory_seq_rm(llama_get_memory(ctx_dft), seq_id, p0, p1))) {
++        return true;
++    }
++
++    seq_rm(seq_id, -1, -1);
++    return false;
++}
++
+ void common_memory::seq_cp(llama_seq_id seq_id_src, llama_seq_id seq_id_dst, llama_pos p0, llama_pos p1) const {
+     common_context_seq_cp(ctx_tgt, seq_id_src, seq_id_dst, p0, p1);
+     if (ctx_dft) {
+@@ -1687,7 +1884,7 @@ void common_memory::seq_add(llama_seq_id seq_id, llama_pos p0, llama_pos p1, lla
      }
  }
  
@@ -707,7 +724,7 @@ index 364688ef466dab454e278e4e7c8f85864e39f432..e71da00dae2766a165ecdf9fbcccaef0
      std::vector<llama_adapter_lora *> loras;
      std::vector<float> scales;
  
-@@ -1696,7 +1883,7 @@ void common_set_adapter_lora(struct llama_context * ctx, std::vector<common_adap
+@@ -1696,7 +1893,7 @@ void common_set_adapter_lora(struct llama_context * ctx, std::vector<common_adap
          scales.push_back(la.scale);
      }
  
@@ -716,7 +733,7 @@ index 364688ef466dab454e278e4e7c8f85864e39f432..e71da00dae2766a165ecdf9fbcccaef0
  }
  
  struct llama_model_params common_model_params_to_llama(common_params & params) {
-@@ -1741,6 +1928,20 @@ struct llama_model_params common_model_params_to_llama(common_params & params) {
+@@ -1741,6 +1938,20 @@ struct llama_model_params common_model_params_to_llama(common_params & params) {
  struct llama_context_params common_context_params_to_llama(const common_params & params) {
      auto cparams = llama_context_default_params();
  
@@ -737,7 +754,7 @@ index 364688ef466dab454e278e4e7c8f85864e39f432..e71da00dae2766a165ecdf9fbcccaef0
      cparams.n_ctx             = params.n_ctx;
      cparams.n_seq_max         = params.n_parallel;
      cparams.n_rs_seq          = params.speculative.need_n_rs_seq();
-@@ -1771,6 +1972,38 @@ struct llama_context_params common_context_params_to_llama(const common_params &
+@@ -1771,6 +1982,38 @@ struct llama_context_params common_context_params_to_llama(const common_params &
      cparams.swa_full          = params.swa_full;
      cparams.kv_unified        = params.kv_unified;
  
@@ -777,7 +794,7 @@ index 364688ef466dab454e278e4e7c8f85864e39f432..e71da00dae2766a165ecdf9fbcccaef0
      cparams.type_v = params.cache_type_v;
  
 diff --git a/common/common.h b/common/common.h
-index 9194d3dcb650a37c10dade1f10b7f1430936db9c..7bc8a90dc6a2abb359a3cfe84cad262396b6795f 100644
+index 9194d3dcb650a37c10dade1f10b7f1430936db9c..73b5993cc4234b9ca3fee185dd52188496e5cf06 100644
 --- a/common/common.h
 +++ b/common/common.h
 @@ -16,6 +16,7 @@
@@ -891,6 +908,15 @@ index 9194d3dcb650a37c10dade1f10b7f1430936db9c..7bc8a90dc6a2abb359a3cfe84cad2623
  
  // model endpoint from env
  std::string common_get_model_endpoint();
+@@ -1017,6 +1084,8 @@ struct common_memory {
+ 
+     // aborts execution on failure
+     void seq_rm (llama_seq_id seq_id, llama_pos p0, llama_pos p1) const;
++    // Returns false and clears both contexts if removal is rejected. The caller must clear its prompt metadata.
++    bool seq_rm_or_clear(llama_seq_id seq_id, llama_pos p0, llama_pos p1) const;
+     void seq_add(llama_seq_id seq_id, llama_pos p0, llama_pos p1, llama_pos delta) const;
+     void seq_cp (llama_seq_id seq_id_src, llama_seq_id seq_id_dst, llama_pos p0, llama_pos p1) const;
+ };
 diff --git a/common/speculative.cpp b/common/speculative.cpp
 index 6fdfa4dc33f0514462f8e8d40cdf093a0029a73e..2eb9ce9c722052ef40fdc986e4687ac1354473aa 100644
 --- a/common/speculative.cpp
@@ -5846,6 +5872,34 @@ index c7a0c831788df8547ffd86c8a68e6d53aff61130..af47a8172298ca3f0e9746b06b9dd427
      const int    ncols_pad      = next_power_of_2(ncols);
      const size_t shared_mem     = ncols_pad * sizeof(int);
      const size_t max_shared_mem = ggml_cuda_info().devices[ggml_cuda_get_device()].smpb;
+diff --git a/gguf-py/gguf/gguf_reader.py b/gguf-py/gguf/gguf_reader.py
+index bf3e083800b01c822989c096f0d875dc750ab022..d392ca6780259293f18861154b7496b279038b28 100644
+--- a/gguf-py/gguf/gguf_reader.py
++++ b/gguf-py/gguf/gguf_reader.py
+@@ -258,6 +258,8 @@ class GGUFReader:
+             offs += int(alen.nbytes)
+             aparts: list[npt.NDArray[Any]] = [raw_itype, alen]
+             data_idxs: list[int] = []
++            if int(alen[0]) == 0:
++                types.append(GGUFValueType(raw_itype[0]))
+             # FIXME: Handle multi-dimensional arrays properly instead of flattening
+             for idx in range(alen[0]):
+                 curr_size, curr_parts, curr_idxs, curr_types = self._get_field_parts(offs, raw_itype[0])
+diff --git a/gguf-py/gguf/gguf_writer.py b/gguf-py/gguf/gguf_writer.py
+index cf7b367e520ee3af1f3b056c262de93b66318e50..cf4ec2eff46b0f647e066a5760f5e32918011e63 100644
+--- a/gguf-py/gguf/gguf_writer.py
++++ b/gguf-py/gguf/gguf_writer.py
+@@ -1620,8 +1620,8 @@ class GGUFWriter:
+             if not isinstance(val, Sequence):
+                 raise ValueError("Invalid GGUF metadata array, expecting sequence")
+ 
+-            if len(val) == 0:
+-                raise ValueError("Invalid GGUF metadata array. Empty array")
++            if len(val) == 0 and sub_type is None:
++                raise ValueError("Invalid GGUF metadata array. Empty array requires an explicit element type")
+ 
+             if sub_type is not None:
+                 ltype = sub_type
 diff --git a/include/llama.h b/include/llama.h
 index 1805ed0559f92a818dfe951b012608ee2be3115c..601fcd1eac17ce398073a00cc83ff856dd6f17dd 100644
 --- a/include/llama.h
@@ -16437,6 +16491,130 @@ index e0907631abd8a89e5b6dbadf10d28b65ed483b9a..ea164bfe12351845c9bad0e1e3953daa
      printf("test-arg-parser: test invalid usage\n\n");
  
      // missing value
+diff --git a/tests/test-llama-archs.cpp b/tests/test-llama-archs.cpp
+index 5a8a196c1f35f36d46f5793181ef748be2472f5e..d4708cbbe6e2e5e2b9dd6e569acc8d2ffcad50dc 100644
+--- a/tests/test-llama-archs.cpp
++++ b/tests/test-llama-archs.cpp
+@@ -123,7 +123,9 @@ static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe) {
+     uint32_t n_head  = 2;
+     uint32_t n_ff    = 384;
+     uint32_t n_layer = 2;
+-    if (arch == LLM_ARCH_LLAMA4) {
++    if (arch == LLM_ARCH_QWEN4EXP) {
++        n_layer = 4;
++    } else if (arch == LLM_ARCH_LLAMA4) {
+         n_layer = 4; // hparams.n_no_rope_layer_step is hard-coded to 4
+     } else if (arch == LLM_ARCH_GEMMA4) {
+         n_embd = 128;
+@@ -199,7 +201,7 @@ static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe) {
+     ms.add_kv(LLM_KV_LOGIT_SCALE,             1.0f);
+     ms.add_kv(LLM_KV_TIME_MIX_EXTRA_DIM,      uint32_t(64));
+     ms.add_kv(LLM_KV_TIME_DECAY_EXTRA_DIM,    uint32_t(128));
+-    ms.add_kv(LLM_KV_FULL_ATTENTION_INTERVAL, uint32_t(2));
++    ms.add_kv(LLM_KV_FULL_ATTENTION_INTERVAL, arch == LLM_ARCH_QWEN4EXP ? uint32_t(4) : uint32_t(2));
+ 
+     if (arch == LLM_ARCH_PLAMO2 || arch == LLM_ARCH_JAMBA || arch == LLM_ARCH_NEMOTRON_H || arch == LLM_ARCH_NEMOTRON_H_MOE ||
+             arch == LLM_ARCH_GRANITE_HYBRID || arch == LLM_ARCH_LFM2 || arch == LLM_ARCH_LFM2MOE || arch == LLM_ARCH_KIMI_LINEAR ||
+@@ -309,7 +311,7 @@ static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe) {
+         }
+ 
+         // the PLE history lives in the recurrent cache, so it must sit on a linear attention layer
+-        ms.add_kv(LLM_KV_PLE_LAYERS,                  std::vector<uint32_t>({ 0 }));
++        ms.add_kv(LLM_KV_PLE_LAYERS,                  std::vector<uint32_t>({ 1 }));
+         ms.add_kv(LLM_KV_PLE_NGRAM_SIZE,              ple_ngram_size);
+         ms.add_kv(LLM_KV_PLE_HEADS_PER_NGRAM,         ple_heads_per_ngram);
+         ms.add_kv(LLM_KV_PLE_CONV_KERNEL,             uint32_t(4));
+diff --git a/tests/test-recurrent-state-rollback.cpp b/tests/test-recurrent-state-rollback.cpp
+index fdac344d8990ecb995e025d47fb38e8243c09179..fbf778532465af0996a100fa01278955f2753b25 100644
+--- a/tests/test-recurrent-state-rollback.cpp
++++ b/tests/test-recurrent-state-rollback.cpp
+@@ -104,6 +104,76 @@ static double nmse(const float * a, const float * b, int n) {
+     return mse_a0 == 0.0 ? (mse_ab == 0.0 ? 0.0 : std::numeric_limits<double>::infinity()) : mse_ab/mse_a0;
+ }
+ 
++static bool test_prompt_trim_recovery(const common_params & params, llama_model * model, uint8_t fill) {
++    llama_context_ptr target(make_ctx(params, model, fill));
++    llama_context_ptr reference(make_ctx(params, model, fill));
++    auto plain_params = common_context_params_to_llama(params);
++    plain_params.n_seq_max = 1;
++    plain_params.n_rs_seq = 0;
++    llama_context_ptr draft(init_ctx(model, plain_params, fill));
++    if (!target || !reference || !draft) {
++        return false;
++    }
++    if (llama_n_rs_seq(target.get()) < 3) {
++        fprintf(stderr, "%s : skipping model without bounded rollback\n", __func__);
++        return true;
++    }
++
++    const int n_vocab = llama_vocab_n_tokens(llama_model_get_vocab(model));
++    std::vector<llama_token> old_prompt(32), new_prompt(16);
++    for (size_t i = 0; i < old_prompt.size(); ++i) {
++        old_prompt[i] = (llama_token) ((i + 3) % n_vocab);
++    }
++    for (size_t i = 0; i < new_prompt.size(); ++i) {
++        new_prompt[i] = (llama_token) ((i + 7) % n_vocab);
++    }
++    if (!decode_tokens(reference.get(), new_prompt, (uint32_t) new_prompt.size())) {
++        return false;
++    }
++    const float * reference_logits = llama_get_logits_ith(reference.get(), -1);
++    if (reference_logits == nullptr) {
++        return false;
++    }
++
++    common_memory memory;
++    memory.init(target.get(), draft.get());
++    for (llama_pos p0 : { 1, 29 }) {
++        memory.seq_rm(0, -1, -1);
++        if (!decode_tokens(target.get(), old_prompt, (uint32_t) old_prompt.size()) ||
++                !decode_tokens(draft.get(), old_prompt, (uint32_t) old_prompt.size())) {
++            return false;
++        }
++        // p0=1 exceeds the target's window; p0=29 succeeds there but the draft rejects it.
++        auto * rejected = p0 == 1 ? target.get() : draft.get();
++        if (llama_memory_seq_rm(llama_get_memory(rejected), 0, p0, -1) ||
++                memory.seq_rm_or_clear(0, p0, -1)) {
++            fprintf(stderr, "%s : expected a rejected trim and full clear at %d\n", __func__, p0);
++            return false;
++        }
++        for (auto * ctx : { target.get(), draft.get() }) {
++            if (llama_memory_seq_pos_max(llama_get_memory(ctx), 0) != -1 ||
++                    !decode_tokens(ctx, new_prompt, (uint32_t) new_prompt.size())) {
++                return false;
++            }
++            const float * logits = llama_get_logits_ith(ctx, -1);
++            if (logits == nullptr || nmse(reference_logits, logits, n_vocab) > 1e-5) {
++                fprintf(stderr, "%s : reset/replay differs from a fresh context at %d\n", __func__, p0);
++                return false;
++            }
++        }
++    }
++
++    common_memory target_only;
++    target_only.init(target.get());
++    if (!target_only.seq_rm_or_clear(0, 13, -1) ||
++            llama_memory_seq_pos_max(llama_get_memory(target.get()), 0) != 12) {
++        fprintf(stderr, "%s : supported trim must retain its prefix\n", __func__);
++        return false;
++    }
++    fprintf(stderr, "%s : rejected target/draft trims reset and replay correctly\n", __func__);
++    return true;
++}
++
+ // Roll back multiple sequences, then replay them in a single batch whose
+ // per-seq token count exceeds n_ubatch: each seq's replay spans several
+ // ubatches while its rollback restore is still pending. Compared against a
+@@ -511,6 +581,9 @@ int main(int argc, char ** argv) {
+ 
+     for (uint8_t fill : { 0, 0x3e }) {
+         fprintf(stderr, "%s : testing with cache fill 0x%02x\n", __func__, fill);
++        if (!test_prompt_trim_recovery(params, model, fill)) {
++            return 1;
++        }
+         if (test_rollback(params, model, fill) != 0) {
+             return 1;
+         }
 diff --git a/tests/test-siliang-prefill.cpp b/tests/test-siliang-prefill.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..d4237159e5c1f1c284c5c466a13fc93ec4e17db2
@@ -16640,7 +16818,7 @@ index 0000000000000000000000000000000000000000..d4237159e5c1f1c284c5c466a13fc93e
 +    return 0;
 +}
 diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
-index e95fb63ab3cca4352f627738edb077ce8413b31f..dabeccf6843172be0e7cc9492818aecd388e6d70 100644
+index e95fb63ab3cca4352f627738edb077ce8413b31f..633f378f70bfdc1614d04b88442f2363b3afae80 100644
 --- a/tools/server/server-context.cpp
 +++ b/tools/server/server-context.cpp
 @@ -20,6 +20,8 @@
@@ -16899,7 +17077,42 @@ index e95fb63ab3cca4352f627738edb077ce8413b31f..dabeccf6843172be0e7cc9492818aecd
  
              // if the lora is temporarily disabled for an alora, re-enable it
              // for next time
-@@ -3520,6 +3656,14 @@ private:
+@@ -3138,6 +3274,8 @@ private:
+                     // used to determine the number of tokens added to the batch for the current slot
+                     const auto n_tokens_prev = batch.size();
+ 
++                    bool prompt_trimmed = false;
++
+                     // TODO: maybe move branch to outside of this loop in the future
+                     if (slot.state == SLOT_STATE_STARTED) {
+                         slot.stats.update_prompt_start();
+@@ -3406,6 +3544,14 @@ private:
+                             SLT_WRN(slot, "n_past was set to %d\n", n_past);
+                         }
+ 
++                        const llama_pos trim_pos = slot.prompt.tokens.pos_next(n_past);
++                        if (!slot.mem.seq_rm_or_clear(slot.id, trim_pos, -1)) {
++                            SLT_WRN(slot, "prompt cache rollback rejected at position %d; clearing the slot and reprocessing the full prompt\n", trim_pos);
++                            slot.prompt.clear();
++                            n_past = 0;
++                        }
++                        prompt_trimmed = true;
++
+                         slot.stats.n_prompt_cached    = n_past;
+                         slot.stats.n_prompt_processed = 0;
+ 
+@@ -3441,7 +3587,9 @@ private:
+ 
+                     SLT_TRC(slot, "cached n_tokens = %d, memory_seq_rm [%d, end)\n", slot.prompt.n_tokens(), p0);
+ 
+-                    slot.mem.seq_rm(slot.id, p0, -1);
++                    if (!prompt_trimmed) {
++                        slot.mem.seq_rm(slot.id, p0, -1);
++                    }
+ 
+                     // If using an alora, there may be uncached tokens that come
+                     // before the invocation sequence. When this happens, the
+@@ -3520,6 +3668,14 @@ private:
                      const auto & spans = slot.task->params.message_spans;
                      const auto last_user_pos = spans.last_user_message_pos();
  
@@ -16914,7 +17127,7 @@ index e95fb63ab3cca4352f627738edb077ce8413b31f..dabeccf6843172be0e7cc9492818aecd
                      // add prompt tokens for processing in the current batch
                      while (slot.prompt.n_tokens() < slot.task->n_tokens() && batch.size() < n_batch) {
                          // get next token to process
-@@ -3551,7 +3695,12 @@ private:
+@@ -3551,7 +3707,12 @@ private:
                              const auto pos = slot.prompt.n_tokens();
                              const auto & checkpoints = slot.prompt.checkpoints;
  
@@ -16928,7 +17141,7 @@ index e95fb63ab3cca4352f627738edb077ce8413b31f..dabeccf6843172be0e7cc9492818aecd
                                  break;
                              }
                          }
-@@ -3562,7 +3711,7 @@ private:
+@@ -3562,7 +3723,7 @@ private:
                          //  - 4
                          // ref: https://github.com/ggml-org/llama.cpp/pull/20288
                          if (do_checkpoint) {
@@ -16937,7 +17150,7 @@ index e95fb63ab3cca4352f627738edb077ce8413b31f..dabeccf6843172be0e7cc9492818aecd
  
                              bool should_break = false;
                              for (int offset : checkpoint_offsets) {
-@@ -3572,12 +3721,25 @@ private:
+@@ -3572,12 +3733,25 @@ private:
                                      break;
                                  }
                              }
@@ -16964,7 +17177,7 @@ index e95fb63ab3cca4352f627738edb077ce8413b31f..dabeccf6843172be0e7cc9492818aecd
                      // the number of tokens added to the batch for the current slot
                      const auto n_tokens_cur = batch.size() - n_tokens_prev;
  
-@@ -3736,6 +3898,20 @@ private:
+@@ -3736,6 +3910,20 @@ private:
          } else {
              // success, apply batch metrics
              metrics_post_decode(off, batch_view.n_tokens, has_output);

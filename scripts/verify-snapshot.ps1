@@ -29,10 +29,10 @@ $expected = [ordered]@{
     upstreamTag = 'b11188'
     upstreamRootTree = 'cd9cd8e6821229813a9b5a35673e4d1e2f876d56'
     patchPath = 'patches/siliang-engine.patch'
-    patchSha256 = 'E17AF8BD6A38BCC4CFEF09A934EC719B4050A8815D76285325D6B0359B6DCD68'
-    patchGitBlob = 'a5f5c67474591f22250cfc1d3ca1fa62c4f4f020'
-    patchInsertions = 15119
-    patchDeletions = 266
+    patchSha256 = '4B69DE7791910218E22DCB35CBD5571C9DB1F662149D61D332F4B29940572C90'
+    patchGitBlob = 'a3e75d6f1bb4a8f0f1cc4a5f0def4c7c50334fcc'
+    patchInsertions = 15226
+    patchDeletions = 272
 }
 
 function New-ExpectedEngineFile {
@@ -58,8 +58,8 @@ function New-ExpectedEngineFile {
 
 $expectedFiles = @(
     New-ExpectedEngineFile 'common/arg.cpp' '63e342776d549b6abaf9c4aef5543a729e6dfd97' '99fba78ea8e1c06c42bd2aa8d4c2f48becfc0e4a'
-    New-ExpectedEngineFile 'common/common.cpp' '364688ef466dab454e278e4e7c8f85864e39f432' 'e71da00dae2766a165ecdf9fbcccaef01448ef74'
-    New-ExpectedEngineFile 'common/common.h' '9194d3dcb650a37c10dade1f10b7f1430936db9c' '7bc8a90dc6a2abb359a3cfe84cad262396b6795f'
+    New-ExpectedEngineFile 'common/common.cpp' '364688ef466dab454e278e4e7c8f85864e39f432' '643537b16378a6087b2f23557d21d7191f19015c' 'e71da00dae2766a165ecdf9fbcccaef01448ef74'
+    New-ExpectedEngineFile 'common/common.h' '9194d3dcb650a37c10dade1f10b7f1430936db9c' '73b5993cc4234b9ca3fee185dd52188496e5cf06' '7bc8a90dc6a2abb359a3cfe84cad262396b6795f'
     New-ExpectedEngineFile 'common/speculative.cpp' '6fdfa4dc33f0514462f8e8d40cdf093a0029a73e' '2eb9ce9c722052ef40fdc986e4687ac1354473aa'
     New-ExpectedEngineFile 'ggml/include/ggml-alloc.h' 'a7926a21a9a20f37a4b75cf19fbca5d8d88b7779' 'aa704df1748a76cc20242817bf2abe28c50eeb70'
     New-ExpectedEngineFile 'ggml/include/ggml-backend.h' 'cc3f8cd36e3549c4f3ed3d6ad5f6b577af4b837b' '7a74515c6df84c85157967e882840c50ff19a4cc'
@@ -73,6 +73,8 @@ $expectedFiles = @(
     New-ExpectedEngineFile 'ggml/src/ggml-cpu/siliangem_moe_cache.h' $null '749c822367ec5a820c9f0c1dfd88c47400d9a0aa'
     New-ExpectedEngineFile 'ggml/src/ggml-cuda/ggml-cuda.cu' 'e76ff3128fddd7bf248e16b8469d27c2f441b8e1' 'a27e493276bc405253355a748f41fdec9890c914'
     New-ExpectedEngineFile 'ggml/src/ggml-cuda/top-k.cu' 'c7a0c831788df8547ffd86c8a68e6d53aff61130' 'af47a8172298ca3f0e9746b06b9dd42776d93201'
+    New-ExpectedEngineFile 'gguf-py/gguf/gguf_reader.py' 'bf3e083800b01c822989c096f0d875dc750ab022' 'd392ca6780259293f18861154b7496b279038b28' 'bf3e083800b01c822989c096f0d875dc750ab022'
+    New-ExpectedEngineFile 'gguf-py/gguf/gguf_writer.py' 'cf7b367e520ee3af1f3b056c262de93b66318e50' 'cf4ec2eff46b0f647e066a5760f5e32918011e63' 'cf7b367e520ee3af1f3b056c262de93b66318e50'
     New-ExpectedEngineFile 'include/llama.h' '1805ed0559f92a818dfe951b012608ee2be3115c' '601fcd1eac17ce398073a00cc83ff856dd6f17dd'
     New-ExpectedEngineFile 'src/CMakeLists.txt' 'afdaddc79de81bc03dadee2707e67d2af4b814c0' '4ff52fe171c6f3f525997cb3156d095792821b14'
     New-ExpectedEngineFile 'src/llama-batch.cpp' '89a1f3f37c7b3cce944e4114aa3bbae89f42f109' '0dd4fec52bcc881db5c6e878ced208b1054fe814'
@@ -105,8 +107,10 @@ $expectedFiles = @(
     New-ExpectedEngineFile 'src/siliang-moe-runtime.h' $null '2e374427813aad8142028a6d8c738d433842dc12'
     New-ExpectedEngineFile 'tests/CMakeLists.txt' '9b3a4fcc4bbf6afc77cc8554fa14412722b887b4' '8244dcbb99f2fb414f49a9a4aaf2e6f29bc5906f'
     New-ExpectedEngineFile 'tests/test-arg-parser.cpp' 'e0907631abd8a89e5b6dbadf10d28b65ed483b9a' 'ea164bfe12351845c9bad0e1e3953daafc834017'
+    New-ExpectedEngineFile 'tests/test-llama-archs.cpp' '5a8a196c1f35f36d46f5793181ef748be2472f5e' 'd4708cbbe6e2e5e2b9dd6e569acc8d2ffcad50dc' '5a8a196c1f35f36d46f5793181ef748be2472f5e'
+    New-ExpectedEngineFile 'tests/test-recurrent-state-rollback.cpp' 'fdac344d8990ecb995e025d47fb38e8243c09179' 'fbf778532465af0996a100fa01278955f2753b25' 'fdac344d8990ecb995e025d47fb38e8243c09179'
     New-ExpectedEngineFile 'tests/test-siliang-prefill.cpp' $null 'd4237159e5c1f1c284c5c466a13fc93ec4e17db2'
-    New-ExpectedEngineFile 'tools/server/server-context.cpp' 'e95fb63ab3cca4352f627738edb077ce8413b31f' 'dabeccf6843172be0e7cc9492818aecd388e6d70'
+    New-ExpectedEngineFile 'tools/server/server-context.cpp' 'e95fb63ab3cca4352f627738edb077ce8413b31f' '633f378f70bfdc1614d04b88442f2363b3afae80' 'dabeccf6843172be0e7cc9492818aecd388e6d70'
 )
 function Normalize-GitHubUrl {
     param([Parameter(Mandatory = $true)][string]$Url)

@@ -123,7 +123,9 @@ static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe) {
     uint32_t n_head  = 2;
     uint32_t n_ff    = 384;
     uint32_t n_layer = 2;
-    if (arch == LLM_ARCH_LLAMA4) {
+    if (arch == LLM_ARCH_QWEN4EXP) {
+        n_layer = 4;
+    } else if (arch == LLM_ARCH_LLAMA4) {
         n_layer = 4; // hparams.n_no_rope_layer_step is hard-coded to 4
     } else if (arch == LLM_ARCH_GEMMA4) {
         n_embd = 128;
@@ -199,7 +201,7 @@ static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe) {
     ms.add_kv(LLM_KV_LOGIT_SCALE,             1.0f);
     ms.add_kv(LLM_KV_TIME_MIX_EXTRA_DIM,      uint32_t(64));
     ms.add_kv(LLM_KV_TIME_DECAY_EXTRA_DIM,    uint32_t(128));
-    ms.add_kv(LLM_KV_FULL_ATTENTION_INTERVAL, uint32_t(2));
+    ms.add_kv(LLM_KV_FULL_ATTENTION_INTERVAL, arch == LLM_ARCH_QWEN4EXP ? uint32_t(4) : uint32_t(2));
 
     if (arch == LLM_ARCH_PLAMO2 || arch == LLM_ARCH_JAMBA || arch == LLM_ARCH_NEMOTRON_H || arch == LLM_ARCH_NEMOTRON_H_MOE ||
             arch == LLM_ARCH_GRANITE_HYBRID || arch == LLM_ARCH_LFM2 || arch == LLM_ARCH_LFM2MOE || arch == LLM_ARCH_KIMI_LINEAR ||
@@ -309,7 +311,7 @@ static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe) {
         }
 
         // the PLE history lives in the recurrent cache, so it must sit on a linear attention layer
-        ms.add_kv(LLM_KV_PLE_LAYERS,                  std::vector<uint32_t>({ 0 }));
+        ms.add_kv(LLM_KV_PLE_LAYERS,                  std::vector<uint32_t>({ 1 }));
         ms.add_kv(LLM_KV_PLE_NGRAM_SIZE,              ple_ngram_size);
         ms.add_kv(LLM_KV_PLE_HEADS_PER_NGRAM,         ple_heads_per_ngram);
         ms.add_kv(LLM_KV_PLE_CONV_KERNEL,             uint32_t(4));

@@ -52,6 +52,8 @@ def write_synthetic_moe(
     layers: tuple[int, ...] = (0, 1),
     incomplete_layer: int | None = None,
     q8_0_layers: tuple[int, ...] = (),
+    part_columns: tuple[int, int, int] = (4, 4, 4),
+    empty_arrays: bool = False,
 ) -> None:
     """Write two contiguous, zero-based MoE layers with two experts each."""
     writer = GGUFWriter(path, architecture if architecture else "deepseek4")
@@ -62,6 +64,11 @@ def write_synthetic_moe(
         writer.add_key_value("general.architecture", architecture, GGUFValueType.STRING)
     writer.add_name("synthetic-expert-major-test")
     writer.add_uint32("synthetic.marker", 0xC0FFEE)
+    if empty_arrays:
+        writer.add_key_value("tokenizer.ggml.merges", [], GGUFValueType.ARRAY,
+                             sub_type=GGUFValueType.STRING)
+        writer.add_key_value("synthetic.empty_ids", [], GGUFValueType.ARRAY,
+                             sub_type=GGUFValueType.UINT32)
     if alignment is not None:
         writer.add_custom_alignment(alignment)
 
@@ -78,15 +85,18 @@ def write_synthetic_moe(
                 writer.add_tensor(f"blk.{layer}.ffn_{part}_exps.weight", raw,
                                   raw_dtype=GGMLQuantizationType.Q8_0)
                 continue
-            values = np.arange(start, start + 16, dtype=np.float32).reshape(2, 2, 4)
+            columns = part_columns[part_index]
+            values = np.arange(start, start + 4 * columns, dtype=np.float32).reshape(2, 2, columns)
             writer.add_tensor(f"blk.{layer}.ffn_{part}_exps.weight", values)
 
     non_expert = np.arange(24, dtype=np.float32).reshape(3, 8)
     writer.add_tensor("token_embd.weight", non_expert)
-    writer.write_header_to_file()
-    writer.write_kv_data_to_file()
-    writer.write_tensors_to_file()
-    writer.close()
+    try:
+        writer.write_header_to_file()
+        writer.write_kv_data_to_file()
+        writer.write_tensors_to_file()
+    finally:
+        writer.close()
 
 
 def write_unknown_type_gguf(path: Path, type_id: int) -> None:
@@ -114,6 +124,60 @@ def write_unknown_type_gguf(path: Path, type_id: int) -> None:
 
 class ConverterTests(unittest.TestCase):
     maxDiff = None
+
+    def test_conversion_preserves_final_tensor_byte_without_padding(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary = Path(temporary_directory)
+            source = temporary / "source.gguf"
+            destination = temporary / "expert-major.gguf"
+            write_synthetic_moe(source, part_columns=(8, 8, 48))
+            before = source.read_bytes()
+            completed = self.run_converter("--src", str(source), "--dst", str(destination))
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            parsed = GGUF(source)
+            converted = GGUF(destination)
+            try:
+                for layer in (0, 1):
+                    expected = bytearray()
+                    for expert in range(2):
+                        for part in ("gate", "up", "down"):
+                            tensor = parsed.tensors[f"blk.{layer}.ffn_{part}_exps.weight"]
+                            size = tensor.nbytes // 2
+                            offset = tensor.abs_offset + expert * size
+                            expected += before[offset:offset + size]
+                    self.assertEqual(len(expected), 1024)
+                    self.assertNotEqual(expected[-1], 0)
+                    packed = converted.tensors[f"blk.{layer}.ffn_exps_packed.weight"]
+                    converted.f.seek(packed.abs_offset)
+                    self.assertEqual(converted.f.read(packed.nbytes), bytes(expected))
+                self.assertEqual(source.read_bytes(), before)
+            finally:
+                parsed.f.close()
+                converted.f.close()
+
+    def test_conversion_preserves_empty_typed_metadata_arrays(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary = Path(temporary_directory)
+            source = temporary / "source.gguf"
+            destination = temporary / "expert-major.gguf"
+            write_synthetic_moe(source, empty_arrays=True)
+            before = source.read_bytes()
+            completed = self.run_converter("--src", str(source), "--dst", str(destination))
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            reader = GGUFReader(destination)
+            try:
+                for key, subtype in (("tokenizer.ggml.merges", GGUFValueType.STRING),
+                                     ("synthetic.empty_ids", GGUFValueType.UINT32)):
+                    self.assertEqual(reader.fields[key].types, [GGUFValueType.ARRAY, subtype])
+                    self.assertEqual(reader.fields[key].contents(), [])
+                self.assertEqual(source.read_bytes(), before)
+            finally:
+                close_gguf_reader(reader)
+
+    def test_empty_metadata_array_requires_an_explicit_element_type(self) -> None:
+        writer = GGUFWriter(None, "deepseek4")
+        with self.assertRaises(ValueError):
+            writer._pack_val([], GGUFValueType.ARRAY, add_vtype=True)
 
     def run_converter(self, *arguments: str) -> subprocess.CompletedProcess[str]:
         environment = os.environ.copy()

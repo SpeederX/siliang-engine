@@ -54,6 +54,8 @@ ENGINE_DELTA_FILES = (
     "common/common.cpp",
     "common/common.h",
     "common/speculative.cpp",
+    "gguf-py/gguf/gguf_reader.py",
+    "gguf-py/gguf/gguf_writer.py",
     "ggml/include/ggml-alloc.h",
     "ggml/include/ggml-backend.h",
     "ggml/include/ggml-cpu.h",
@@ -98,6 +100,8 @@ ENGINE_DELTA_FILES = (
     "src/siliang-moe-runtime.h",
     "tests/CMakeLists.txt",
     "tests/test-arg-parser.cpp",
+    "tests/test-llama-archs.cpp",
+    "tests/test-recurrent-state-rollback.cpp",
     "tests/test-siliang-prefill.cpp",
     "tools/server/server-context.cpp",
 )

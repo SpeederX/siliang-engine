@@ -63,6 +63,15 @@ K216/R12/P12 server command, Pi endpoint, policy options, and conservative
   routed-MoE prefill-microbatch experiment, Gemma4/Qwen3/Qwen3.6/Ornith/GPT-OSS trial recipes, and the Qwen3.8 Flash Next agent profiles are in
 [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md).
 
+For hybrid/recurrent models, a rejected prompt-cache trim now logs a warning
+and clears the slot's context state and checkpoints before processing the full
+prompt. This avoids terminating the server on an unsupported rollback. The
+recovery can cost a full prefill; see [prompt-cache recovery](docs/CONFIGURATION.md#recurrent-prompt-cache-recovery).
+
+The expert-major converter preserves final tensor bytes when no trailing
+padding is needed and round-trips explicitly typed empty metadata arrays; use
+the bundled `gguf-py` version. See [model preparation](tools/README.md).
+
 ## Performance
 
 Reference-workstation observations (hardware below), not universal throughput

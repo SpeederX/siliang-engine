@@ -3274,6 +3274,8 @@ private:
                     // used to determine the number of tokens added to the batch for the current slot
                     const auto n_tokens_prev = batch.size();
 
+                    bool prompt_trimmed = false;
+
                     // TODO: maybe move branch to outside of this loop in the future
                     if (slot.state == SLOT_STATE_STARTED) {
                         slot.stats.update_prompt_start();
@@ -3542,6 +3544,14 @@ private:
                             SLT_WRN(slot, "n_past was set to %d\n", n_past);
                         }
 
+                        const llama_pos trim_pos = slot.prompt.tokens.pos_next(n_past);
+                        if (!slot.mem.seq_rm_or_clear(slot.id, trim_pos, -1)) {
+                            SLT_WRN(slot, "prompt cache rollback rejected at position %d; clearing the slot and reprocessing the full prompt\n", trim_pos);
+                            slot.prompt.clear();
+                            n_past = 0;
+                        }
+                        prompt_trimmed = true;
+
                         slot.stats.n_prompt_cached    = n_past;
                         slot.stats.n_prompt_processed = 0;
 
@@ -3577,7 +3587,9 @@ private:
 
                     SLT_TRC(slot, "cached n_tokens = %d, memory_seq_rm [%d, end)\n", slot.prompt.n_tokens(), p0);
 
-                    slot.mem.seq_rm(slot.id, p0, -1);
+                    if (!prompt_trimmed) {
+                        slot.mem.seq_rm(slot.id, p0, -1);
+                    }
 
                     // If using an alora, there may be uncached tokens that come
                     // before the invocation sequence. When this happens, the

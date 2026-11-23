@@ -104,6 +104,76 @@ static double nmse(const float * a, const float * b, int n) {
     return mse_a0 == 0.0 ? (mse_ab == 0.0 ? 0.0 : std::numeric_limits<double>::infinity()) : mse_ab/mse_a0;
 }
 
+static bool test_prompt_trim_recovery(const common_params & params, llama_model * model, uint8_t fill) {
+    llama_context_ptr target(make_ctx(params, model, fill));
+    llama_context_ptr reference(make_ctx(params, model, fill));
+    auto plain_params = common_context_params_to_llama(params);
+    plain_params.n_seq_max = 1;
+    plain_params.n_rs_seq = 0;
+    llama_context_ptr draft(init_ctx(model, plain_params, fill));
+    if (!target || !reference || !draft) {
+        return false;
+    }
+    if (llama_n_rs_seq(target.get()) < 3) {
+        fprintf(stderr, "%s : skipping model without bounded rollback\n", __func__);
+        return true;
+    }
+
+    const int n_vocab = llama_vocab_n_tokens(llama_model_get_vocab(model));
+    std::vector<llama_token> old_prompt(32), new_prompt(16);
+    for (size_t i = 0; i < old_prompt.size(); ++i) {
+        old_prompt[i] = (llama_token) ((i + 3) % n_vocab);
+    }
+    for (size_t i = 0; i < new_prompt.size(); ++i) {
+        new_prompt[i] = (llama_token) ((i + 7) % n_vocab);
+    }
+    if (!decode_tokens(reference.get(), new_prompt, (uint32_t) new_prompt.size())) {
+        return false;
+    }
+    const float * reference_logits = llama_get_logits_ith(reference.get(), -1);
+    if (reference_logits == nullptr) {
+        return false;
+    }
+
+    common_memory memory;
+    memory.init(target.get(), draft.get());
+    for (llama_pos p0 : { 1, 29 }) {
+        memory.seq_rm(0, -1, -1);
+        if (!decode_tokens(target.get(), old_prompt, (uint32_t) old_prompt.size()) ||
+                !decode_tokens(draft.get(), old_prompt, (uint32_t) old_prompt.size())) {
+            return false;
+        }
+        // p0=1 exceeds the target's window; p0=29 succeeds there but the draft rejects it.
+        auto * rejected = p0 == 1 ? target.get() : draft.get();
+        if (llama_memory_seq_rm(llama_get_memory(rejected), 0, p0, -1) ||
+                memory.seq_rm_or_clear(0, p0, -1)) {
+            fprintf(stderr, "%s : expected a rejected trim and full clear at %d\n", __func__, p0);
+            return false;
+        }
+        for (auto * ctx : { target.get(), draft.get() }) {
+            if (llama_memory_seq_pos_max(llama_get_memory(ctx), 0) != -1 ||
+                    !decode_tokens(ctx, new_prompt, (uint32_t) new_prompt.size())) {
+                return false;
+            }
+            const float * logits = llama_get_logits_ith(ctx, -1);
+            if (logits == nullptr || nmse(reference_logits, logits, n_vocab) > 1e-5) {
+                fprintf(stderr, "%s : reset/replay differs from a fresh context at %d\n", __func__, p0);
+                return false;
+            }
+        }
+    }
+
+    common_memory target_only;
+    target_only.init(target.get());
+    if (!target_only.seq_rm_or_clear(0, 13, -1) ||
+            llama_memory_seq_pos_max(llama_get_memory(target.get()), 0) != 12) {
+        fprintf(stderr, "%s : supported trim must retain its prefix\n", __func__);
+        return false;
+    }
+    fprintf(stderr, "%s : rejected target/draft trims reset and replay correctly\n", __func__);
+    return true;
+}
+
 // Roll back multiple sequences, then replay them in a single batch whose
 // per-seq token count exceeds n_ubatch: each seq's replay spans several
 // ubatches while its rollback restore is still pending. Compared against a
@@ -511,6 +581,9 @@ int main(int argc, char ** argv) {
 
     for (uint8_t fill : { 0, 0x3e }) {
         fprintf(stderr, "%s : testing with cache fill 0x%02x\n", __func__, fill);
+        if (!test_prompt_trim_recovery(params, model, fill)) {
+            return 1;
+        }
         if (test_rollback(params, model, fill) != 0) {
             return 1;
         }

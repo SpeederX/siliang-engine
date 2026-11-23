@@ -575,6 +575,29 @@ as historical evidence rather than replacing it with the pressure-qualified
 M4 remains inconclusive/no-go for v0.1.3 because there is no useful integrated
 architecture path to claim.
 
+## Recurrent prompt-cache recovery
+
+Reusing a common prompt prefix may require a partial rollback of recurrent
+state. A model can reject that operation even after a checkpoint has been
+selected. The server handles a rejected initial trim by clearing the slot's
+sequence in the target and optional draft context, discarding its prompt/checkpoint metadata,
+and processing the complete new prompt. It logs `prompt cache rollback
+rejected at position ...; clearing the slot and reprocessing the full prompt`.
+The response reports zero prompt-cache hits for that request.
+
+This recovery replaces the fatal `failed to remove sequence` path at request
+startup. It does not make unsupported partial rollback possible. A recovered
+request can need a full prefill and must not be counted as a successful prefix
+reuse measurement. The expert-weight L2/L1 caches and their settings are
+independent of this context-cache reset.
+
+The native recurrent-state regression checks rejection by the target context
+and by a draft context after the target has already accepted a bounded trim.
+After recovery, both contexts must produce logits matching a fresh context.
+The generated-model server regression also compares greedy completion tokens
+with fresh-prompt controls across changed suffixes, identical prompts and
+message-boundary checkpoints. See [test commands](../scripts/README.md#recurrent-prompt-cache-regression).
+
 ## Memory sizing
 
 L2 reserves and commits real system memory. Homogeneous models reserve K + R

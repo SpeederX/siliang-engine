@@ -526,10 +526,8 @@ def main():
         if written % (1 << 30) < nbytes:
             print(f"  ... {written/1024**3:.1f} GiB", flush=True)
 
-    # The last layer may end before data_total if its region is the final one;
-    # make the file exactly as long as the directory claims.
-    fout.seek(data_start + data_total - 1)
-    fout.write(b"\0")
+    # Extend trailing padding without overwriting a tensor that ends at EOF.
+    fout.truncate(data_start + data_total)
     fout.flush()
     wr.close()
     fin.close()

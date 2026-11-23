@@ -62,6 +62,12 @@ python .\scripts\check_expert_major.py --model "<expert-major-model.gguf>"
 The required result is `status: expert-major-metadata-ok`. A structural pass is
 necessary but does not replace a runtime correctness comparison.
 
+Conversion preserves explicitly typed empty metadata arrays, including their
+element type. Use this repository's `gguf-py` version for that round trip.
+Final file sizing extends alignment padding without overwriting a tensor that
+ends at the file boundary. The converter regression suite checks both cases
+and compares every expert byte in an unpadded synthetic model.
+
 ## Files in this folder
 
 - `make_expert_major_gguf.py` writes the self-contained expert-major GGUF.

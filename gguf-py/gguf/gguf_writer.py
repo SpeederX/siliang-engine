@@ -1620,8 +1620,8 @@ class GGUFWriter:
             if not isinstance(val, Sequence):
                 raise ValueError("Invalid GGUF metadata array, expecting sequence")
 
-            if len(val) == 0:
-                raise ValueError("Invalid GGUF metadata array. Empty array")
+            if len(val) == 0 and sub_type is None:
+                raise ValueError("Invalid GGUF metadata array. Empty array requires an explicit element type")
 
             if sub_type is not None:
                 ltype = sub_type

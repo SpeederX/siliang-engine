@@ -64,6 +64,29 @@ PowerShell checks:
 .\scripts\test.ps1 -PythonExecutable "<python>"
 ```
 
+## Recurrent prompt-cache regression
+
+Build `test-llama-archs` and `test-recurrent-state-rollback` with tests enabled.
+On Windows the model generator requires a static build (`BUILD_SHARED_LIBS=OFF`).
+Generate the small Qwen fixture outside the repository, then run the native
+reset/replay regression and the opt-in server test:
+
+```powershell
+New-Item -ItemType Directory -Force "<fixture-directory>" | Out-Null
+& "<test-llama-archs>" -a qwen4exp -s 1 -o "<fixture-directory>"
+& "<test-recurrent-state-rollback>" -m "<fixture-directory>/qwen4exp-moe.gguf" -c 256 -b 64 -ub 64 -t 2 -ngl 0
+$env:SILIANG_TEST_SERVER = "<llama-server>"
+$env:SILIANG_TEST_QWEN_MODEL = "<fixture-directory>/qwen4exp-moe.gguf"
+$env:SILIANG_TEST_OUTPUT = "<evidence-directory>"
+python -m unittest discover -s tests -p test_siliang_prefill_decode_contract.py -v
+```
+
+The server test binds a temporary local port, records commands, generated token
+IDs, native timings and logs, and stops only its own server. It checks zero/four
+checkpoints and message spans against fresh-prompt greedy controls. Without
+the two required environment variables it is skipped. These are correctness
+checks, not throughput benchmarks.
+
 When a build directory is available, selected upstream CTest cases can be
 included:
 
