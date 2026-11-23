@@ -114,7 +114,7 @@ class ReleasePackagingContractTests(unittest.TestCase):
         self.assertIn("validate-linux:", text)
         self.assertIn("runs-on: ubuntu-24.04", text)
         self.assertIn("validate-macos:", text)
-        self.assertIn("runs-on: macos-15", text)
+        self.assertIn("runs-on: macos-26", text)
         self.assertIn("-DGGML_NATIVE=OFF", text)
         self.assertIn("-DGGML_BACKEND_DL=ON", text)
         self.assertIn("--list-devices", text)

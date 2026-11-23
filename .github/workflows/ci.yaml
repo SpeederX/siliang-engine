@@ -120,7 +120,7 @@ jobs:
 
   validate-macos:
     name: Validate macOS Metal compatibility
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 90
 
     steps:
